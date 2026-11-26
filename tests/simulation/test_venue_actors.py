@@ -763,6 +763,53 @@ def test_archived_duration_replan_gets_a_feasible_private_budget_without_relaxin
         assert result.availability_reviews[-1]["conflict"] is None
 
 
+@pytest.mark.parametrize(("daypart", "clock", "expected"), [
+    ("上午", "10:00", "valid"), ("晚上", "22:00", "invalid"),
+])
+def test_archived_daypart_replan_keeps_the_actual_qualified_clock(daypart, clock, expected):
+    """重现 0038 的粗时段被错读成当前时刻，重选的具体时点仍按原可达窗口校验。"""
+    now = "2026-11-26T09:35:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("activity", can_arrive=True,
+        earliest_arrival="2026-11-26T09:48:00+08:00", free_from="2026-11-26T09:30:00+08:00",
+        free_until="2026-11-26T16:00:00+08:00"),))
+    first = '{"action":"send","text":"老板，上午我可以过去，有一底杭麻吗？"}'
+    ungrounded = ('{"claims":[{"kind":"arrival","quote":"上午我可以过去","local_date":"2026-11-26",'
+                  '"local_at":"2026-11-26T09:35:00+08:00","approximate":true}]}')
+    actual_text = f"我今天{daypart}十点以后能到，一底杭麻有位吗？"
+    corrected = json.dumps({"action": "send", "text": actual_text}, ensure_ascii=False)
+    extracted = json.dumps({"claims": [{"kind": "arrival", "quote": f"我今天{daypart}十点以后能到",
+        "local_date": "2026-11-26", "local_at": f"2026-11-26T{clock}:00+08:00"}]}, ensure_ascii=False)
+    captured = []
+    result = ModelActor(_client((first, ungrounded, corrected, extracted), captured)).decide(
+        context, trace_id="archived-0038-actual-clock")
+    assert result.status == expected and result.availability_reviews[0]["conflict"]
+    assert result.availability_reviews[-1]["claims"][0]["local_at"] == f"2026-11-26T{clock}:00+08:00"
+    assert "local_now 供日期和原话时段消歧，不是这个人声称的到店时刻" in captured[1]["messages"][0]["content"]
+    assert "说清上午、下午或晚上" in captured[2]["messages"][-2]["content"]
+    if expected == "valid":
+        assert result.action.text == actual_text
+    else:
+        assert result.action is None and "超出当前可达时段" in result.error
+
+
+@pytest.mark.parametrize("can_arrive", [True, False])
+def test_broad_daypart_visit_has_no_invented_clock_and_still_needs_a_possible_visit(can_arrive):
+    """模糊说上午到没有钟点，今天实际到不了时仍拦下这个赴约陈述。"""
+    now = "2026-11-26T09:35:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("activity", can_arrive=can_arrive,
+        earliest_arrival="2026-11-26T09:48:00+08:00", free_from="2026-11-26T09:30:00+08:00",
+        free_until="2026-11-26T16:00:00+08:00"),))
+    draft = '{"action":"send","text":"我上午可以过去，一底杭麻有位吗？"}'
+    claims = '{"claims":[{"kind":"visit","quote":"我上午可以过去","local_date":"2026-11-26"}]}'
+    captured = []
+    result = ModelActor(_client((draft, claims, '{"action":"wait"}'), captured)).decide(
+        context, trace_id="broad-morning-visit")
+    assert result.status == "valid"
+    assert result.action.action == ("send" if can_arrive else "wait")
+    assert (result.availability_reviews[0]["conflict"] is None) is can_arrive
+    assert "local_at" not in result.availability_reviews[0]["claims"][0]
+
+
 def test_physical_arrival_requires_current_world_and_uses_one_bounded_correction():
     captured = []
     context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("arrival",
