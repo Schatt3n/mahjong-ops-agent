@@ -131,10 +131,9 @@ def test_full_game_leaves_board_and_numbers_are_rebuilt() -> None:
 
     assert len(messenger.group_messages) == 2
     latest_text = messenger.group_messages[-1][1]
-    assert "1、2026-07-22 15:00" in latest_text
-    assert '如"1来"' in latest_text and '如"2来"' not in latest_text
-    assert "14:00" not in latest_text
-    assert store.get_latest_board_snapshot("room-1").items[0].game_id == second.game_id
+    latest_row, = store.get_latest_board_snapshot("room-1").items
+    assert latest_text == f"当前缺人局：\n{latest_row.rendered_text}"
+    assert latest_row.rendered_text.startswith("1、2026-07-22 15:00") and latest_row.game_id == second.game_id
 
 
 def test_quoted_board_number_resolves_exact_snapshot() -> None:
@@ -483,7 +482,7 @@ def test_member_discussion_receipt_cannot_create_self_recruitment_game(self_recr
     assert not store.games and not store.scheduled_tasks
 
 
-def test_mixed_board_claim_hint_only_points_to_ordinary_game(self_recruitment_store):
+def test_mixed_board_only_shows_numbered_rows_with_registration_requirements(self_recruitment_store):
     store = self_recruitment_store
     engine, _, message = _self_recruitment_setup(store)
     receipt = _self_recruitment_receipt(store, message)
@@ -499,9 +498,7 @@ def test_mixed_board_claim_hint_only_points_to_ordinary_game(self_recruitment_st
     ordinary_row = next(item for item in snapshot.items if item.game_id == ordinary.game_id)
     assert "群友自招（先联系发局人）" in own_row.rendered_text
     assert "群友自招" not in ordinary_row.rendered_text
-    assert f'可直接认领{ordinary_row.item_no}号，回复对应编号，如"{ordinary_row.item_no}来"' in snapshot.rendered_text
-    assert "群友自招请先联系发局人" in snapshot.rendered_text
-    assert f'如"{own_row.item_no}来"' not in snapshot.rendered_text
+    assert snapshot.rendered_text.splitlines() == ["当前缺人局：", *(item.rendered_text for item in snapshot.items)]
 
 
 def test_elapsed_scheduled_board_row_preserves_snapshot_and_rejects_unconfirmed_claim(
@@ -532,7 +529,7 @@ def test_elapsed_scheduled_board_row_preserves_snapshot_and_rejects_unconfirmed_
         )
         before = engine.publish("room-1", trace_id="before", publication_id="scheduled")
         assert before is not None
-        assert '回复编号即可认领，如"2来"' in before.rendered_text
+        assert before.rendered_text.splitlines() == ["当前缺人局：", *(item.rendered_text for item in before.items)]
         assert "晚到需先确认" not in before.rendered_text
         stamp = late_game.planned_start_at
         assert engine.publish("room-1", trace_id="exact-start", publication_id="scheduled") == before
@@ -546,8 +543,7 @@ def test_elapsed_scheduled_board_row_preserves_snapshot_and_rejects_unconfirmed_
         assert "原定开场时间已过" in after.items[0].rendered_text
         assert "仍在凑人，晚到需先确认" in after.items[0].rendered_text
         assert "原定开场时间已过" not in after.items[1].rendered_text
-        assert '可直接认领2号，回复对应编号，如"2来"' in after.rendered_text
-        assert "回复编号即可认领" not in after.rendered_text
+        assert after.rendered_text.splitlines() == ["当前缺人局：", *(item.rendered_text for item in after.items)]
         reference = store.resolve_message_reference(
             conversation_id=after.conversation_id, message_id=f"group_board:{after.snapshot_id}",
         )

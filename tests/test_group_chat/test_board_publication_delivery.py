@@ -114,7 +114,7 @@ def test_board_start_boundary_refresh_survives_an_earlier_seat_update(store, mon
     with using_clock(lambda: first_task.due_at):
         assert scheduler.run_due_once(at=first_task.due_at) == 1
     first_board = store.get_latest_board_snapshot("room")
-    assert '如"1来"' in first_board.rendered_text
+    assert first_board.rendered_text == f"当前缺人局：\n{first_board.items[0].rendered_text}"
     successor, = (task for task in store.scheduled_tasks.values() if task.status == ScheduledTaskStatus.PENDING)
     assert successor.due_at == boundary
 
@@ -136,7 +136,7 @@ def test_board_start_boundary_refresh_survives_an_earlier_seat_update(store, mon
         assert scheduler.run_due_once(at=boundary) == 1
     fresh = store.get_latest_board_snapshot("room")
     assert "仍在凑人，晚到需先确认" in fresh.rendered_text
-    assert '如"1来"' not in fresh.rendered_text
+    assert fresh.rendered_text == f"当前缺人局：\n{fresh.items[0].rendered_text}"
     assert fresh.items[0].game_id == first_board.items[0].game_id == game.game_id
     assert len(sent) == 3 and fresh.external_message_id != first_board.external_message_id
     assert store.get_board_snapshot(first_board.snapshot_id).rendered_text == first_board.rendered_text
@@ -146,7 +146,7 @@ def test_board_start_boundary_refresh_survives_an_earlier_seat_update(store, mon
 
 
 def test_review_crossing_planned_start_does_not_send_the_pre_start_board(store, monkeypatch):
-    """如果审查中跨过开场，保留新刷新责任，旧可认领文案不能发送。"""
+    """如果审查中跨过开场，保留待刷新任务并阻止旧看板发送。"""
     stamp = now()
     start = stamp + timedelta(seconds=35)
     with using_clock(lambda: stamp):

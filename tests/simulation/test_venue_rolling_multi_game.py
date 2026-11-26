@@ -286,8 +286,9 @@ def test_board_clock_republishes_unstarted_table_after_planned_time_without_chat
     assert mapping == {1: game_id}
     game = store.require_game(game_id)
     planned = game.planned_start_at
-    original_board = store.get_board_snapshot_by_message_id(room, first_message_id).to_dict()
-    assert "回复编号即可认领" in original_board["rendered_text"]
+    original_snapshot = store.get_board_snapshot_by_message_id(room, first_message_id)
+    original_board = original_snapshot.to_dict()
+    assert original_snapshot.rendered_text == f"当前缺人局：\n{original_snapshot.items[0].rendered_text}"
     assert "晚到需先确认" not in original_board["rendered_text"]
     assert first_due < planned and board.next_due() == planned + timedelta(microseconds=1)
 
@@ -310,7 +311,7 @@ def test_board_clock_republishes_unstarted_table_after_planned_time_without_chat
     assert refreshed_mapping == mapping and len({first_message_id, second_message_id, third_message_id}) == 3
     refreshed = reopened_store.get_board_snapshot_by_message_id(room, third_message_id)
     assert "原定开场时间已过" in refreshed.rendered_text and "仍在凑人，晚到需先确认" in refreshed.rendered_text
-    assert "回复编号即可认领" not in refreshed.rendered_text
+    assert refreshed.rendered_text == f"当前缺人局：\n{refreshed.items[0].rendered_text}"
     assert reopened_store.get_board_snapshot_by_message_id(room, first_message_id).to_dict() == original_board
     assert reopened_store.require_game(game_id).to_dict() == game.to_dict()
     assert len([row for row in reopened_channel.events() if row["direction"] == "inbound"]) == 1

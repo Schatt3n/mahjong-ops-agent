@@ -323,33 +323,15 @@ class BoardEngine:
             return None
         items: list[BoardSnapshotItem] = []
         lines = ["当前缺人局："]
-        claimable_numbers: list[int] = []
-        has_self_recruitment = False
         as_of = self.clock()
         if publication_id is not None:
             # 在有租约的发布中先保留后继，避免中途审查或通道失败后漏掉开场边界。
             schedule_board_start_boundary(self.store, room_id, at=as_of, trace_id=trace_id)
         for item_no, game in enumerate(games, start=1):
             registration = board_registration_facts(game, at=as_of)
-            if registration["direct_claimable"]:
-                claimable_numbers.append(item_no)
-            has_self_recruitment |= registration["self_recruitment"]
             rendered = self._render_game(item_no, game, registration=registration)
             items.append(BoardSnapshotItem(item_no=item_no, game_id=game.game_id, rendered_text=rendered))
             lines.append(rendered)
-        if len(claimable_numbers) == len(games):
-            # 示例必须指向本次发布里实际存在的一项，只有一桌时不能示例第 2 项。
-            example = 2 if len(claimable_numbers) > 1 else 1
-            lines.extend(("", f'回复编号即可认领，如"{example}来"'))
-        else:
-            hints = []
-            if claimable_numbers:
-                numbers = "、".join(map(str, claimable_numbers))
-                hints.append(f'可直接认领{numbers}号，回复对应编号，如"{claimable_numbers[0]}来"')
-            if has_self_recruitment:
-                hints.append("群友自招请先联系发局人")
-            if hints:
-                lines.extend(("", "；".join(hints) + "。"))
         board_text = "\n".join(lines)
         snapshot_id = (
             "board_snapshot_" + hashlib.sha256(
