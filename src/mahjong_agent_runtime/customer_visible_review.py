@@ -686,7 +686,8 @@ def _review_search_outcome(query: dict[str, Any]) -> dict[str, Any]:
         return {"status": "unknown"}
     timing_options = [
         {"game_id": option["game"].get("game_id"), "planned_start_at": option["game"].get("planned_start_at")}
-        for option in result.get("nearby_options") or ()
+        for key in ("matches", "alternatives", "nearby_options")
+        for option in result.get(key) or ()
         if isinstance(option, dict) and option.get("requires_timing_confirmation") is True
         and isinstance(option.get("game"), dict)
     ]

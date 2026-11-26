@@ -21,6 +21,7 @@ from ..runtime_components import ActionProcessingResult
 from ..stores import AgentStore
 from ..tool_consistency import (
     EXPLICIT_PARTY_FACT_FIELDS,
+    apply_approximate_opening_search_evidence,
     explicit_fact_sources_for_call,
     latest_read_requirement,
     superseded_read_duration_evidence,
@@ -341,6 +342,7 @@ class ToolExecutionService:
 
         proposed_requirement = call.arguments.get("requirement")
         has_query_end_deadline = isinstance(proposed_requirement, dict) and "must_end_by" in proposed_requirement
+        verified = None
         if "verified_table_availability" in (context_payload or {}) or has_query_end_deadline:
             # 校验本轮来话支持的时间用途。拒绝条件只回灌，不擅自改写模型查询或替它选桌。
             lookup_scope = call.arguments.get("lookup_scope")
@@ -350,7 +352,8 @@ class ToolExecutionService:
             error = validate_table_availability(call, verified)
             if (not error and rechecked and lookup_scope == "personal" and isinstance(proposed_requirement, dict)
                     and any(key in proposed_requirement for key in ("start_time_range", "planned_start_at", "start_time"))
-                    and not (rechecked.get("opening_window") or rechecked.get("arrival_lookup_floor_at"))):
+                    and not (rechecked.get("opening_window") or rechecked.get("arrival_lookup_floor_at")
+                             or rechecked.get("nearby_opening_search"))):
                 error = "原话支持另查，但拟查的开场时间没有核实依据。保留另查目的，按已核实条件查询或澄清开场范围。"
             if error:
                 specific = (lookup_scope == "specific_table" or (lookup_scope is None and verified
@@ -431,6 +434,7 @@ class ToolExecutionService:
                 execution_scope=tool_execution_scope(self.tool_gateway.store, message),
             )
         result.call_id = call_id
+        result = apply_approximate_opening_search_evidence(result, verified)
         verified_schedule = (context_payload or {}).get("verified_table_availability") or {}
         if (call.name == "create_game" and result.called and result.allowed and not result.error
                 and verified_schedule.get("prior_play_until")):

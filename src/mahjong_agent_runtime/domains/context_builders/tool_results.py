@@ -481,9 +481,7 @@ def compact_tool_payload(payload: Any, *, public_inventory: bool = False, public
         compact["nearby_options"] = [
             compact_match(item, public_inventory=public_inventory) | {"match_kind": item.get("match_kind"),
                                    "relative_to_window": item.get("relative_to_window"),
-                                   "offset_minutes": item.get("offset_minutes"),
-                                   **({"requires_timing_confirmation": True}
-                                      if item.get("requires_timing_confirmation") is True else {})}
+                                   "offset_minutes": item.get("offset_minutes")}
             for item in (payload.get("nearby_options") or [])[:2] if isinstance(item, dict)
         ]
     if "matches" in payload:
@@ -541,6 +539,7 @@ def compact_match(match: Any, *, public_inventory: bool = False) -> dict[str, An
         "score": match.get("score"),
         "reasons": match.get("reasons"),
         "join_projection": match.get("join_projection"),
+        **({"requires_timing_confirmation": True} if match.get("requires_timing_confirmation") is True else {}),
         "game": match.get("game") if public_inventory else compact_game(match.get("game")),
     }
 

@@ -1960,6 +1960,87 @@ def test_han_minutes_keep_the_exact_arrival_lookup_boundary(backend, tmp_path):
         store._connection.close()
 
 
+@pytest.mark.parametrize("qualifier", ["前后", "左右", ""])
+def test_personal_approximate_opening_reads_actual_band_without_selecting_a_start(tmp_path, qualifier):
+    """V4 原话能查九点前后的真实桌，保留三小时硬上限和真正固定钟点的对照。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    center = "2026-11-25T21:00:00+08:00"
+    actual_range = {"start_at": "2026-11-25T20:30:00+08:00", "end_at": "2026-11-25T21:30:00+08:00"}
+    store = SQLiteAgentStore(tmp_path / "opening-approximation.sqlite3")
+    message = _incoming(f"老板好 想问今晚9点{qualifier}有没有无烟的杭州麻将 底注2到3 我最多打三个钟 能搭一桌吗", sent=at)
+    client = ReviewClient([_decision(clock_role="opening", clock_roles=None, max_duration_hours=3,
+        agreed_duration_hours=None, opening_window={"start_at": center, "end_at": center},
+        opening_dayparts=None, opening_customer_ref=None)])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                                   table_availability_client=client)
+    condition = {"game_type": "hangzhou_mahjong", "smoke_preference": "no_smoking"}
+
+    def submit(name, arguments, step):
+        action = AgentAction(goal="给顾客查今晚现成桌", objective_status="needs_tool", reasoning_summary="核实可打时段",
+                             tool_calls=[ToolCall(name, arguments)])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="around-opening",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    def read(window, step, *, cap=3, nearby=False):
+        requirement = {**condition, "stake_range": {"min": 2, "max": 3}, "start_time_range": window}
+        if cap is not None:
+            requirement["max_duration_hours"] = cap
+        return submit("search_current_games", {"lookup_scope": "personal", "requirement": requirement,
+                                              "include_nearby": nearby}, step)
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        games = {}
+        for opening, hours in (("20:15", 2), ("20:35", 3), ("20:55", 2), ("21:00", 3), ("21:08", 3),
+                               ("21:10", 4), ("21:25", 2), ("22:00", 2)):
+            host = f"around-{opening}"
+            game, _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name=host,
+                known_players=[{"customer_id": host}], requirement={**condition, "stake": "2", "duration_hours": hours,
+                    "planned_start_at": f"2026-11-25T{opening}:00+08:00"}, trace_id=host)
+            games[opening] = game.game_id
+
+        assert "最多可打时长" in read(actual_range, 1, cap=None).error
+        result = read(actual_range, 2)
+        assert result.called is bool(qualifier)
+        if qualifier:
+            assert result.result["requirement"]["start_time_range"] == actual_range
+            expected = {games[at] for at in ("20:35", "20:55", "21:00", "21:08", "21:25")}
+            matches = result.result["matches"]
+            assert {row["game"]["game_id"] for row in matches} == expected
+            flagged = expected - {games["21:00"]}
+            compact = compact_tool_payload(result.result)
+            assert {row["game"]["game_id"] for row in compact["matches"] if row.get("requires_timing_confirmation")} == flagged
+            review_action = AgentAction(goal="介绍实际开场", objective_status="waiting_user", reasoning_summary="等顾客确认")
+            presented = build_reply_self_review_payload(message=message, action=review_action, review_items=[],
+                context_payload={"turn_tool_evidence": [result.to_dict()]}, review_scope="reply_to_user")
+            timing = presented["semantic_fidelity_contract"]["game_availability_evidence"]["latest_search"]
+            assert {row["game_id"] for row in timing["options_requiring_timing_confirmation"]} == flagged
+            point = read({"start_at": center, "end_at": center}, 3, nearby=True)
+            assert {row["game"]["game_id"] for row in point.result["nearby_options"]} == {games["20:55"], games["21:08"]}
+            assert "包含该中心" in read({"start_at": center, "end_at": center}, 4).error
+            assert "包含该中心" in read({"start_at": "2026-11-25T20:00:00+08:00",
+                                         "end_at": "2026-11-25T20:45:00+08:00"}, 5).error
+            assert "范围保持" in read({"start_at": "2026-11-25T20:30:00+08:00",
+                                      "end_at": "2026-11-26T07:00:00+08:00"}, 6).error
+            for step, opening in enumerate(({"planned_start_at": center}, {"start_time_kind": "asap_when_full"}), 7):
+                create = submit("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                    "requirement": {**condition, "stake_range": {"min": 2, "max": 3}, "max_duration_hours": 3,
+                                    **opening}}, step)
+                assert not create.allowed and not create.called and "近似开场" in create.error
+                assert create.result["table_availability_evidence"]["opening_window"] is None
+        else:
+            assert "按核实的时段" in result.error
+            exact = read({"start_at": center, "end_at": center}, 3)
+            assert [row["game"]["game_id"] for row in exact.result["matches"]] == [games["21:00"]]
+            assert not exact.result["matches"][0].get("requires_timing_confirmation")
+
+    assert set(store.games) == set(games.values()) and not store.room_reservations and len(client.calls) == 1
+    store._connection.close()
+
+
 def test_approximate_han_minutes_allow_a_read_without_authorizing_creation():
     """近似到店允许查桌。分钟没有核实依据时，不能借无精确词面跳过建桌核对。"""
     at = SENT.replace(hour=18, minute=55)

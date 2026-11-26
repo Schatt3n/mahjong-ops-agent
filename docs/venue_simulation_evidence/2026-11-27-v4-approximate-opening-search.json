@@ -1,0 +1,44 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "trace_id": "trace_9f4e27b5c0fd70c2bd7953db",
+  "customer_message_id": "customer:role-event:7b0200a66c507bbbe06503f8bdb1192cee094e836f30900ae2edbc83e223a900",
+  "actual_reply_id": "outbound:trace_9f4e27b5c0fd70c2bd7953db:1",
+  "customer": "老板好 想问今晚9点前后有没有无烟的杭州麻将 底注2到3 我最多打三个钟 能搭一桌吗",
+  "actual_reply": "稍等一下",
+  "clock_source": {
+    "clock_text": "9点",
+    "qualifier": "前后",
+    "local_candidate_at": "2026-11-25T21:00:00+08:00",
+    "resolution": "explicit_daypart"
+  },
+  "original_independent_review": {
+    "clock_role": "opening",
+    "opening_window": {
+      "start_at": "2026-11-25T21:00:00+08:00",
+      "end_at": "2026-11-25T21:00:00+08:00"
+    },
+    "has_fixed_opening_authority": false,
+    "max_duration_hours": 3,
+    "agreed_duration_hours": null
+  },
+  "observed_read": {
+    "step_index": 3,
+    "lookup_scope": "personal",
+    "start_time_range": {
+      "start_at": "2026-11-25T20:30:00+08:00",
+      "end_at": "2026-11-25T21:30:00+08:00"
+    },
+    "called": false,
+    "error": "这次还没有查到库存结果。请保留其他查局条件，按核实的时段用 start_time_range 重试。start_at=2026-11-25T21:00:00+08:00，end_at=2026-11-25T21:00:00+08:00。不要另填固定开场或人齐开的开场方式。",
+    "rejected_search_calls_in_trace": 9
+  },
+  "offline_sqlite_control": {
+    "proposal": "保留实际 20:30 至 21:30 的查询参数和三小时上限。",
+    "exact_center_candidate": "21:00",
+    "matching_candidates_requiring_timing_confirmation": ["20:35", "20:55", "21:08", "21:25"],
+    "too_long_excluded": "21:10 开，打四小时。",
+    "outside_submitted_range_excluded": ["20:15", "22:00"],
+    "single_point_with_backend_nearby_options": ["20:55", "21:08"],
+    "safety_controls": ["区间不覆盖原话中心时拒绝。", "跨出原话时段时拒绝。", "固定开场与人齐开写入均受阻。", "原话只有九点整时仍按原钟点范围核对。"]
+  }
+}

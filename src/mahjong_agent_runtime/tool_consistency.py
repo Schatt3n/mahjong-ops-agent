@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, time, timezone
 from typing import Any
 
@@ -147,6 +148,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
             return "本次未核实为硬离店，不能把希望或大约打到的时点写入 must_end_by。"
         if play_until and (unsupported_duration or (proposed_cap is not None and duration_cap is None)):
             return "可打到的钟点不是固定时长或小时上限。请保留已核实的时间条件，省略未明确约定的小时数。"
+        if "nearby_opening_search" in evidence:
+            return _validate_approximate_opening_search(call, proposed, evidence["nearby_opening_search"])
         if earliest is None:
             arrival_by = _aware_datetime(evidence.get("arrival_by_at"))
             if arrival_by and _uses_arrival_by_as_opening_filter(proposed, arrival_by):
@@ -179,6 +182,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         return None
 
     # 能赶上某桌只说明可以考虑参加，不能把到店时刻写成店家和顾客已经约好的开场。
+    if "nearby_opening_search" in evidence:
+        return "顾客给了要查的近似开场，尚未确认如何开新局。先反馈实查选项或确认开场安排。"
     stamp = now()
     try:
         lifecycle = derive_game_lifecycle(proposed, created_at=stamp)
@@ -216,6 +221,46 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         ):
             return f"拟建局的安排超出顾客离店时间 {hard_departure.isoformat()}，应先核实实际开场或时长。"
     return None
+
+
+def _validate_approximate_opening_search(call: ToolCall, proposed: dict, timing: dict | None) -> str | None:
+    """查附近可以提实际筛选范围。该范围不替顾客选定开场或承诺接受。"""
+    try:
+        window = current_game_query_start_range(proposed)
+    except ValueError:
+        return "拟查的开场范围无效。"
+    has_fixed_filter = any(proposed.get(key) for key in ("start_time_kind", "start_time", "planned_start_at"))
+    if timing is None:
+        return "这个近似钟点尚不能核实。保留其他条件，移除猜测的开场过滤。" if window or has_fixed_filter else None
+    center = _aware_datetime(timing["center_at"])
+    start, end = (_aware_datetime(timing[key]) for key in ("period_start_at", "period_end_at"))
+    if (window is None or has_fixed_filter or not start <= window[0] <= center <= window[1] <= end
+            or window[0] == window[1] and call.arguments.get("include_nearby") is False):
+        return (f"顾客要查 {center.isoformat()} 前后的现成桌。请用包含该中心的 start_time_range，"
+                f"范围保持在 {start.isoformat()} 至 {end.isoformat()} 内，不填固定开场。"
+                "用中心单点检索时保留临近备选。")
+    return None
+
+
+def apply_approximate_opening_search_evidence(result: ToolResult, evidence: dict | None) -> ToolResult:
+    """保留实际 SQL 区间与其他匹配条件，单列每张非中心场次还需确认时间。"""
+    timing = (evidence or {}).get("nearby_opening_search")
+    if (result.name != "search_current_games" or not result.called or not result.allowed or result.error or not timing
+            or result.result.get("lookup_scope") == "specific_table"):
+        return result
+    center, start, end = (_aware_datetime(timing[key]) for key in ("center_at", "period_start_at", "period_end_at"))
+    projected = dict(result.result)
+    for key in ("matches", "alternatives", "nearby_options"):
+        if key not in projected:
+            continue
+        options = []
+        for option in projected[key]:
+            opening = _aware_datetime(option["game"].get("planned_start_at"))
+            if opening is None or not start <= opening <= end:
+                continue
+            options.append({**option, "requires_timing_confirmation": True} if opening != center else option)
+        projected[key] = options
+    return replace(result, result=projected)
 
 
 def superseded_read_duration_evidence(
