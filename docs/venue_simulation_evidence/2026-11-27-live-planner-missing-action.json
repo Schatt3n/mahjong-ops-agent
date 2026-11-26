@@ -1,0 +1,115 @@
+{
+  "source_run": "2026-11-25-real-85ac9eba42",
+  "source_code_commit": "c60faeb",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev2_20261127/2026-11-25-real-85ac9eba42",
+  "agent_trace_id": "trace_d0b37ad7424df77effe7c95c",
+  "role_event": {
+    "actor_id": "venue-sender-0437",
+    "message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+    "triggering_message_id": "outbound:trace_e7e87929b7d04296be97e9f4:1",
+    "sent_at": "2026-11-25T19:02:00+08:00",
+    "text": "老板好 七点以后带朋友打杭州麻将 底注1到3都行 帮我组一桌吧 打到十点左右",
+    "decision_status": "valid"
+  },
+  "planner_responses": [
+    {
+      "step_index": 1,
+      "call_id": "llm_call_80f290547ac1498b8e44b3325eaed36d",
+      "attempt_id": "llm_attempt_849a51f5fae94927bb736ae59a58e91c",
+      "response_text_sha256": "7d10cf64feff0f1d6a18cc014c33f717081eab0e56b67971c0f0b3836671ff9c",
+      "http_status": 200,
+      "body_complete": true,
+      "response_status": "completed",
+      "incomplete_reason": null,
+      "prompt_tokens": 42820,
+      "completion_tokens": 865,
+      "returned_root_keys": [
+        "blockers",
+        "goal",
+        "objective_plan",
+        "objective_state",
+        "objective_status",
+        "reasoning_summary",
+        "reply_scope"
+      ]
+    },
+    {
+      "step_index": 2,
+      "call_id": "llm_call_779519388a9c4ff688254fa4dea3bf20",
+      "attempt_id": "llm_attempt_e8c88eb0e3174beda123dd0944884713",
+      "response_text_sha256": "a07ea83eabbdd36da9f58acdfaed7582a0dd32bf962be335f3855312be4110b3",
+      "http_status": 200,
+      "body_complete": true,
+      "response_status": "completed",
+      "incomplete_reason": null,
+      "prompt_tokens": 40302,
+      "completion_tokens": 846,
+      "returned_root_keys": [
+        "goal",
+        "objective_plan",
+        "objective_state",
+        "objective_status",
+        "reasoning_summary",
+        "reply_scope"
+      ]
+    },
+    {
+      "step_index": 3,
+      "call_id": "llm_call_603f92272c3e43b4bd929e0e12dec25d",
+      "attempt_id": "llm_attempt_3a109505b1dc43b780c9788e7d50fd73",
+      "response_text_sha256": "9ef76247b25ea7e96d4f4c1c63c10839c52773debb40337f49a05026dfdee254",
+      "http_status": 200,
+      "body_complete": true,
+      "response_status": "completed",
+      "incomplete_reason": null,
+      "prompt_tokens": 41009,
+      "completion_tokens": 948,
+      "returned_root_keys": [
+        "active_game_id",
+        "active_party_seat_count",
+        "customer_id",
+        "data_freshness",
+        "display_name",
+        "execution_mode",
+        "goal",
+        "next_action_hint",
+        "objective_plan",
+        "objective_state",
+        "objective_status",
+        "queries_executed",
+        "reasoning_summary",
+        "reply_scope",
+        "unresolved_ambiguities",
+        "writes_executed"
+      ]
+    }
+  ],
+  "contract_rejection": {
+    "missing_root_fields_in_every_response": [
+      "reply_to_user",
+      "tool_calls",
+      "needs_human",
+      "stop_reason"
+    ],
+    "business_tools_called": false
+  },
+  "actual_delivery": {
+    "next_step_index": 4,
+    "runtime_status": "needs_help",
+    "runtime_reason": "agent_loop_no_progress",
+    "outputs": [
+      {
+        "message_id": "outbound:trace_d0b37ad7424df77effe7c95c:1",
+        "text": "稍等一下"
+      }
+    ]
+  },
+  "diagnosis": "三次原生 Responses 均完整结束，正文可解析为单一 JSON 对象，缺少回复、工具调用、人工升级和继续或停止所需字段。三步均无业务工具执行或写入。顾客已委托组桌，同行总人数仍需核实。",
+  "bounded_retry": "上一步完整 HTTP 响应同时漏掉四个动作字段时，在现有合同重试内补充动作字段结构和继续条件。保留原始证据及工具权限校验。由模型重新生成动作，维持原有重试步数。",
+  "verification": {
+    "offline_test": "tests/test_action_response_source.py::test_completed_plan_only_response_requests_full_action_without_executing_the_plan",
+    "negative_controls": "没有完整 HTTP 来源或未同时遗漏四个动作字段时，沿用一般合同反馈。",
+    "offline_tests_passed": 302,
+    "live_replay": "pending"
+  }
+}

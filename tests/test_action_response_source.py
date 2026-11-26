@@ -11,6 +11,7 @@ import pytest
 
 from mahjong_agent_runtime import AgentAction, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, UserMessage
 from mahjong_agent_runtime.budget import TokenBudget
+from mahjong_agent_runtime.domains.context_builders import output_contract
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
 from mahjong_agent_runtime.llm import (
     AgentLLMConfig, LLMCompletionText, OpenAICompatibleAgentClient, compact_model_response_source,
@@ -327,9 +328,11 @@ class RecordingClient:
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.contexts = []
+        self.messages = []
 
     def complete(self, messages, **kwargs):
         self.contexts.append(json.loads(messages[-1]["content"]))
+        self.messages.append(deepcopy(messages))
         return self.outputs.pop(0)
 
 
@@ -377,6 +380,76 @@ def test_consecutive_empty_responses_keep_distinct_exact_sources_through_real_ru
     assert not store.games and not store.invite_drafts and not store.outbound_message_drafts
     turns = [turn.to_dict() for turn in store.recent_turns("source-chat", limit=100)]
     assert "DIAGNOSTIC_PRIVATE_CANARY" not in json.dumps(turns)
+
+
+def test_completed_plan_only_response_requests_full_action_without_executing_the_plan(store):
+    message = UserMessage(conversation_id="action-envelope", sender_id="customer", sender_name="客户",
+        text="七点以后带朋友打杭州麻将，帮我组一桌吧，打到十点左右。", message_id="envelope-input")
+    plan_only = {
+        "goal": "按原话处理组局委托",
+        "objective_status": "needs_tool",
+        "reasoning_summary": "先查现成桌，再核对人数。",
+        "objective_state": {"missing_facts": ["实际同行人数"]},
+        "objective_plan": [{"step_id": "s1", "title": "查现成桌", "status": "pending", "tool": "search_current_games"},
+                           {"step_id": "s2", "title": "建候选桌", "status": "pending", "tool": "create_game"}],
+    }
+    raw = _text(json.dumps(plan_only, ensure_ascii=False), number=4)
+    repeated = _text(json.dumps({**plan_only, "reply_scope": {"requested_information": "能否组到"}}, ensure_ascii=False),
+        number=5)
+    valid = json.loads(_waiting())
+    valid["reply_to_user"] = "你们一共几个人？"
+    valid["reasoning_summary"] = "核实同行人数后再安排。"
+    valid["stop_reason"]["why"] = "需要核实同行人数"
+    client = RecordingClient([raw, repeated, _text(json.dumps(valid, ensure_ascii=False), number=6)])
+    trace = InMemoryTraceRecorder()
+    result = AgentRuntime(store=store, llm_client=client, trace_recorder=trace).handle_user_message(message,
+        trace_id="source-trace")
+
+    assert result.status == "waiting_user"
+    assert result.final_reply == "你们一共几个人？"
+    assert len(client.messages) == 3
+    assert client.messages[0][0] == client.messages[1][0] == client.messages[2][0]
+    for request in client.messages[1:]:
+        prompt = next(item["content"] for item in request if item["content"].startswith("【补齐主模型动作】"))
+        shape, _ = json.JSONDecoder().raw_decode(prompt[prompt.index('{"goal"'):])
+        assert shape.keys() == set(output_contract()["required_keys"])
+        assert shape["stop_reason"].keys() == {
+            key for key, description in output_contract()["stop_reason_contract"].items()
+            if description.startswith("required ")
+        }
+        assert request[-1]["role"] == "user"
+    assert all(not item["content"].startswith("【补齐主模型动作】") for item in client.messages[0])
+    rejected = [event.content for event in trace.events if event.step == "action_contract_error"]
+    hints = [event.content for event in trace.events if event.step == "agent_action_envelope_retry_prompt"]
+    assert [(row["step_index"], row["rejected_response_source"]) for row in hints] == [
+        (idx + 1, row["response_source"]) for idx, row in enumerate(rejected, start=1)
+    ]
+    assert [row["response_source"] for row in rejected] == [
+        model_response_source(value, trace_id="source-trace", step_index=idx)
+        for idx, value in enumerate((raw, repeated), start=1)
+    ]
+    assert not store.games and not store.invite_drafts and not store.outbound_message_drafts
+    assert not [event for event in trace.events if event.step == "tool_called"]
+
+
+@pytest.mark.parametrize("qualifying_http", [False, True])
+def test_action_envelope_hint_requires_complete_http_and_the_missing_execution_fields(store, qualifying_http):
+    if qualifying_http:
+        partial = json.loads(_waiting())
+        partial.pop("reply_to_user")
+        rejected = _text(json.dumps(partial, ensure_ascii=False))
+    else:
+        rejected = '{"goal":"组局","objective_status":"needs_tool","reasoning_summary":"先查"}'
+    client = RecordingClient([rejected, _text(_waiting(), number=2)])
+    trace = InMemoryTraceRecorder()
+    message = UserMessage(conversation_id="action-envelope-negative", sender_id="customer", sender_name="客户", text="帮我看看")
+    result = AgentRuntime(store=store, llm_client=client, trace_recorder=trace).handle_user_message(message,
+        trace_id="source-trace")
+
+    assert result.status == "waiting_user"
+    assert any(event.step == "action_contract_error" for event in trace.events)
+    assert not any(event.step == "agent_action_envelope_retry_prompt" for event in trace.events)
+    assert not any(item["content"].startswith("【补齐主模型动作】") for item in client.messages[1])
 
 
 def test_source_survives_post_rejection_checkpoint_and_restart(store, monkeypatch):

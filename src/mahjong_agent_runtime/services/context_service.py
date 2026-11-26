@@ -16,6 +16,7 @@ from ..domains.context_builders.tool_results import (
     reference_shared_query_contracts,
     reference_shared_tool_schemas,
 )
+from ..llm import compact_model_response_source
 from ..token_estimation import estimate_tokens
 from ..hooks import HookManager
 from ..models import AgentAction, StateTransition, ToolResult, UserMessage
@@ -30,6 +31,24 @@ _TOOL_PHASE_RETRY = (
     '"objective_status":"needs_tool","reply_to_user":"","stop_reason":{"can_stop":false,"depends_on_tool_results":true}。'
     "重提完整动作，只提交当下可执行的调用。先看真实工具结果，再完成或向顾客提问。"
     "不要把上一步未执行的计划当成已完成。"
+)
+
+
+_MISSING_ACTION_FIELDS = {
+    f"missing required key: {key}" for key in ("reply_to_user", "tool_calls", "needs_human", "stop_reason")
+}
+_ACTION_ENVELOPE_RETRY = (
+    "【补齐主模型动作】上一次模型已返回完整正文，但缺少执行和回复所需的动作字段，整步未通过动作合同，也未执行。"
+    "根据本轮真实来话、已执行的工具结果和 available_tools 重新生成一个完整 AgentAction。"
+    "以下是完整根字段的类型示意，填实际值，不要照抄类型占位："
+    '{"goal":"string","objective_status":"string","reasoning_summary":"string",'
+    '"reply_to_user":"string","needs_human":"boolean","stop_reason":'
+    '{"can_stop":"boolean","why":"string","pending_work":["string"],"depends_on_tool_results":"boolean"},'
+    '"objective_state":{},"objective_plan":[],"plan_revision_reason":"string","tool_calls":[]}'
+    "先写齐动作字段，再写简短状态和计划，最后写 tool_calls。"
+    "本步需要工具时，选已授权且当下可执行的实际调用，使用 needs_tool、空回复、can_stop=false 和非空 pending_work。"
+    "只回复或等待时，使用对应终态、空工具数组和 can_stop=true；静默仍按原合同声明。"
+    "不把计划当成已执行事实，不因补齐结构添加未知业务事实或扩大授权。"
 )
 
 
@@ -80,6 +99,18 @@ class ContextLifecycleManager:
                for item in pending_tool_results):
             # 只提升本步正式合同错误的修复提示。原始提案仍是未执行的审计证据，绝不在这里改写工具。
             built.messages.insert(1, {"role": "system", "content": _TOOL_PHASE_RETRY})
+        for item in pending_tool_results:
+            if item.name != "agent_action_contract" or not _MISSING_ACTION_FIELDS.issubset(item.result.get("errors") or ()):
+                continue
+            source = compact_model_response_source(item.result.get("response_source"))
+            if (source and source["http_response_complete"] and source["trace_id"] == trace_id
+                    and source["step_index"] == step_index - 1):
+                # 只补充上一完整回执缺少的协议形状，继续用原请求和权限选择动作。
+                built.messages.insert(len(built.messages) - 1, {"role": "system", "content": _ACTION_ENVELOPE_RETRY})
+                self.trace_recorder.record(trace_id, "agent_action_envelope_retry_prompt", {
+                    "step_index": step_index, "rejected_response_source": source,
+                })
+                break
         if progress_hint:
             # 提示仍是可信的系统指令，但步骤变化不能改写可跨请求复用的首条系统消息。
             built.messages.insert(len(built.messages) - 1, {"role": "system", "content": progress_hint})
