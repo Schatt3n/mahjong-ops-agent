@@ -34,7 +34,7 @@ from ..domains.creation_authorization import check_creation_authorization, creat
 from ..domains.game_participants import validate_game_accepts_confirmation
 from ..domains.model_context import has_agreed_game_duration
 from ..domains.invitation_policy import tool_confirms_seat
-from ..domains.participation_authorization import check_unknown_duration_participation
+from ..domains.participation_authorization import check_unknown_duration_participation, customer_participation_deadline
 from ..domains.table_availability_authorization import check_table_availability, requires_table_clock_review
 from ..domains.tools.participation_access import participation_access_source
 from ..domains.tools.validation import validate_schema
@@ -379,11 +379,11 @@ class ToolExecutionService:
                 step_index=step_index * 100 + call_index, timeout_seconds=self.creation_authorization_timeout_seconds,
                 trace_recorder=self.trace_recorder, observed_tool_results=observed_results,
             )
-        participation_scope = None
-        if (self.participation_authorization_client is not None and tool_confirms_seat(call)
+        participation_scope = departure_deadline = None
+        if (tool_confirms_seat(call)
                 and tool_execution_scope(self.tool_gateway.store, message) is None and definition is not None
                 and validate_schema(call.arguments, definition.schema) is None):
-            participation_scope = self._review_unknown_duration_participation(
+            participation_scope, departure_deadline = self._review_participation(
                 call, message, trace_id=trace_id, step_index=step_index * 100 + call_index,
             )
         self._emit(
@@ -406,6 +406,9 @@ class ToolExecutionService:
             reference_contract.pop("unknown_duration_participation", None)
             if participation_scope is not None:
                 reference_contract["unknown_duration_participation"] = participation_scope
+            reference_contract.pop("customer_departure_deadline", None)
+            if departure_deadline is not None:
+                reference_contract["customer_departure_deadline"] = departure_deadline
             # 报名目标只从本条输入的持久群路由事实恢复，不接受模型上下文或消息 metadata 提议的目标。
             reference_contract.pop("group_board_claim", None)
             if call.name in {"join_game", "record_candidate_reply"}:
@@ -457,26 +460,30 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, event, transition.to_dict())
         return SingleToolExecution(result=result)
 
-    def _review_unknown_duration_participation(self, call: ToolCall, message: UserMessage, *, trace_id: str,
-                                               step_index: int) -> dict[str, Any]:
-        """先核对本人据有牌局访问权，审核在写入栅栏之外；未审的标记仍供网关重查变化。"""
-        unavailable = {"scope": "unconfirmed"}
+    def _review_participation(self, call: ToolCall, message: UserMessage, *, trace_id: str,
+                              step_index: int) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """在锁外绑定本人时限及留位授权，写入事务按当前桌况重查。"""
+        unavailable = {"scope": "unconfirmed"} if self.participation_authorization_client is not None else None
         if call.arguments.get("customer_id") != message.sender_id:
-            return unavailable
+            return unavailable, None
         try:
             game = self.store.require_game(call.arguments["game_id"])
             validate_game_accepts_confirmation(game)
         except ValueError:
-            return unavailable
-        if has_agreed_game_duration(game.requirement) or not participation_access_source(
+            return unavailable, None
+        if not participation_access_source(
             self.store, game, conversation_id=message.conversation_id, sender_id=message.sender_id,
         ):
-            return unavailable
-        return check_unknown_duration_participation(
+            return unavailable, None
+        deadline = customer_participation_deadline(self.store, message, game)
+        if has_agreed_game_duration(game.requirement) or self.participation_authorization_client is None:
+            return unavailable, deadline
+        scope = check_unknown_duration_participation(
             self.store, self.participation_authorization_client, message, game, trace_id=trace_id,
             step_index=step_index, timeout_seconds=self.participation_authorization_timeout_seconds,
             trace_recorder=self.trace_recorder,
         )
+        return scope, deadline
 
     def stale_tool_result(
         self,

@@ -1,0 +1,50 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_code_commit": "3b12e71",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev3_20261127/2026-11-25-real-02ed5c7d2e",
+  "customer_case": "0103",
+  "prior_lookup": {
+    "trace_id": "trace_b842da3e3c319db39e9ecf82",
+    "customer_message_id": "customer:role-event:99325c23c5f6f57c0fc6fd5bc8675cd6b5f28b29e809683bfc15fdb32cba5556",
+    "text": "老板好，看到群里那桌19点半的川麻无烟，底注0.5到1块，还有位吗，我18点50左右能到，最多打到22点，能搭一桌吗？",
+    "same_table": "game_e10cce9c15c0",
+    "delivered_message_id": "outbound:trace_b842da3e3c319db39e9ecf82:1",
+    "delivered_text": "那桌19点半川麻无烟、0.5到1块，现在两个还差两个，18点50到正好赶得上开场，可以搭。就是这桌还没约定打到几点，你说的22点走一般没问题，但我不给你打包票。要给你报这一席吗？"
+  },
+  "enrollment": {
+    "trace_id": "trace_45b52e8d3a5ee0b079108543",
+    "customer_message_id": "customer:role-event:3e580811001963fbbcdc583b7b41d19807adf17f3cf3a27571f13840458b3003",
+    "sent_at": "2026-11-26T18:37:00+08:00",
+    "text": "老板好，麻烦帮我报这一席吧，18点50左右到，最多打到22点，能搭一桌就行。",
+    "participation_authorization": {
+      "trace_id": "trace_45b52e8d3a5ee0b079108543:participation:101",
+      "call_id": "llm_call_f507dc6c180045d493160e09f4a750df",
+      "http_response_complete": true,
+      "raw_response_sha256": "fb1095be92fc45ee4d1607183dc400873980788baf457780fa00e11900822a48",
+      "scope": "accept_delivered_offer",
+      "customer_ref": 3,
+      "shop_offer_ref": 2
+    },
+    "write": {
+      "tool": "join_game",
+      "tool_step": 1,
+      "game_id": "game_e10cce9c15c0",
+      "participant_status": "confirmed",
+      "remaining_seats": 1,
+      "planned_start_at": "2026-11-26T19:30:00+08:00",
+      "operational_default_planned_end_at": "2026-11-26T23:30:00+08:00",
+      "agreed_end_at": null
+    },
+    "delivered_message_id": "outbound:trace_45b52e8d3a5ee0b079108543:1",
+    "delivered_text": "好，给你报上了。"
+  },
+  "analysis": "顾客明说报名也再说最多打到22点，硬时限持续存在。前话的「一般没问题」缺少已约定的散场时间或经同桌证实的早离席安排。旧独立模型只证明其接受了已送达的同一桌提议，写入链路因此漏核顾客条件。系统的23:30是内部默认排期，不能据此认定已约定散场。",
+  "change": "占席写入核对本人明确的离店界限和桌况证据。在同一顾客收到同桌提议时，简短同意会保留原硬条件。只有实际约定在界限前结束，或顾客用本轮原话更新、明确解除条件，才能继续原有占席核验。网关和写锁内分别验证当前桌况，防止跨会话改时间后沿用旧结论。",
+  "offline_verification": {
+    "test": "tests/test_participation_authorization.py::test_real_0103_hard_play_cutoff_requires_matching_agreed_table_end",
+    "sqlite_scheduler_control": "复用V3的客户原话和送达内容，在两条独立私聊中真实查同一桌。即使独立审核放行原提议，19:30开打的桌在散场未约定、只有上限或明确23:30结束时均不写席。实际已约定22:00结束时可写入。",
+    "other_controls": "只说好时保留这桌原22:00界限，含桌况后来更改。本人明确能玩到散场或明确改为23:30时正常处理。网关检查后并发把22:00改成23:30，由事务再拦截。柔性希望、到店、询问桌况以及他人时间不启动此边界。",
+    "live_replay": "pending",
+    "focused_tests_passed": 749
+  }
+}

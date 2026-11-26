@@ -18,7 +18,8 @@ from .validation import validate_schema
 from .participation_access import participation_access_source
 from ..game_domain import planned_game_start_at
 from ..game_participants import (
-    LateParticipationRequiresConfirmation, ParticipationTermsChangedError, validate_current_participation_terms,
+    LateParticipationRequiresConfirmation, ParticipationDeadlineRequiresConfirmation, ParticipationTermsChangedError,
+    validate_current_participation_terms,
     validate_game_accepts_confirmation, validate_late_participation,
 )
 from ..invitation_policy import tool_confirms_seat
@@ -227,6 +228,9 @@ class ToolGateway:
             except LateParticipationRequiresConfirmation as exc:
                 authorization_error = str(exc)
                 validation_details = {"validation_error": exc.validation_error()}
+            except ParticipationDeadlineRequiresConfirmation as exc:
+                authorization_error = str(exc)
+                validation_details = _participation_deadline_feedback(exc)
             if authorization_error is None and call.name == "create_game":
                 # 只核对尚未执行的新建。已经真实建过的同一操作在前面的幂等分支复用旧收据。
                 checked_at = now()
@@ -331,6 +335,12 @@ class ToolGateway:
                 }, level="WARN")
                 result = ToolResult(name=call.name, called=False, allowed=False, error=str(exc),
                                     result={"validation_error": {"code": "participation_terms_changed", "message": str(exc)}})
+            except ParticipationDeadlineRequiresConfirmation as exc:
+                self._record(trace_id, "participation_deadline_blocked_before_write", {
+                    "tool_name": call.name, "step_index": step_index, **exc.validation_error(),
+                }, level="WARN")
+                result = ToolResult(name=call.name, called=False, allowed=False, error=str(exc),
+                                    result=_participation_deadline_feedback(exc))
             except Exception as exc:
                 self._record(
                     trace_id,
@@ -543,14 +553,24 @@ class ToolGateway:
 
 
 def _expected_participation_terms(contract: dict[str, Any]) -> dict[str, Any] | None:
-    """启用审查时仅认可本轮独立判定通过的桌况；空值区分未知时长缺少授权。"""
-    if "unknown_duration_participation" not in contract:
-        return None
-    decision = contract["unknown_duration_participation"]
+    """携带独立许可及本人时限，网关和 Store 共用同一份写入证据。"""
+    terms = None if "unknown_duration_participation" not in contract else {}
+    decision = contract.get("unknown_duration_participation")
     if (isinstance(decision, dict) and decision.get("scope") in ("direct_now", "accept_delivered_offer")
             and isinstance(decision.get("table"), dict)):
-        return decision["table"]
-    return {}
+        terms = decision["table"]
+    if deadline := contract.get("customer_departure_deadline"):
+        return {"reviewed_table_terms": terms, "customer_departure_deadline": deadline}
+    return terms
+
+
+def _participation_deadline_feedback(exc: ParticipationDeadlineRequiresConfirmation) -> dict[str, Any]:
+    """告知本次没有留位，后续核实条件或找合适的桌，避免重复写入。"""
+    return {
+        "validation_error": exc.validation_error(),
+        "instruction": "未占席。按顾客原话保留离店界限，先说明实际约定的散场时间或散场未定。"
+                       "需要先离席时确认同桌能否协调，或按该界限找其它桌。不要重复提交同一报名。",
+    }
 
 
 def backend_tool_idempotency_key(

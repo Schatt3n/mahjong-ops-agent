@@ -46,7 +46,7 @@ class _ReversedOfferReference(ValueError):
 
 def customer_authorization_evidence(
     store: AgentStore, message: UserMessage, *, same_table_offer: Callable[[ConversationTurn], bool] | None = None,
-    quoted_table_offer: str | None = None,
+    quoted_table_offer: str | None = None, include_customer_source: bool = False,
 ) -> list[dict[str, Any]]:
     """只使用本任务的本人来话及确实送达的本会话店家回复，排除撤回和系统记录。"""
     task = store.current_task_context(message.conversation_id, message.sender_id)
@@ -68,11 +68,17 @@ def customer_authorization_evidence(
         row = {"speaker": speaker, "text": turn.content[:800]}
         if speaker == "shop" and same_table_offer is not None:
             row["verified_same_table_offer"] = same_table_offer(turn)
+        elif speaker == "customer" and include_customer_source:
+            row.update(source_message_id=metadata.get("source_message_id") or turn.turn_id,
+                       sent_at=turn.occurred_at.isoformat())
         rows.append(row)
     if quoted_table_offer:
         rows.append({"speaker": "shop", "text": quoted_table_offer[:800], "verified_same_table_offer": True})
     if not message.metadata.get("internal_event") and message.text.strip():
-        rows.append({"speaker": "customer", "text": message.text, "current": True})
+        current = {"speaker": "customer", "text": message.text, "current": True}
+        if include_customer_source:
+            current.update(source_message_id=message.message_id, sent_at=message.sent_at.isoformat())
+        rows.append(current)
     return [dict(row, ref=index) for index, row in enumerate(rows[-20:], start=1)]
 
 

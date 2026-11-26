@@ -81,6 +81,13 @@ _PAST_DAYPART_CUE = re.compile(r"昨天|昨晚|前天|之前那")
 _PLAY_UNTIL_CLOCK_PREFIX = re.compile(
     r"[打玩](?:到|至)(?:\s*(?:约|大概|大约|差不多|今晚上?|今天|早上|上午|中午|下午|傍晚|晚上|晚间|凌晨))*\s*$"
 )
+_DEPARTURE_SUBJECT = r"(?:我(?:们|俩|这边)?\s*)?(?:(?:今天|今晚|明天|明晚)\s*)?"
+_DEPARTURE_DAYPART = r"(?:(?:今天|明天)\s*)?(?:早上|上午|中午|下午|傍晚|晚上|晚间|凌晨)?\s*"
+_HARD_DEPARTURE_PREFIX = re.compile(
+    rf"{_DEPARTURE_SUBJECT}(?:(?:(?:最多|最晚|最迟)(?:只能|只)?|只能|只可以)\s*[打玩待留](?:到|至)"
+    rf"|(?:不能|没法)\s*[打玩待留](?:过|超过))\s*{_DEPARTURE_DAYPART}"
+)
+_HARD_DEPARTURE_SUFFIX = re.compile(r"\s*(?:左右|前后)?\s*(?:必须|得|就得|最晚得|最迟得)\s*(?:走|离开|离店)")
 _NONFLEXIBLE_PLAY_END = re.compile(r"最晚|最迟|至迟|必须|只能|只可以|最多|至多|顶多|不能|不得|不超过|没法|不想|得走|要走|得离开")
 _CLOCK_RANGE_CONNECTOR = re.compile(r"\s*(?:到|至|~|—|–|-)(?:\s*(?:晚上|下午|上午|早上|中午|凌晨))?\s*")
 _EXPLICIT_OPENING_SELECTION = re.compile(
@@ -132,6 +139,39 @@ def qualified_table_clock(message: UserMessage) -> dict[str, Any] | None:
     if candidates:
         return {"clock_count": 1, **{key: value for key, value in candidates[0].items() if key != "clock_ref"}}
     return None
+
+
+def explicit_customer_play_deadline(text: str, *, sent_at: datetime) -> dict[str, Any] | None:
+    """只找本人明确的必须走或最多可打到的钟点，保留无唯一可核实时刻的硬条件。"""
+    anchor = parse_context_datetime(sent_at)
+    found = {}
+    for clause in _CLAUSE_SEPARATOR.split(unicodedata.normalize("NFKC", text)):
+        clause = clause.strip()
+        for clock in observe_clock_candidates(_source_clock_text(clause), anchor=anchor, include_source_spans=True):
+            start, end = clock["source_span"]
+            prefix = clause[:start]
+            has_hard_limit = _HARD_DEPARTURE_PREFIX.fullmatch(prefix) or (
+                re.fullmatch(_DEPARTURE_SUBJECT + _DEPARTURE_DAYPART, prefix)
+                and _HARD_DEPARTURE_SUFFIX.match(clause[end:])
+            )
+            if not has_hard_limit:
+                continue
+            at = _supported_role_time(clock, clause, anchor) if clock["qualifier"] is None else None
+            if at is None and clock["qualifier"] is None and clock["resolution"] in {"explicit_daypart", "explicit_day_or_24h"}:
+                dates = _lexical_dates(prefix, anchor.date())
+                if len(dates) == 1:
+                    day = next(iter(dates))
+                    clock_at = parse_context_datetime(clock["local_candidate_at"])
+                    if "今晚" in prefix and "凌晨" in prefix and day == anchor.date() and clock_at.hour < OVERNIGHT_SEARCH_END_HOUR:
+                        day += timedelta(days=1)
+                    anchored = datetime.combine(day, clock_at.timetz())
+                    if anchored > anchor:
+                        at = anchored
+            found[at.isoformat() if at else None] = clock["clock_text"]
+    if not found:
+        return None
+    deadline = next(iter(found)) if len(found) == 1 else None
+    return {"must_end_by": deadline, "clock_text": found[deadline] if len(found) == 1 else None}
 
 
 def _named_future_opening(message: UserMessage) -> dict[str, Any] | None:

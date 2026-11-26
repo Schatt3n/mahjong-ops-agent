@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from ..models import (
     Game,
@@ -23,6 +24,25 @@ if TYPE_CHECKING:
 
 class ParticipationTermsChangedError(ValueError):
     """占席事务读取的牌桌与本轮审核依据不一致，席位写入未发生。"""
+
+
+class ParticipationDeadlineRequiresConfirmation(ValueError):
+    """本人仍有明确离店界限，当前牌桌不能证明符合该界限。"""
+
+    def __init__(self, deadline: dict[str, Any], agreed_end: datetime | None) -> None:
+        """保存此次报名的可核验条件，供业务拒绝回执使用。"""
+        self.deadline = deadline
+        self.agreed_end = agreed_end
+        super().__init__("顾客的最晚离店条件与当前桌况尚未核实相容，未占席。")
+
+    def validation_error(self) -> dict[str, Any]:
+        """只反馈实际同桌约定和本人来源，内部排期默认值不构成可对客承诺。"""
+        return {
+            "code": "participation_departure_requires_confirmation",
+            "message": str(self),
+            "customer_deadline": self.deadline,
+            "agreed_end_at": self.agreed_end.isoformat() if self.agreed_end else None,
+        }
 
 
 class LateParticipationRequiresConfirmation(ValueError):
@@ -49,6 +69,12 @@ def participation_table_terms(game: Game) -> dict[str, Any]:
 def validate_current_participation_terms(game: Game, expected_participation_terms: dict[str, Any] | None) -> None:
     """在占席写锁内核对独立授权，已约定时长的桌允许沿用未审的空标记。"""
 
+    if expected_participation_terms and (deadline := expected_participation_terms.get("customer_departure_deadline")):
+        agreed_end = game.planned_end_at if has_agreed_game_duration(game.requirement) else None
+        latest = deadline.get("must_end_by")
+        if latest is None or agreed_end is None or agreed_end > datetime.fromisoformat(latest):
+            raise ParticipationDeadlineRequiresConfirmation(deadline, agreed_end)
+        expected_participation_terms = expected_participation_terms.get("reviewed_table_terms")
     if expected_participation_terms is None:
         return
     if expected_participation_terms == {} and has_agreed_game_duration(game.requirement):
