@@ -486,6 +486,97 @@ def test_private_turn_traces_same_preflight_to_planner_and_reply_review(tmp_path
         assert evidence["search_current_games"]["called"] and not evidence["search_current_games"]["result"]["matches"]
 
 
+@pytest.mark.parametrize("unconditional", [False, True])
+def test_v4_conditional_seat_denial_remains_truthful_without_reasking_clear_registration(tmp_path, unconditional):
+    """原桌已知，是否不等也报名不明时只澄清这项；真独立报名沿用真实占席回执。"""
+    at = datetime.fromisoformat("2026-11-26T19:37:00+08:00")
+    prior = "老板好 看板那桌人齐开的杭麻1块底还有位吗 我20:03能到 可以等我到再开吗"
+    offer = ("有位的，那桌杭麻1块底人齐开，现在一个人，还差三个。20:03能不能赶上不好说，"
+             "要等的话得桌上大家同意。你打的话我先给你记上？")
+    conditional = "要的 麻烦先给我记上 我这边尽量20:05前到 要是凑齐了大家愿意等就等我一下 谢谢"
+    separate = "我确认参加这桌，先给我留一个。等不了也照样报名，能等到20:05我只是顺便问问。"
+    body = separate if unconditional else conditional
+    first_denied_reply = "这桌杭麻人齐开，现在还没给你确认位子。你20:05前到，大家能不能等还没定。"
+    error_suggestion = "好的，先给你记上了。这桌人齐开，不一定能等到你。"
+    clarified = "现在还没给你留位。这桌人齐就开，要是大家等不了，你也想先报名吗？"
+    confirmed = "好，位子给你留上了。等不等到20:05还没定。"
+    final_text = confirmed if unconditional else clarified
+
+    def response(text, status, call=None):
+        return json.dumps(AgentAction(goal="核实这桌报名", objective_status=status, reasoning_summary="按同一桌实际情况办理",
+            tool_calls=[call] if call else [], reply_to_user=text, stop_reason={
+                "can_stop": call is None, "why": "按已知信息处理",
+                "pending_work": [] if status == "completed" else ["确认本桌"], "depends_on_tool_results": bool(call),
+            }).to_dict(), ensure_ascii=False)
+
+    def reviewed(text, *, approved=True):
+        flags = [] if approved else ["semantic_fact_loss"]
+        return json.dumps({"approved": approved, "needs_human": False, "violations": flags, "reasoning_summary": "核对是否占席",
+            "item_reviews": [{"item_id": "reply_to_user", "approved": approved, "violations": flags,
+                "suggested_safe_text": text, "reasoning_summary": "核对是否占席", "follow_up_commitments": []}]}, ensure_ascii=False)
+
+    store = SQLiteAgentStore(tmp_path / "participation.sqlite3")
+    traces = InMemoryTraceRecorder()
+    authorization = StubAuthorizationClient(permission("participate", "我确认参加这桌，先给我留一个。") if unconditional
+        else permission("waitlist", "麻烦先给我记上"))
+    guard = VenueWriteGuard(authorization, tmp_path / "authorization.jsonl")
+    reviewer = StaticAgentClient([reviewed(offer)] + ([] if unconditional else [reviewed(error_suggestion, approved=False)])
+                                 + [reviewed(final_text)])
+    main = StaticAgentClient([])
+    runtime = AgentRuntime(llm_client=main, store=store, tool_gateway=guard.guarded_gateway(store), trace_recorder=traces,
+                           reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    configure_venue_preflight_prompts(runtime, tmp_path, guard)
+    channel = SandboxChannel(runtime, room_id="venue", identities={CUSTOMER: "顾客", "host": "桌主"},
+                            archive_path=tmp_path / "chat.sqlite3", write_guard=guard, show_verified_write_scope=True)
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1, "start_time_kind": "asap_when_full"}
+    lookup = ToolCall("search_current_games", {"lookup_scope": "specific_table", "requirement": terms},
+                      reason="按原条件查桌", call_id="lookup")
+    with using_clock(lambda: at.replace(minute=35)):
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id("host"), organizer_id="host", organizer_name="桌主",
+            requirement=terms | {"duration_hours": 4}, known_players=[], trace_id="seed")
+        main.outputs.extend([
+            response("", "needs_tool", lookup), response(offer, "waiting_user"),
+            response("", "needs_tool", ToolCall("join_game", {"game_id": game.game_id, "customer_id": CUSTOMER,
+                "display_name": "顾客"}, reason="处理本人报名", call_id="join")),
+        ])
+        if not unconditional:
+            main.outputs.append(response(first_denied_reply, "completed"))
+        main.outputs.append(response(final_text, "completed" if unconditional else "waiting_user"))
+        old = channel.send(MessageEnvelope("prior", CUSTOMER, prior, at.replace(minute=35), "private", AGENT_ID))
+        assert old["final_reply"] == offer
+
+    current = MessageEnvelope("conditional-seat", CUSTOMER, body, at, "private", AGENT_ID)
+    with using_clock(lambda: at):
+        result = channel.send(current)
+
+    events = traces.get_trace(result["trace_id"])
+    receipt, = result["archive_outputs"]
+    assert result["final_reply"] == receipt["text"] == final_text
+    assert receipt["source_message_id"] == current.message_id
+    writes = [event.content["call"]["name"] for event in events if event.step == "tool_called"]
+    assert writes == ["join_game"], [(event.step, event.content.get("name"), event.content.get("errors"),
+                                      event.content.get("error")) for event in events if "tool" in event.step or "contract" in event.step]
+    joined, = [event.content for event in events if event.step == "tool_result" and event.content.get("name") == "join_game"]
+    assert joined["called"] is joined["allowed"] is unconditional
+    assert any(person.customer_id == CUSTOMER and person.status == "confirmed"
+               for person in store.require_game(game.game_id).participants) is unconditional
+    final_audit = json.loads(reviewer.calls[-1]["messages"][-1]["content"])["semantic_fidelity_contract"]
+    if unconditional:
+        assert "seat_registration_evidence" not in final_audit
+        assert result["status"] == "completed" and "？" not in final_text
+    else:
+        assert final_audit["seat_registration_evidence"] == {
+            "game_id": game.game_id, "write_status": "not_executed", "authorization_status": "not_verified",
+        }
+        assert any("已经回应占席请求" in rule for rule in final_audit["rules"])
+        rule = "customer_visible_contract:seat_registration.not_recorded"
+        feedback, = [event.content["result"] for event in events if event.step == "tool_result"
+                     and any(rule in item["violations"] for item in event.content.get("result", {}).get("item_reviews", []))]
+        assert feedback["item_reviews"][0]["suggested_safe_text"] == ""
+        assert all(row["text"] != error_suggestion for row in channel.events_for(CUSTOMER))
+    store._connection.close()
+
+
 def test_native_group_authorization_still_applies_without_private_preflight(tmp_path):
     """群的正式权限合同保持原样，私聊缺失前置判定时仍拒绝。"""
     model = StubAuthorizationClient('{"permissions":[]}')

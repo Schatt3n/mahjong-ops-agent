@@ -461,6 +461,32 @@ def test_live_0151_duration_fit_requires_same_table_agreement(tmp_path, agreed, 
     store._connection.close()
 
 
+@pytest.mark.parametrize("mode", ["history_only", "missing_target", "existing_seat", "successful_write"])
+def test_reply_review_does_not_treat_unbound_or_superseded_denials_as_missing_seat(mode):
+    """只用本轮正式拒绝和目标桌，旧拒绝不能压过真实报名或现有席位。"""
+    _, context = main_context()
+    denied = {"name": "join_game", "called": False, "allowed": False, "error": "报名未执行", "result": {
+        "validation_error": {"code": "venue_write_not_authorized", "scope": "participate", "game_id": "current-table"},
+    }}
+    context["turn_tool_evidence"] = [denied]
+    if mode == "history_only":
+        context["previous_tool_results"] = context.pop("turn_tool_evidence")
+    elif mode == "missing_target":
+        denied["result"]["validation_error"].pop("game_id")
+    elif mode == "existing_seat":
+        context["sender_active_game_memberships"] = [
+            {"game_id": "current-table", "participant_status": "confirmed", "participation_already_recorded": True},
+        ]
+    else:
+        context["turn_tool_evidence"].append({"name": "join_game", "called": True, "allowed": True})
+    message = UserMessage("dm", "guest", "顾客", "就这桌，给我留一个。")
+    text = "你那一位已经有了。"
+    action = AgentAction(goal="回顾客现有席位", objective_status="completed", reasoning_summary="", reply_to_user=text)
+    payload = build_reply_self_review_payload(message=message, action=action, context_payload=context,
+        review_scope="reply_to_user", review_items=[{"item_id": "reply_to_user", "recipient_id": "guest", "text": text}])
+    assert "seat_registration_evidence" not in payload["semantic_fidelity_contract"]
+
+
 def test_review_treats_only_candidate_search_and_customer_cutoff_as_read_only():
     """零候选是查询结果，顾客指定时刻本身不证明已开始联系或已安排跟进。"""
     _, context = main_context()

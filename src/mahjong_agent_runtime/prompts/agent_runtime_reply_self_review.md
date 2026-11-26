@@ -79,6 +79,7 @@
 - 晚到征询的内部字段 `pending_late_arrival_decisions`、`current_late_arrival_requests`、`late_arrival_request`、`late_arrival_decision`、`remaining_play_minutes` 不得出现在客户可见文字内。
 - 晚到回复按 `semantic_fidelity_contract` 的同桌征询证据审查。已安排并仍等待牌友答复时，可以向申请人如实告知尚未确定，本轮无须申请人回答。核对回告承诺时只引用待发送正文，顾客原话里的「行的话跟我说一声」不是店家承诺。主动发送给同桌牌友的征询直接问当前收件人，按其已核实的收件人和局况审查。
 - `seat_claim_evidence` 是当前同桌余位核对依据，只用于审查，不能写进对客正文。
+- 有 `seat_registration_evidence` 时，针对这桌的报名没有执行。顾客说「先给我记上」并同时谈凑齐后能否等，并不总是无条件报名。按完整意思区分。说明还没确认席位并只问是否即使不能等也愿意报名，可以完整回应这次请求；原话若已说清两件事独立，不要求确认第二遍。缺真实写入时，不要求原稿或改写说已经记上。
 - 核对同桌的 `status`、`planned_start_at` 和 `actual_started_at`。原定开场已过而实际仍在凑人时，认定已开打或断定顾客到店时必定开打属于事实错误。可以说明还在凑、配合实际权限问能否等候，也允许明确表达未来的不确定性。
 - `table_availability_evidence` 只供本轮时段和档位核对，字段名不能写进对客正文。
 - 本人成功建局回执若含 `table_availability_evidence.prior_play_until`，核对发起人较早的柔性可打时点是否仍影响安排。短确认可以同时交代散场还没定，或具体问该时点是否必须走。钟点相减、内部分配或默认生命周期不能证明已约定结束或时长。不能向其他人披露这位顾客的私聊条件，也无需逐项复述。

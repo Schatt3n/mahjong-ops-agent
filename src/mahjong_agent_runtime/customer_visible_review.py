@@ -731,6 +731,32 @@ def _review_empty_personal_search_filters(result: dict[str, Any]) -> dict[str, A
     return {field: deepcopy(values[field]) for field in applied}
 
 
+def _blocked_seat_registration(
+    turn_tool_evidence: list[dict[str, Any]], memberships: list[dict[str, Any]],
+) -> dict[str, str] | None:
+    """只从同轮实际工具拒绝恢复未执行的占席；已确认席位或混合执行仍用原审查。"""
+    participation = [row for row in turn_tool_evidence
+                     if isinstance(row, dict) and row.get("name") in {"join_game", "record_candidate_reply"}]
+    if any(row.get("called") is True and row.get("allowed") is True and not row.get("error") for row in participation):
+        return None
+    denied_tables = set()
+    for row in participation:
+        result = row.get("result")
+        validation = result.get("validation_error") if isinstance(result, dict) else None
+        if (row.get("called") is False and row.get("allowed") is False and row.get("error")
+                and isinstance(validation, dict) and validation.get("code") == "venue_write_not_authorized"
+                and validation.get("scope") == "participate" and isinstance(game_id := validation.get("game_id"), str)
+                and game_id):
+            denied_tables.add(game_id)
+    if len(denied_tables) != 1:
+        return None
+    game_id = next(iter(denied_tables))
+    if any(isinstance(row, dict) and row.get("game_id") == game_id and row.get("participation_already_recorded") is True
+           for row in memberships):
+        return None
+    return {"game_id": game_id, "write_status": "not_executed", "authorization_status": "not_verified"}
+
+
 def build_reply_self_review_payload(
     *,
     message: UserMessage,
@@ -770,6 +796,9 @@ def build_reply_self_review_payload(
         and "reply_constraints" not in metadata
     )
     has_game_offer_candidate = private_customer_reply and any(item.get("game_offer_candidate") for item in review_items)
+    blocked_registration = (_blocked_seat_registration(
+        context_payload.get("turn_tool_evidence") or [], context_payload.get("sender_active_game_memberships") or [],
+    ) if private_customer_reply else None)
     follow_ups = _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
     # 私聊历史只参加给本人的私聊审查，工具文字和群回复可能面向其他人。
     owner_conversation_context = (
@@ -878,6 +907,7 @@ def build_reply_self_review_payload(
         ),
         "semantic_fidelity_contract": {
             **({"seat_count_evidence": seat_count_evidence} if seat_count_evidence else {}),
+            **({"seat_registration_evidence": blocked_registration} if blocked_registration else {}),
             **({
                 "game_availability_evidence": game_availability_evidence,
                 "availability_claim_interpretation": (
@@ -911,6 +941,12 @@ def build_reply_self_review_payload(
             ],
             "rules": [
                 "待审文本不得反转存在/不存在、成功/失败、已确认/未确认、已发送/未发送等事实极性",
+                *(("seat_registration_evidence 记载本轮对这桌占席的实际拒绝，仅说明这次没有登记，"
+                   "不证明顾客未提出请求，也不判定『先记上』与旁边的等候条件是否独立。"
+                   "顾客意愿及能否等仍按完整原话核对。明确说明这次未确认席位已经回应占席请求，"
+                   "可补充真实局况或只澄清是否即使无法等也要报名，不因未完成该受阻写入判 semantic_fact_loss 或 delegation_not_advanced。"
+                   "若原话已明确分别提出报名和等待，不重问已清楚的报名。不得让任何改写说已记上、已留位或已答应等待。",)
+                  if blocked_registration else ()),
                 *(("game_availability_evidence.searches_by_scope.specific_table.table_reference_evidence 显示查桌用的缺位线索与候选余位冲突。"
                    "没有已核实的同桌引用或其他充分线索时，当前回信不能直接把冲突候选认成顾客所指。"
                    "即使候选玩法和档位全部属实，也要就所指作条件式说明或追问，同时答复已经查明的其他问题；无条件认桌以 semantic_contradiction 拒绝。",)

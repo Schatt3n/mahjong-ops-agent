@@ -48,6 +48,7 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
     "late_arrival_decision",
     "remaining_play_minutes",
     "seat_claim_evidence",
+    "seat_registration_evidence",
     "table_duration_fit_evidence",
     "remaining_seats_display",
     "assigned_room",
@@ -368,6 +369,18 @@ def customer_visible_action_claim_violations(
                 return [f"unverified_external_action:{phrase}"]
             offset = compact_content.find(compact_phrase, offset + 1)
     return []
+
+
+_SEAT_REGISTRATION_ACK = re.compile(
+    r"(?:^|[。.!！?？\n])\s*(?:好(?:的|嘞)?\s*[，,]\s*)?(?:我\s*)?(?:先\s*)?(?:给|帮)你(?:先)?\s*"
+    r"(?:记上|报上|留上|留好|登记上)了(?=\s*(?:[，,。.!！；;]|$))"
+)
+
+
+def customer_visible_completed_seat_ack(text: str) -> bool:
+    """识别回复中不带其它对象的报名完成短句；含条件和时间收讫的说法留给语义审查。"""
+    content = unicodedata.normalize("NFKC", text.strip())
+    return not _SEAT_CLAIM_QUOTE_MARKS.intersection(content) and bool(_SEAT_REGISTRATION_ACK.search(content))
 
 
 class VerifiedSeatClaim(TypedDict):

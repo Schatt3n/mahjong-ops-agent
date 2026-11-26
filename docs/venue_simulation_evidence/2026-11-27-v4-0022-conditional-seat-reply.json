@@ -1,0 +1,50 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "source_code_commit": "bf3428d",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev4_20261127/2026-11-25-real-270ac8a1b6",
+  "customer_case": "0022",
+  "prior_turn": {
+    "trace_id": "trace_34ad36b87e42d3137f14ee72",
+    "source_message_id": "customer:role-event:1e92140e6f72a0325847fb2ac82b893f734e0e021bd4263aff885ac9c2c274c2",
+    "text": "老板好 看板那桌人齐开的杭麻1块底还有位吗 我20:03能到 可以等我到再开吗",
+    "successful_search_game_id": "game_0702c1cebdee",
+    "delivered_message_id": "outbound:trace_34ad36b87e42d3137f14ee72:1",
+    "delivered_text": "有位的，那桌杭麻1块底人齐开，现在一个人，还差三个。20:03能不能赶上不好说，人齐开没定时间，就算凑齐了也不一定能等你到；要等你的话得桌上大家同意。你打的话我先给你记上？"
+  },
+  "trace_id": "trace_b469853fa1e8fb18094b8e3d",
+  "message": {
+    "message_id": "customer:role-event:2fa64edf60ae07ee866e5c51c1180d83a44c401c5f80649fca02ff56921a8ce5",
+    "sent_at": "2026-11-26T19:37:00+08:00",
+    "text": "要的 麻烦先给我记上 我这边尽量20:05前到 要是凑齐了大家愿意等就等我一下 谢谢"
+  },
+  "independent_consent": {
+    "call_id": "llm_call_f5b95e9e290241d69abe209c1cfe1038",
+    "terminal_attempt_id": "llm_attempt_55bb24ee7fbb4cb9ab8d8c605e76c65a",
+    "http_status": 200,
+    "body_complete": true,
+    "raw_response_sha256": "7f040389772c053ea098cef9f630a112ac13aac3ceeea2f93b76546bd197059f",
+    "only_granted_scope": "waitlist",
+    "cited_phrase": "麻烦先给我记上"
+  },
+  "write_and_review": {
+    "blocked_tool_counts": {"join_game": 1, "record_candidate_reply": 4},
+    "blocked_scope": "participate",
+    "blocked_reason": "scope_not_authorized",
+    "seat_recorded": false,
+    "waitlist_written": false,
+    "misleading_review_suggestion_excerpt": "好的，先给你记上了。",
+    "truthful_attempt_excerpt": "我这边暂时还没法给你把位子确认下来。",
+    "truthful_attempt_review_rejection": "semantic_fact_loss",
+    "final_message_id": "outbound:trace_b469853fa1e8fb18094b8e3d:1",
+    "final_text": "稍等一下",
+    "runtime_status": "needs_help"
+  },
+  "analysis": "这次是人齐开桌的报名与等待条件混在一句，和首日晚到采集的旧幂等失败不同。独立授权没有确认占席，实际工具均未执行。送前审查却将报名当成无条件完成要求，甚至建议声称已经登记，导致真实未确认进展无法送达。不能据此次分类推断顾客是否愿意在不等时也报名。",
+  "change": "供审查使用的证据只来自本轮对唯一桌的实际占席拒绝，已有真实席位或成功确认不走此分支。明确未确认席位可回答请求，对等待是否是报名条件不清楚时只问这一点。结构化审查仍需正常通过，出现肯定已记上的明显不实建议会阻止外发并要求主模型重写。",
+  "offline_verification": {
+    "test": "tests/simulation/test_venue_write_guard.py::test_v4_conditional_seat_denial_remains_truthful_without_reasking_clear_registration",
+    "controls": "SQLite和模拟私聊真实查到同桌。保持真实的独立拒绝，初次审查建议说已占席被移除，实际送达未确认和单项澄清。明确说不能等也参加的对照走现有授权并实际占一席，仅确认执行结果。",
+    "live_replay": "pending",
+    "focused_tests_passed": 378
+  }
+}

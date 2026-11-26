@@ -442,10 +442,17 @@ class VenueGuardedToolGateway(ToolGateway):
                                        source_message_id=source_message_id, trace_id=trace_id)
             if reason is not None:
                 error = f"本轮没有可核验的顾客授权：{_SCOPE_LABELS[scope]}。"
+                validation = {"code": "venue_write_not_authorized", "message": error, "scope": scope}
+                instruction = "工具未执行。按已送达原话回答可确认的事实；必要时征求具体动作的明确授权。"
+                if scope == "participate":
+                    if isinstance(game_id := call.arguments.get("game_id"), str) and game_id:
+                        validation["game_id"] = game_id
+                    instruction = ("本次没有登记席位。别在同一来话里更换工具重试，也别声称占席或安排了等人。"
+                                   "若还不清楚是否只有桌上肯等才报名，只澄清这一项。"
+                                   "本人已明确分别提出报名和等待时，说明目前未能确认席位即可。")
                 result = ToolResult(
                     name=call.name, called=False, allowed=False, call_id=call.call_id, error=error,
-                    result={"instruction": "工具未执行。按已送达原话回答可确认的事实；必要时征求具体动作的明确授权。",
-                            "validation_error": {"code": "venue_write_not_authorized", "message": error, "scope": scope}},
+                    result={"instruction": instruction, "validation_error": validation},
                 )
                 self._record(trace_id, "tool_authorization_checked",
                              {"tool_name": call.name, "allowed": False, "error": error,

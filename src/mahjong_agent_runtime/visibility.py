@@ -21,6 +21,7 @@ from .copywriting import (
     build_customer_visible_text_generation_payload,
     parse_customer_visible_text_generation,
 )
+from .customer_visible_contract import customer_visible_completed_seat_ack
 from .customer_visible_review import (
     CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME,
     build_reply_self_review_payload,
@@ -285,6 +286,13 @@ class CustomerVisibleProcessor:
         follow_up_evidence = review_payload.get("follow_up_commitment_evidence")
         item_reviews = normalize_item_reviews(review, review_items, attribution_context=attribution_context,
                                               follow_up_evidence=follow_up_evidence)
+        blocked_registration = (review_payload.get("semantic_fidelity_contract") or {}).get("seat_registration_evidence")
+        unrecorded_seat = "customer_visible_contract:seat_registration.not_recorded"
+        if blocked_registration:
+            for item in item_reviews:
+                if customer_visible_completed_seat_ack(item["suggested_safe_text"]):
+                    item["approved"] = False
+                    item["violations"].append(unrecorded_seat)
         needs_human = bool(review.get("needs_human"))
         top_level_violations = (
             list(review.get("violations") or [])
@@ -325,6 +333,14 @@ class CustomerVisibleProcessor:
             ]
             instruction += (" 查阅本项 seat_claim_evidence，同一桌余席以 remaining_seats 为准。"
                             "顾客未问具体人数时可略去。保留其他审查要求，不重复业务写入。")
+        if any(unrecorded_seat in item["violations"] for item in item_reviews):
+            feedback_summary = "这桌的报名写入未执行，不能按审查建议说已记上。"
+            feedback_items = [
+                {**item, "suggested_safe_text": "", "reasoning_summary": feedback_summary}
+                if unrecorded_seat in item["violations"] else item for item in feedback_items
+            ]
+            instruction += (" 如实说明还没确认席位。若顾客是否愿意在不能等时仍报名不明确，只澄清该项。"
+                            "顾客已明确这两件事独立时不用重问，也不重复写入。")
         self.trace_recorder.record(
             trace_id,
             "customer_visible_content_review_result",
