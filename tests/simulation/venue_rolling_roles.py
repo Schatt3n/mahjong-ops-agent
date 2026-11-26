@@ -788,7 +788,7 @@ class VenueRollingRoles:
                 covered.update(strata[actor_id])
         samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id], records=records,
                     role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS,
-                    rolling_check_ids=True)
+                    rolling_check_ids=True, retry_invalid=True)
                    for actor_id in selected]
         valid = [actor_id for actor_id, sample in zip(selected, samples, strict=True) if sample["status"] == "valid"]
         valid_coverage = Counter(tag for actor_id in valid for tag in strata[actor_id])

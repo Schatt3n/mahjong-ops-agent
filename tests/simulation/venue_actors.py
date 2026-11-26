@@ -1084,7 +1084,7 @@ class SemanticJudge:
 
     def judge(
         self, case_id: str, evidence: Sequence[Mapping[str, Any]], *, trace_id: str, checks: Sequence[str] = (),
-        instructions: str = "",
+        instructions: str = "", timeout_seconds: float | None = None, step_index: int = 1,
     ) -> JudgeResult:
         rows = tuple(deepcopy(dict(row)) | {
             "evidence_id": str(row.get("event_id") or row.get("trace_id") or row.get("message_id") or ""),
@@ -1098,13 +1098,14 @@ class SemanticJudge:
             {"case_id": case_id, "checks": list(checks), "evidence": rows}, ensure_ascii=False,
         )}]
         try:
-            raw = self.client.complete(messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds)
+            raw = self.client.complete(messages, trace_id=trace_id,
+                                       timeout_seconds=self.timeout_seconds if timeout_seconds is None else timeout_seconds)
         except Exception as exc:
             return JudgeResult(case_id, trace_id, "transport_error", "inconclusive", (), None, rows,
                                completion_diagnostics(exc), error=type(exc).__name__,
                                transport_timeout=is_completion_transport_timeout(exc))
         diagnostics = completion_diagnostics(raw)
-        source = model_response_source(raw, trace_id=trace_id, step_index=1)
+        source = model_response_source(raw, trace_id=trace_id, step_index=step_index)
         original = str(raw)
         try:
             verdict, findings = _parse_judgment(original, ids, checks, case_id=case_id)

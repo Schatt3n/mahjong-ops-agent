@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 import json
+from time import monotonic
 from typing import Any
 
 from mahjong_agent_runtime import customer_visible_contract
@@ -465,9 +466,9 @@ def prepare_dialogue_review(*, customer_id: str, turns: Sequence[Row], records: 
 
 
 def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueReview, *, trace_id: str,
-                            additional_instructions: str = "", rolling_check_ids: bool = False) -> dict[str, Any]:
+                            additional_instructions: str = "", rolling_check_ids: bool = False,
+                            retry_invalid: bool = False) -> dict[str, Any]:
     """发送已组装且可预先核验的证据，判决引用仍必须命中原评审边界。"""
-    projected, aliases = prepared.projected, prepared.aliases
     instructions = _CITATION_RULES
     if any(row["kind"] in {"peer_message", "peer_delivery"} for row in prepared.request):
         instructions += f"\n{_PEER_CITATION_RULES}"
@@ -476,8 +477,34 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
         instructions += f"\n{_rolling_citation_instructions(prepared)}"
     if additional_instructions:
         instructions += f"\n{additional_instructions}"
-    result = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
-                         checks=tuple(wire_checks), instructions=instructions).to_dict()
+    deadline = monotonic() + judge.timeout_seconds if retry_invalid else None
+    first = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
+                        checks=tuple(wire_checks), instructions=instructions)
+    result = _validate_dialogue_judgment(first, prepared, wire_checks, rolling_check_ids=rolling_check_ids)
+    if (deadline is None or result["status"] != "invalid" or not (first.response_source or {}).get("http_response_complete")
+            or (remaining := deadline - monotonic()) <= 0):
+        return result
+    # 对完整返回但不能验实的判决只允许再独立评审一次，使用同一证据和剩余时限。
+    # 初判原文只留在归档，避免补判照抄尚未验实的结论或引用。
+    instructions += (
+        f"\n上一份评审未通过验证：{result['error']}。重新根据同一证据独立逐项判断。"
+        "顾客项通过时须覆盖所有实际发言和等待等评价对象。材料不足就判待定。"
+        "完成各判项后按 fail、inconclusive、pass 的优先级核对总判定。"
+    )
+    revised = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
+                          checks=tuple(wire_checks), instructions=instructions, timeout_seconds=remaining, step_index=2)
+    final = _validate_dialogue_judgment(revised, prepared, wire_checks, rolling_check_ids=rolling_check_ids)
+    final["prior_attempts"] = ({key: result[key] for key in (
+        "status", "verdict", "error", "raw", "diagnostics", "response_source",
+    )},)
+    return final
+
+
+def _validate_dialogue_judgment(judgment: JudgeResult, prepared: PreparedDialogueReview,
+                                wire_checks: Mapping[str, str], *, rolling_check_ids: bool) -> dict[str, Any]:
+    """分别验证每个独立响应，原引用边界、通过证据和时长校验不随重审变化。"""
+    projected, aliases = prepared.projected, prepared.aliases
+    result = judgment.to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
         "version": 7, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
@@ -509,12 +536,12 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                     outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
                     additional_instructions: str = "", delivered_history: bool = False,
-                    rolling_check_ids: bool = False) -> dict[str, Any]:
+                    rolling_check_ids: bool = False, retry_invalid: bool = False) -> dict[str, Any]:
     """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
     prepared = prepare_dialogue_review(customer_id=customer_id, turns=turns, records=records, outcome=outcome,
         first_contact=first_contact, role_only=role_only, delivered_history=delivered_history)
     return judge_prepared_dialogue(judge, prepared, trace_id=f"judge:{customer_id}",
-        additional_instructions=additional_instructions, rolling_check_ids=rolling_check_ids)
+        additional_instructions=additional_instructions, rolling_check_ids=rolling_check_ids, retry_invalid=retry_invalid)
 
 
 def shop_reply_verdicts(reviews: Iterable[Row]) -> dict[str, str]:
@@ -555,6 +582,10 @@ def _rolling_citation_instructions(prepared: PreparedDialogueReview) -> str:
         }
         for check in prepared.checks
     }
+    for check in (ROLE_CHECK, FIRST_CONTACT_CHECK):
+        if check in prepared.checks:
+            rule = rules[ROLLING_CHECK_IDS[check]]
+            rule["required_for_pass"] = rule["subject_evidence_ids"]
     duration_sources = _duration_sources({row["evidence_id"]: row for row in prepared.archive},
                                          projected.anchors[DURATION_CHECK])
     if duration_sources:
@@ -566,6 +597,7 @@ def _rolling_citation_instructions(prepared: PreparedDialogueReview) -> str:
     return (
         "checks 中每个短编号原样复制到 check 字段。以下 definition 说明含义，不是输出编号。\n"
         "各判项只引用该项 allowed_evidence_ids。subject_evidence_ids 标出实际评价对象。"
+        "判 pass 时必须列出 required_for_pass 中的每一个编号，包括实际等待等动作。"
         "店家项不能引用顾客所见但未进入店家评审范围的群看板，要引用店家实际送达的本人回复。\n"
         "只在给定 duration_at_join 时评审现成局留位。每笔 confirmed_joins 都要核对真实入席执行和同桌送达回复。"
         "通过时逐笔引用 execution、customer 和说明时长的 candidate_replies，在 reason 中分别逐字用「」摘录两条完整聊天。"

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from . import venue_judging
+from .test_venue_actors import _client as _http_client
 from .venue_actors import ActorContext, ModelActor, SemanticJudge, generate_personas
 from .venue_judging import (
     AGENT_CHECK, DURATION_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK, ROLLING_CHECK_IDS, judge_with_short_evidence_ids,
@@ -209,6 +211,7 @@ def test_rolling_wire_checks_explain_own_subjects_without_allowing_public_delive
     assert json.loads(payload["content"])["checks"] == ["role_behavior", "shop_behavior"]
     rules = json.loads(prompt["content"].splitlines()[-1])
     assert rules["role_behavior"]["allowed_evidence_ids"] == ["E01", "E02", "E03", "E04"]
+    assert rules["role_behavior"]["required_for_pass"] == ["E03"]
     assert rules["shop_behavior"]["allowed_evidence_ids"] == ["E03", "E04", "E05"]
     assert rules["shop_behavior"]["subject_evidence_ids"] == ["E04"]
     assert "max_duration_hours 只表示上限" in prompt["content"]
@@ -222,6 +225,63 @@ def test_rolling_wire_checks_explain_own_subjects_without_allowing_public_delive
     },))
     assert review_dialogue(SemanticJudge(unsolicited_duration), **arguments)["error"] == (
         "findings must cover every requested check exactly once")
+
+
+@pytest.mark.parametrize(("first_failure", "second_verdict"), [
+    ("customer pass must cite every archived action", "fail"),
+    ("overall verdict contradicts findings", "pass"),
+    ("customer pass must cite every archived action", "invalid"),
+    (None, "fail"),
+    ("exhausted", "invalid"),
+])
+def test_rolling_retry_keeps_evidence_boundary_and_actual_attempts(monkeypatch, first_failure, second_verdict):
+    """完整返回的无效评审可独立重审一次，保留原文和来源，不能替换有效失败或扩时。"""
+    wait = _turn(2, cause="a1")
+    wait.pop("message_id")
+    wait["decision"]["action"] = {"action": "wait"}
+    turns = [_turn(1), wait]
+    records = [_chat("u1"), _chat("a1", reply_to="u1")]
+    prepared = prepare_dialogue_review(customer_id="a", turns=turns, records=records, delivered_history=True)
+    labels = {source: alias for alias, source in prepared.aliases.items()}
+    role_all = [labels[source] for source in ("u1", "role-trace-2")]
+
+    def response(overall, *, role="pass", include_wait=True):
+        return json.dumps({"verdict": overall, "findings": [
+            {"check": "role_behavior", "verdict": role, "evidence_ids": role_all if include_wait else role_all[:1],
+             "reason": "检查实发消息及等待。"},
+            {"check": "shop_behavior", "verdict": "pass", "evidence_ids": [labels["a1"]],
+             "reason": "检查本人收到的店家回执。"},
+        ]}, ensure_ascii=False)
+
+    if first_failure == "overall verdict contradicts findings":
+        first = response("fail")
+    elif first_failure is None:
+        first = response("fail", role="fail")
+    else:
+        first = response("pass", include_wait=False)
+    second = response("fail", role="fail") if second_verdict == "fail" else response(
+        "pass", include_wait=second_verdict != "invalid")
+    captured = []
+    clock = iter((0.0, 8.0 if first_failure == "exhausted" else 3.0))
+    monkeypatch.setattr(venue_judging, "monotonic", lambda: next(clock))
+    judge = SemanticJudge(_http_client((first, second), captured), timeout_seconds=8)
+    result = venue_judging.judge_prepared_dialogue(judge, prepared, trace_id="judge:a", rolling_check_ids=True,
+                                                   retry_invalid=True)
+
+    assert (result["status"], result["verdict"]) == (
+        ("invalid", "inconclusive") if second_verdict == "invalid" else ("valid", second_verdict))
+    assert result["response_source"]["http_response_complete"] is True
+    if first_failure in (None, "exhausted"):
+        assert len(captured) == 1 and "prior_attempts" not in result
+        return
+    assert len(captured) == 2
+    prior, = result["prior_attempts"]
+    assert (prior["status"], prior["verdict"], prior["error"], prior["raw"]) == ("invalid", "inconclusive", first_failure, first)
+    assert prior["response_source"]["step_index"] == 1 and result["response_source"]["step_index"] == 2
+    assert prior["diagnostics"]["timeout_budget_seconds"] == 8
+    assert result["diagnostics"]["timeout_budget_seconds"] == 5
+    assert captured[0]["messages"][1] == captured[1]["messages"][1]
+    assert first_failure in captured[1]["messages"][0]["content"] and first not in captured[1]["messages"][0]["content"]
 
 
 @pytest.mark.parametrize("include_quotes", [False, True])
