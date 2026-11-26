@@ -13,14 +13,20 @@ from tempfile import mkdtemp
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from mahjong_agent_runtime import SQLiteAgentStore
+from mahjong_agent_runtime import OpenAICompatibleAgentClient, SQLiteAgentStore
+from mahjong_agent_runtime.domains.game_commitments import active_game_participant_ids
 from mahjong_agent_runtime.llm import model_response_source
 from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock
 from scripts.run_venue_simulation import _real_roles, _select_local_model
-from tests.simulation.venue_actors import ActorContext, generate_personas
-from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope
+from tests.simulation.sim_adapter import build_runtime
+from tests.simulation.venue_actors import ActorContext, generate_personas, write_personas
+from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
+from tests.simulation.venue_rolling_companions import TABLE_COMPANION_WAKE
+from tests.simulation.venue_rolling_roles import RollingRoleTransportPaused, VenueRollingRoles
 from tests.simulation.venue_table_group import VenueTableGroup
 from tests.simulation.venue_table_opening import VenueTableOpening
+from tests.simulation.venue_table_shop import VenueTableShop
+from tests.simulation.venue_world import VenueWorld
 
 
 _REVIEW = """你独立核对四位牌友对同一份开场提议的真实回复。只根据已经送达的消息判断。
@@ -199,18 +205,143 @@ def run(archive: Path, *, no_common_time: bool = False) -> dict:
     return report
 
 
+class _CompanionProbe(VenueRollingRoles):
+    """专项只领取真实桌群链路产生的事件，省去两天与本桌无关的营业唤醒。"""
+
+    def _seed_timers(self) -> None:
+        """现有 READY 牌局由通用调度自动找到，不额外安排角色定时活动。"""
+
+
+def _prepare_companion(archive: Path, *, unavailable: bool, main_client=None):
+    """锁定私人同行来话、匿名席和两种日程。历史素材通过真实私聊账本送达。"""
+    at = datetime(2026, 12, 17, 17, 30, tzinfo=DEFAULT_TZ) if unavailable else datetime(2026, 11, 27, 17, 30, tzinfo=DEFAULT_TZ)
+    seed = 61
+    roster = {person.sender_id: person for person in generate_personas(seed, count=24)}
+    people = tuple(roster[f"venue-sender-{index:04d}"] for index in (13, 1, 15, 18, 2))
+    host, friend, *others, bystander = people
+    store = SQLiteAgentStore(archive / "agent.sqlite3")
+    runtime, _ = build_runtime(store, "real" if main_client is not None else "mock", model_client=main_client)
+    channel = SandboxChannel(runtime, room_id="companion-probe", archive_path=archive / "chat.sqlite3",
+                             identities={person.sender_id: person.name for person in people})
+    with using_clock(lambda: at - timedelta(minutes=1)):
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id(host.sender_id),
+            organizer_id=host.sender_id, organizer_name=host.name, trace_id="companion-probe-captain",
+            known_players=[{"customer_id": host.sender_id, "seat_count": 2, "anonymous_seat_count": 1}],
+            requirement={"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
+                         "start_time_kind": "asap_when_full", "duration_hours": 4})
+        for person in others:
+            game, _ = store.join_game(game_id=game.game_id, customer_id=person.sender_id, display_name=person.name,
+                                    trace_id=f"companion-probe-seat:{person.sender_id}")
+    prior = (
+        MessageEnvelope("companion-probe-peer-1", host.sender_id,
+            "今晚想一起去打无烟杭麻不？一块底，大概打四个小时，想六点半到七点之间开。你要是想去我先找老板帮咱俩留位置。",
+            at - timedelta(hours=8), "private", friend.sender_id),
+        MessageEnvelope("companion-probe-peer-2", friend.sender_id,
+            "我有兴趣，你先问吧。几点开还得看我排班，有群了叫我一声。",
+            at - timedelta(hours=7, minutes=59), "private", host.sender_id),
+    )
+    for message in prior:
+        channel.send(message)
+    source_ids = {message.message_id for message in prior}
+    world = VenueWorld(seed, at)
+    common_time = at.replace(hour=18, minute=30)
+    checks = {
+        "captain_has_one_anonymous_seat_and_one_known_companion": game.seat_summary()["anonymous_seat_count"] == 1
+            and [edge.target_sender_id for edge in host.relationships if edge.kind == "regular_partner"] == [friend.sender_id],
+        "peer_terms_actually_delivered_to_both": all(channel.completed_peer_message(message_id) is not None for message_id in source_ids)
+            and all(source_ids <= {row["message_id"] for row in channel.events_for(person.sender_id)} for person in (host, friend)),
+        "peer_history_private_to_captain_and_friend": all(source_ids.isdisjoint({row["message_id"] for row in channel.events_for(viewer)})
+            for viewer in (AGENT_ID, bystander.sender_id, *(person.sender_id for person in others))),
+        "fixture_calendars_match_case": all(world.availability(person).available_for(common_time, 4) for person in (host, *others))
+            and world.availability(friend).available_for(common_time, 4) is not unavailable,
+    }
+    write_personas(archive / "personas.json", people)
+    return at, seed, people, channel, game.game_id, source_ids, checks
+
+
+def run_companion(archive: Path, *, unavailable: bool, prepare_only: bool) -> dict:
+    """留存真实卡片操作、双方私聊来源和四人最终票据。准备档无需调用模型。"""
+    config = None if prepare_only else _select_local_model("opencode-go", None, workers=1)
+    main_client = OpenAICompatibleAgentClient(config) if config is not None else None
+    at, seed, people, channel, game_id, source_ids, checks = _prepare_companion(archive, unavailable=unavailable, main_client=main_client)
+    report = {"checks": checks, "settlement": None, "rounds": [], "status": "failed", "seed": seed,
+              "start_at": at.isoformat(), "game_id": game_id, "peer_source_message_ids": sorted(source_ids),
+              "scope": "rolling_companion", "case": "invitee_unavailable" if unavailable else "compatible"}
+    if config is None or not all(checks.values()):
+        if prepare_only and all(checks.values()):
+            report["status"] = "prepared"
+        (archive / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return report
+
+    actor, _ = _real_roles(config, force_opencode_role=True)
+    scenario = _CompanionProbe(people=people, actor=actor, judge=None, channel=channel, run_dir=archive,
+        start_at=at, seed=seed, active_users=len(people), workers=1, dialogue_turns=2, judge_users=1,
+        table_groups=True, table_shop=VenueTableShop(actor.client, archive / "table_shop.jsonl"))
+    try:
+        rolling = scenario.run()
+    except RollingRoleTransportPaused as exc:
+        report.update(status="transport_paused", transport_checkpoint=exc.checkpoint)
+        (archive / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return report
+    group = channel.table_group(VenueTableGroup.room_id_for_game(game_id))
+    game = group.store.require_game(game_id)
+    settlement = VenueTableOpening(group).current()
+    proposals = [row for row in group.delivered_receipts() if row.message.message_id.startswith("table-opening-offer|")]
+    roles = scenario.journal.events()
+    answer = next((event for event in roles if event.kind == TABLE_COMPANION_WAKE), None)
+    answer_decision = answer.decision["decision"] if answer else {}
+    role_id = people[1].sender_id
+    invitation = group.invitation_for(role_id, answer.origin_id) if answer else None
+    live = rolling["checks"].get("customer_decisions_from_model") is True
+    checks.update(real_model_actions=live,
+        companion_saw_peer_terms=bool(answer and source_ids <= {row["message_id"] for row in answer_decision["context"]["history"]}),
+        exact_private_invitation_source=bool(invitation and answer.actor_id == role_id and answer.caused_by == invitation.invitation_id
+            and invitation.inviter_id == people[0].sender_id and group.invitation_for(AGENT_ID, invitation.invitation_id) is None),
+        bystander_cannot_see_table_chat=not group.events_for(people[-1].sender_id))
+    if unavailable:
+        outcome = (answer_decision.get("action") or {}).get("action")
+        checks["valid_refusal_or_silence"] = bool(outcome in {"decline_companion", "wait"}
+            and invitation and invitation.accepted is (False if outcome == "decline_companion" else None)
+            and role_id not in group.member_ids() and game.seat_summary()["anonymous_seat_count"] == 1
+            and game.planned_start_at is None)
+    else:
+        expected = {person.sender_id for person in people[:-1]}
+        proposal_at = next((row.message.sent_at for row in proposals if settlement
+                            and row.message.message_id == settlement["proposal_id"]), None)
+        checks["confirmed_once_with_four_real_votes"] = bool(settlement and settlement["committed"]
+            and invitation and invitation.accepted is True
+            and settlement["accepted_count"] == 4 and group.member_ids() == {AGENT_ID, *expected}
+            and active_game_participant_ids(game) == expected
+            and sum(row.reason == "venue_table_opening_confirmed" for row in group.store.transitions) == 1)
+        calendars = [scenario.world.availability(person) for person in people[:-1]]
+        checks["opening_fits_every_actual_calendar"] = bool(proposal_at and game.planned_start_at and all(
+            day.available_for(game.planned_start_at, 4)
+            and proposal_at + timedelta(minutes=day.travel_minutes) <= game.planned_start_at for day in calendars))
+    report.update(status="passed" if all(checks.values()) else "failed", model=config.model, settlement=settlement,
+                  game=game.to_dict(), table_groups=rolling["rolling_table_groups"], observed_companion_action=answer_decision.get("action"),
+                  rounds=[row.history_row() for row in proposals])
+    (archive / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def main() -> int:
     """显式开启真模型并保留独立沙盒档案。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data/venue_simulation/table_opening")
-    parser.add_argument("--no-common-time", action="store_true", help="此档两项开场提议都有人无法参加")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--no-common-time", action="store_true", help="此档两项开场提议都有人无法参加")
+    modes.add_argument("--rolling-companion", choices=("compatible", "invitee-unavailable"), help="从店家提醒起验证同行邀请和四人协商")
+    parser.add_argument("--prepare-only", action="store_true", help="只落地同行专项的模拟盘面及私聊来源")
     args = parser.parse_args()
+    if args.prepare_only and not args.rolling_companion:
+        parser.error("--prepare-only 需要 --rolling-companion")
     args.runs_dir.mkdir(exist_ok=True, parents=True)
     archive = Path(mkdtemp(prefix="table-opening-", dir=args.runs_dir))
-    report = run(archive, no_common_time=args.no_common_time)
+    report = (run_companion(archive, unavailable=args.rolling_companion == "invitee-unavailable", prepare_only=args.prepare_only)
+              if args.rolling_companion else run(archive, no_common_time=args.no_common_time))
     print(json.dumps({"path": str(archive), "status": report["status"], "checks": report["checks"],
                       "settlement": report["settlement"], "rounds": len(report["rounds"])}, ensure_ascii=False))
-    return int(report["status"] != "passed")
+    return int(report["status"] not in {"passed", "prepared"})
 
 
 if __name__ == "__main__":
