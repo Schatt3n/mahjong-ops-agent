@@ -629,7 +629,7 @@
         87
       ],
       "diagnosis": "核对已识别七点半以后的原话，但规范化漏掉第二个钟点作为下界。改成固定 19:30 也无本人确认。",
-      "evidence": null
+      "evidence": "2026-11-27-v6-0178-arrival-by-and-opening-bound.json"
     }
   ],
   "actual_channel_ledger_counts": {
@@ -661,6 +661,7 @@
     "already_executed_tool_reference": "2026-11-27-v6-0402-stale-terminal-fact-scope.json",
     "retained_delivered_board_reference": "2026-11-27-v6-0437-board-quote-retention.json",
     "arrival_by_and_soft_duration": "2026-11-27-v6-0038-arrival-by-soft-duration.json",
+    "distinct_arrival_and_minimum_opening": "2026-11-27-v6-0178-arrival-by-and-opening-bound.json",
     "known_private_formation_but_missing_gameplay": "2026-11-27-v6-0437-private-create-missing-gameplay.json",
     "fixed_start_and_attendance": "2026-11-27-v6-0178-scheduled-opening-language.json",
     "same_game_late_arrival_delivery": "2026-11-27-v6-real-late-arrival-delivery.json"
