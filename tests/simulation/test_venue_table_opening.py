@@ -19,18 +19,19 @@ _EARLY = _OPEN.replace(hour=19, minute=0)
 _LATE = _EARLY + timedelta(minutes=30)
 
 
-def _table(tmp_path):
+def _table(tmp_path, *, anonymous=False):
     """经正式建桌和报名形成一张尚未定时的人齐开局。"""
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
     with using_clock(lambda: _OPEN - timedelta(minutes=3)):
         store.configure_rooms(["room"])
         game, _ = store.create_game(
-            conversation_id="owner-dm-a", organizer_id="a", organizer_name="A", known_players=[],
+            conversation_id="owner-dm-a", organizer_id="a", organizer_name="A",
+            known_players=[{"customer_id": "a", "seat_count": 2, "anonymous_seat_count": 1}] if anonymous else [],
             requirement={"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
                          "start_time_kind": "asap_when_full", "duration_hours": 4},
             trace_id="create-asap",
         )
-        for actor in _MEMBERS[1:]:
+        for actor in _MEMBERS[1:3] if anonymous else _MEMBERS[1:]:
             store.join_game(game_id=game.game_id, customer_id=actor, display_name=actor, trace_id=f"join:{actor}")
     group = VenueTableGroup(store, tmp_path / "table.sqlite3", game.game_id,
                            actor_ids=(*_MEMBERS, "outsider"), opened_at=_OPEN)
@@ -204,3 +205,17 @@ def test_unquoted_message_sent_before_proposal_in_same_clock_tick_cannot_vote(tm
     with pytest.raises(ValueError, match="visible proposal"):
         opening.record_vote(early_message, proposal_id="not-visible-before-message", accepts=True)
     assert store.require_game(game_id).planned_start_at is None
+
+
+def test_companion_room_membership_does_not_stand_in_for_an_identified_business_seat(tmp_path):
+    """同行可先入群，但绑到实际匿名席后才能加入四席时间确认。"""
+    from .venue_table_shop import VenueTableShop
+
+    store, game_id, group, opening = _table(tmp_path, anonymous=True)
+    shop = VenueTableShop(None, tmp_path / "negotiation.jsonl")
+    assert shop(group, None, _OPEN) is None
+    group.invite_companion("invite", inviter_id="a", recipient_id="d", at=_OPEN + timedelta(minutes=1))
+    group.respond_companion("invite", actor_id="d", at=_OPEN + timedelta(minutes=2), accept=True)
+    assert group.member_ids() == {AGENT_ID, *_MEMBERS}
+    assert shop(group, None, _OPEN + timedelta(minutes=2)) is None
+    assert opening.current() is None and store.require_game(game_id).planned_start_at is None

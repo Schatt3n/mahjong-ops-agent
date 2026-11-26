@@ -3,6 +3,8 @@
 from datetime import datetime
 import json
 
+from mahjong_agent_runtime.domains.game_commitments import active_game_participant_ids
+from mahjong_agent_runtime.domains.game_domain import START_KIND_ASAP_WHEN_FULL
 from mahjong_agent_runtime.llm import completion_diagnostics, model_response_source
 from mahjong_agent_runtime.models import GameStatus
 
@@ -28,6 +30,9 @@ class VenueTableShop:
         game = group.store.require_game(group.game_id)
         if game.status != GameStatus.READY or game.actual_started_at:
             return None
+        seat_ids = active_game_participant_ids(game)
+        if len(seat_ids) != 4 or group.member_ids(at=at) != {AGENT_ID, *seat_ids}:
+            return None
         opening = VenueTableOpening(group)
         records = tuple(row for row in group.delivered_receipts() if row.message.sent_at <= at)
         proposed = [row for row in records if row.message.sender_id == AGENT_ID
@@ -38,7 +43,7 @@ class VenueTableShop:
         active = opening.current()
         if active and active["committed"]:
             return self._confirmation(group, at, active, records)
-        if game.planned_start_at is not None:
+        if game.planned_start_at is not None or game.requirement.get("start_time_kind") != START_KIND_ASAP_WHEN_FULL:
             return None
         if reply_to is None:
             return self._message(group, f"table-opening-inquiry:{group.game_id}", at,
