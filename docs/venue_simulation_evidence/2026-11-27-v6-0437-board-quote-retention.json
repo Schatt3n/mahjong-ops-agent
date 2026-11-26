@@ -1,0 +1,39 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "customer_case": "0437",
+  "role_event": {
+    "journal_sequence": 14,
+    "event_id": "role-event:ab78e5d668e196ec385511ae4d3a69f06d427aa5d17433c3b181046880011f6e",
+    "kind": "timer",
+    "at": "2026-11-26T11:05:00+08:00",
+    "caused_by": null,
+    "actual_prompt_group_rows": 16,
+    "actual_prompt_private_rows": 5,
+    "quoted_message_id_mentions": 8,
+    "direct_parent_board_rows": 0,
+    "raw": {"action": "send", "text": "老板好 红中那桌下午两点后还有位吗 底2到3能打 烟况定了没", "kind": "group",
+      "recipient_id": "venue-group", "quote_message_id": "outbound:board:board_snapshot_a96eebfde42246391bef17f8b5fb2f8f"},
+    "response_source": {"call_id": "llm_call_da0311a06c414af08a1fc29d1feb3408", "http_response_complete": true,
+      "raw_response_sha256": "3d4a5119b27dd64a6974b42bc5891c4a91ecb2a074144f843556a0b46b3365ee"},
+    "error": "send quote must name a delivered message visible in the target group",
+    "availability_reviews": 0,
+    "shop_ingress_trace": null
+  },
+  "actual_referenced_board": {
+    "chat_sequence": 55,
+    "message_id": "outbound:board:board_snapshot_a96eebfde42246391bef17f8b5fb2f8f",
+    "delivered_at": "2026-11-26T09:07:30+08:00",
+    "recipient_id": "venue-group",
+    "text": "当前缺人局：\n1、人齐开 红中 2～3元 烟况待定 173"
+  },
+  "analysis": "角色两小时内实际在本群收到此看板，并在稍早都还能直接引用。定时唤醒没有触发来话，16条群历史挤走看板原件，但其中8条消息仍保留同一个嵌套编号。模型按可见编号给出格式正确的发送动作，引用校验因缺少原件拒绝，未到时段提取和店家处理。",
+  "change": "已见的近期同群消息直接引用正式看板时，从本人的实际收件与同群业务快照核对原件。最多用现有群历史的一格保留一个直接原件，实际触发与引用消息继续保留。引用校验仍只接受本轮确实可见的同群原件。",
+  "offline_verification": {
+    "test": "tests/simulation/test_venue_rolling_roles.py::test_v6_timer_quotes_delivered_board_even_after_group_history_crowding",
+    "scope": "真实 SQLite 看板与群聊天、同日期精确原稿、16条群历史压力、定时唤醒无虚构触发、滚动入站保持正文和看板引用。另核对成员资格、其他群、没有实收回执和未来时间。角色响应和提取为离线替身。",
+    "targeted_tests_passed": 202,
+    "live_replay": "pending"
+  }
+}

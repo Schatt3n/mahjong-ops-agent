@@ -45,6 +45,18 @@ class VenueRollingBoard:
         verified = self._verified_boards(records)
         return [message for message, _ in verified]
 
+    def latest_quoted_parent(self, recent_group: list[dict], visible_by_id: dict[str, dict]) -> tuple[str, str] | None:
+        """找近期同群消息直接引用且本人已经收到的正式看板。"""
+        for source in reversed(recent_group):
+            if (source.get("kind"), source.get("recipient_id")) != ("group", self.channel.room_id):
+                continue
+            parent = visible_by_id.get(source.get("quoted_message_id"))
+            if (parent is not None and parent["sequence"] < source["sequence"]
+                    and datetime.fromisoformat(parent["sent_at"]) <= datetime.fromisoformat(source["sent_at"])
+                    and self._verified_boards([parent])):
+                return parent["message_id"], source["message_id"]
+        return None
+
     def published_item_expirations(self, records: list[dict]) -> dict[str, list[dict]]:
         """保留真实送达的看板条目及其到期证据，由评审按每条来话的时点筛选。"""
         expired = {row.entity_id: row.occurred_at for row in self.store.transitions

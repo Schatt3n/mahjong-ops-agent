@@ -486,8 +486,9 @@ class VenueRollingRoles:
         visible = [row for row in self.channel.events_for(event.actor_id)
                    if datetime.fromisoformat(row["sent_at"]) <= event.due_at]
         by_id = {row["message_id"]: row for row in visible}
-        ids = {row["message_id"] for kind in ("group", "private")
-               for row in [entry for entry in visible if entry["kind"] == kind][-16:]}
+        recent_group = [row for row in visible if row["kind"] == "group"][-16:]
+        recent_private = [row for row in visible if row["kind"] == "private"][-16:]
+        ids = {row["message_id"] for row in (*recent_group, *recent_private)}
         reference = event.caused_by
         retained = set()
         while reference in by_id and reference not in retained:
@@ -495,6 +496,17 @@ class VenueRollingRoles:
             row = by_id[reference]
             reference = row.get("quoted_message_id") or row.get("source_message_id")
         ids.update(retained)
+        if self.board is not None and event.actor_id in self.group_members:
+            quoted_parent = self.board.latest_quoted_parent(recent_group, by_id)
+            if quoted_parent and quoted_parent[0] not in ids:
+                parent_id, source_id = quoted_parent
+                protected = retained | {source_id}
+                displaced = next((row["message_id"] for row in recent_group if row["recipient_id"] == self.channel.room_id
+                                  and row["message_id"] not in protected), None)
+                if displaced is not None:
+                    # 保留引用的原文而不扩大历史窗口，也不挤掉实际触发和引用消息本身。
+                    ids.remove(displaced)
+                    ids.add(parent_id)
         return [{**row, "issuer": "self"} if row["sender_id"] == event.actor_id else row
                 for row in visible if row["message_id"] in ids]
 

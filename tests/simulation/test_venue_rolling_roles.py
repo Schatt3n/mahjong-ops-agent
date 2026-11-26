@@ -15,8 +15,8 @@ from mahjong_agent_runtime.models import Game, GameParticipant, GameStatus, Room
 
 from . import venue_rolling_roles
 from .sim_adapter import build_runtime
-from .venue_actors import ActorAction, MockActor, Relationship, generate_personas
-from .venue_channel import AGENT_ID, SandboxChannel
+from .venue_actors import ActorAction, MockActor, ModelActor, Relationship, generate_personas
+from .venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
 from .venue_judging import AGENT_CHECK
 from .venue_role_journal import VenueRoleJournal
 from .venue_rolling_roles import VenueRollingRoles
@@ -48,17 +48,102 @@ class _MixedLocalActor(MockActor):
 
 
 def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRollingRoles, publish_boards=False,
-              active_users=None, peer_dialogues=False):
+              active_users=None, peer_dialogues=False, start_at=None):
     """重建相同的正式业务入口与独立频道，从磁盘打开已有运行证据。"""
     runtime, client = build_runtime(SQLiteAgentStore(tmp_path / "agent.sqlite3"), "mock")
     client.semantic_intent = "chitchat"
     channel = SandboxChannel(runtime, room_id="rolling-room", archive_path=tmp_path / "chat.sqlite3",
                              identities={person.sender_id: person.name for person in people})
     scenario = scenario_class(people=people, actor=actor, judge=None, channel=channel, run_dir=tmp_path,
-        start_at=datetime.fromisoformat("2026-11-24T20:00:00+08:00"), seed=42,
+        start_at=start_at or datetime.fromisoformat("2026-11-24T20:00:00+08:00"), seed=42,
         active_users=active_users or len(people), workers=workers, dialogue_turns=2, judge_users=1,
         publish_boards=publish_boards, peer_dialogues=peer_dialogues)
     return scenario, client
+
+
+def test_v6_timer_quotes_delivered_board_even_after_group_history_crowding(tmp_path, monkeypatch):
+    """复现真实原稿和16条群历史压力，只为一个真实看板原件留位置。"""
+    people = generate_personas(42)[:3]
+    viewer, peer, organizer = people
+    draft = "老板好 红中那桌下午两点后还有位吗 底2到3能打 烟况定了没"
+    board_at = datetime.fromisoformat("2026-11-26T09:07:30+08:00")
+    at = datetime.fromisoformat("2026-11-26T11:05:00+08:00")
+    start = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+
+    class FrozenActorClient:
+        """按 V6 实际角色原稿发出选择，问题里的桌时间不算顾客到场保证。"""
+
+        def complete(self, messages, **_):
+            payload = json.loads(messages[-1]["content"])
+            if "draft" in payload:
+                assert payload["draft"] == draft
+                return '{"claims":[]}'
+            return json.dumps({"action": "send", "text": draft, "kind": "group", "recipient_id": room,
+                               "quote_message_id": board["message_id"]}, ensure_ascii=False)
+
+    scenario, _ = _scenario(tmp_path, people=people, actor=ModelActor(FrozenActorClient()), publish_boards=True,
+                            start_at=start)
+    channel, store = scenario.channel, scenario.channel.runtime.store
+    room = channel.room_id
+    with using_clock(lambda: board_at - timedelta(seconds=30)):
+        store.create_game(conversation_id=channel.private_conversation_id(organizer.sender_id),
+            organizer_id=organizer.sender_id, organizer_name=organizer.name, known_players=[], trace_id="v6-board-table",
+            requirement={"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3},
+                         "start_time_kind": "asap_when_full"})
+    board, = channel.publish_board(trace_id="v6-delivery", sent_at=board_at)["archive_outputs"]
+    assert "红中 2～3元 烟况待定 173" in board["text"]
+    for index in range(8):
+        receipt_at = board_at + timedelta(seconds=index + 1)
+        with using_clock(lambda: receipt_at):
+            channel.send(MessageEnvelope(f"v6-reference-{index}", peer.sender_id, "红中那桌烟况定了没？",
+                                         receipt_at, "group", room, board["message_id"]))
+        channel.publish_owner(kind="group", recipient_id=room, text="晚点再聊。", sent_at=receipt_at,
+                              message_id=f"v6-followup-{index}")
+    visible = [row for row in channel.events_for(viewer.sender_id) if row["kind"] == "group"]
+    tail = visible[-16:]
+    assert all(row["message_id"] != board["message_id"] for row in tail)
+    assert any(row["quoted_message_id"] == board["message_id"] for row in tail)
+
+    with scenario.journal.run_owner():
+        timer = scenario.journal.enqueue(actor_id=viewer.sender_id, kind="timer", origin_id="v6-clock", due_at=at,
+            details={"can_arrive": True, "earliest_arrival": "2026-11-26T11:14:00+08:00",
+                     "free_from": "2026-11-26T11:00:00+08:00", "free_until": "2026-11-26T22:00:00+08:00"})
+        claimed, = scenario.journal.claim_wave(1)
+        assert timer.event_id == claimed.event_id
+        with monkeypatch.context() as patch:
+            patch.setattr(scenario, "group_members", scenario.group_members - {viewer.sender_id})
+            assert board["message_id"] not in {row["message_id"] for row in scenario._history(claimed)}
+        trigger = replace(claimed, kind="group_attention", caused_by=tail[0]["message_id"])
+        with_trigger = {row["message_id"] for row in scenario._history(trigger)}
+        assert {trigger.caused_by, board["message_id"]} <= with_trigger
+        planned = scenario._plan(claimed)
+        decision = planned.decision["decision"]
+        assert decision["status"] == "valid" and decision["action"]["text"] == draft
+        assert decision["action"]["quote_message_id"] == board["message_id"]
+        claim_review, = decision["availability_reviews"]
+        assert claim_review["claims"] == [] and claim_review["conflict"] is None
+        context = decision["context"]
+        assert context["delivery"] is None
+        assert len([row for row in context["history"] if row["kind"] == "group"]) == 16
+        result, _ = scenario._dispatch(planned)
+        assert result.get("error_type") is None and result.get("channel_trace_id")
+        scenario.journal.finish(planned, result)
+
+    actual = next(row for row in channel.events() if row["message_id"] == result["message_id"])
+    assert actual["text"] == draft and actual["quoted_message_id"] == board["message_id"]
+    assert actual["recipient_id"] == room
+
+    # 账本找不到原件、房间不一致、或送达晚于引用时均不给原件保留资格。
+    assert scenario.board.latest_quoted_parent(tail, {}) is None
+    assert scenario.board.latest_quoted_parent(tail, {
+        board["message_id"]: {**board, "recipient_id": "foreign-group"},
+    }) is None
+    assert scenario.board.latest_quoted_parent(tail, {
+        board["message_id"]: {**board, "sent_at": at.isoformat()},
+    }) is None
+    assert scenario.board.latest_quoted_parent(tail, {
+        board["message_id"]: {**board, "text": "不吻合的看板原文"},
+    }) is None
 
 
 def test_board_delivery_wakes_roles_after_resume_without_republishing(tmp_path, monkeypatch):
