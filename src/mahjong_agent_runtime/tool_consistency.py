@@ -136,6 +136,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         arrival_floor = None  # 本轮的到店钟点不能剪掉另一个明确日期的开场时段。
     earliest = max(limit[0], arrival_floor) if limit and arrival_floor else limit[0] if limit else arrival_floor
     if call.name == "search_current_games":
+        if hard_departure and earliest and earliest >= hard_departure:
+            return "已核实的最早开场不早于离店时间，先澄清可参加的时段。"
         if requested_end != hard_departure:
             if hard_departure:
                 return (f"现成局请带上已核实的 must_end_by={hard_departure.isoformat()}，按每桌实际约定时段匹配。"
@@ -149,8 +151,6 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
                 return (f"已核实顾客最迟 {arrival_by.isoformat()} 到店。请保留其他条件，移除本次未核实的开场过滤后重试。"
                         "找到较早的桌可再确认顾客能否赶上。")
             return None
-        if hard_departure and earliest >= hard_departure:
-            return "已核实的最早开场不早于离店时间，先澄清可参加的时段。"
         if (fixed_opening == earliest
                 and "start_time_range" not in proposed and _aware_datetime(proposed.get("planned_start_at")) == earliest):
             return None

@@ -1005,6 +1005,59 @@ def test_rolling_latest_arrival_does_not_exclude_the_live_earlier_table(tmp_path
     store._connection.close()
 
 
+@pytest.mark.parametrize(("daypart", "deadline", "prior", "expected"), [
+    ("今天傍晚", "九点半", None, "21:30"),
+    ("今天傍晚", "晚上九点半", None, "21:30"),
+    ("今天傍晚", "早上九点半", None, "09:30"),
+    ("今天傍晚", "九点半 上午", None, "09:30"),
+    ("今天傍晚", "九点半 AM", None, "09:30"),
+    ("今天傍晚", "09:30", None, "09:30"),
+    ("今天傍晚", "09点30分", None, "09:30"),
+    ("今天傍晚", "一点", None, "13:00"),
+    ("今天傍晚", "九点半", "我早上九点半必须走", "09:30"),
+    ("晚上好，今天", "九点半", None, "09:30"),
+])
+def test_rolling_evening_scope_preserves_unique_hard_departure_and_real_conflicts(daypart, deadline, prior, expected, tmp_path):
+    """同句已有傍晚查局依据才消歧口语钟点，早晨、数字时点和已引用截止保持原意。"""
+    at = datetime.fromisoformat("2026-11-26T09:05:00+08:00")
+    text = f"{daypart}有合适的红中桌吗 我最多打到{deadline}"
+    message = _incoming(text, sent=at)
+    store = SQLiteAgentStore(tmp_path / "evening-departure-authority.sqlite3")
+    current_ref = 2 if prior else 1
+    review = ReviewClient([_decision(current_ref, clock_role="departure_deadline", opening_window=None,
+        opening_dayparts={"date": "2026-11-26", "parts": ["evening"], "source_ref": current_ref},
+        accepted_stake_range=None)])
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(), table_availability_client=review)
+    before = at - timedelta(minutes=2)
+    _activate(store, started=before)
+    if prior:
+        _persist(store, _incoming(prior, sent=before, message_id="prior"))
+    with using_clock(lambda: at):
+        _persist(store, message)
+        games = {}
+        for starts, duration in (("18:30", 3), ("20:00", 2)):
+            game, _ = store.create_game(conversation_id=starts, organizer_id=starts, organizer_name="桌主", trace_id=starts,
+                known_players=[{"customer_id": starts}], requirement={"game_type": "red_center_mahjong", "stake": 1,
+                    "planned_start_at": f"2026-11-26T{starts}:00+08:00", "duration_hours": duration})
+            games[starts] = game.game_id
+        opening = {"start_at": "2026-11-26T18:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"}
+        requirement = {"game_type": "red_center_mahjong", "start_time_range": opening}
+        unchecked = _execute_scope_search(service, message, requirement, step=1)
+        assert not unchecked.allowed and not unchecked.called
+        status = unchecked.result["table_availability_evidence"]
+        floor = f"2026-11-26T{expected}:00+08:00"
+        assert status["must_end_by"] == status["play_until_at"] == floor and status["opening_window"] == opening
+        with_deadline = _execute_scope_search(service, message, {**requirement, "must_end_by": floor}, step=2)
+    if expected == "21:30":
+        assert "must_end_by=2026-11-26T21:30:00+08:00" in unchecked.error
+        assert with_deadline.called and with_deadline.allowed
+        assert [row["game"]["game_id"] for row in with_deadline.result["matches"]] == [games["18:30"]]
+    else:
+        assert "澄清" in unchecked.error and "澄清" in with_deadline.error and not with_deadline.called
+    assert len(review.calls) == 1 and len(store.games) == 2 and not store.room_reservations
+    store._connection.close()
+
+
 @pytest.mark.parametrize(("text", "role", "floor", "game_type", "stakes", "explicit_evening"), [
     ("老板好，晚上六点半后有空，想打四川麻将，2到3元底，无烟的，能搭一桌吗？",
      "arrival_not_before", "18:30", "sichuan_mahjong", {"min": 2, "max": 3}, True),

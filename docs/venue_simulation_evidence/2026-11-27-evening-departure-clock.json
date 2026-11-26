@@ -1,0 +1,23 @@
+{
+  "source_run": "2026-11-25-real-755ef592c6",
+  "trace_id": "trace_f085cd9ef84e3ca498ca7fa3",
+  "mode": "offline_verified_after_real_failure",
+  "original_text": "今天傍晚有合适的红中桌吗 我最多打到九点半",
+  "virtual_at": "2026-11-26T09:05:00+08:00",
+  "original_observation": {
+    "supporting_customer_ref": 1,
+    "verified_opening_window": ["2026-11-26T18:00:00+08:00", "2026-11-27T06:00:00+08:00"],
+    "lexical_deadline": "2026-11-26T09:30:00+08:00",
+    "actual_search_results": 0,
+    "rejected_search_proposals": 4,
+    "delivered_reply": "稍等一下"
+  },
+  "candidate": {
+    "grounded_hard_deadline": "2026-11-26T21:30:00+08:00",
+    "source_condition": "本任务只有当前本人来话提供时点，原话明确要求晚间查局。保留原有日期，口语钟点的同日两个半天解释中只有一个在可打时段内。",
+    "sqlite_result": "18:30开、21:30结束的真实候选用 must_end_by 查到。20:00开、22:00结束的对照被排除。",
+    "controls": ["明确上午或晚上的钟点", "09:30与09点30分", "没有可行同日候选", "任务中已有明确截止原话", "只有晚上问候"],
+    "conflicting_known_end": "保留原截止，要求先澄清时段。"
+  },
+  "validation": {"focused_tests_passed": 201, "real_candidate_replayed": false}
+}

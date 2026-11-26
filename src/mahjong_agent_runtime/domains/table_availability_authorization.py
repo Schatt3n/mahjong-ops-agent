@@ -60,6 +60,8 @@ _DATE_TEXT = re.compile(
     r"|(?P<short_month>\d{1,2})月(?P<short_day>\d{1,2}))(?:日|号)?(?!\d)"
 )
 _WEEKDAY_TEXT = re.compile(r"(?P<week>下下|下|本|这)?(?:星期|周)(?P<day>[一二三四五六日天末])")
+_EXPLICIT_EVENING_TEXT = re.compile(r"傍晚|今晚|明晚|晚间|晚上(?!好)")
+_CONTRASTING_DAYPART_TEXT = re.compile(r"早上|上午|下午|凌晨|(?<![a-z])[ap]\.?\s*m\.?(?![a-z])", re.IGNORECASE)
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -273,6 +275,20 @@ def _supported_role_time(observation: dict[str, Any], text: str, local_at: datet
     return None
 
 
+def _resolve_evening_departure(
+    observation: dict[str, Any], at: datetime, window: tuple[datetime, datetime],
+) -> datetime:
+    """仅纠正与已核实晚间冲突、同日只有一个可行半天的口语离店钟点。"""
+    clock_text = observation["clock_text"]
+    if (observation["resolution"] != "nearest_non_past_same_day" or observation["qualifier"] in {"左右", "前后"}
+            or not ("点" in clock_text or "时" in clock_text) or re.match(r"0\d", clock_text)
+            or at > window[0] or at.date() != window[0].date()):
+        return at
+    morning = at.replace(hour=at.hour % 12)
+    compatible = [point for point in (morning, morning + timedelta(hours=12)) if window[0] < point <= window[1]]
+    return compatible[0] if len(compatible) == 1 else at
+
+
 def _verify_multi_clock_opening_source(
     decision: dict[str, Any], window: tuple[datetime, datetime] | None, *,
     current: int, bound: list[tuple[dict[str, Any], str]], customer_rows: dict[int, str],
@@ -391,10 +407,15 @@ def _parse_decision(
         if len(departures) == 1 and (
             departure_time := _supported_role_time(departures[0][0], current_text, local_at)
         ):
-            decision["play_until_at"] = departure_time.isoformat()
             item, departure_role = departures[0]
             if departure_role == "departure_deadline" and item["qualifier"] not in {"左右", "前后"}:
+                if (window is not None and dayparts and dayparts["source_ref"] == current
+                        and dayparts["parts"] == ["evening"] and len(source_dates) == 1
+                        and _EXPLICIT_EVENING_TEXT.search(current_text) and not _CONTRASTING_DAYPART_TEXT.search(current_text)):
+                    # 只用当前同一来话的晚间范围消歧。较早仍有来源的截止时刻交给原校验。
+                    departure_time = _resolve_evening_departure(item, departure_time, window)
                 decision["must_end_by"] = departure_time.isoformat()
+            decision["play_until_at"] = departure_time.isoformat()
     if decision["lookup_scope"] == "specific_table":
         # 同轮另查时仍保留原桌的排除依据；由每次调用的目的选择校验口径。
         # 排除同时被单独指明为原桌开场的等值钟点，保留能合法定位原桌的时间。
