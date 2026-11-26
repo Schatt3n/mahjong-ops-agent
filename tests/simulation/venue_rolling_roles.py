@@ -667,7 +667,10 @@ class VenueRollingRoles:
 
     def _wake_from_deliveries(self, parent: RoleEvent, messages: list[dict]) -> list[str]:
         """为真实收件人安排独立回合，仍使用每人的每日预算和转发深度。"""
-        depth = parent.details.get("depth", 0) + 1
+        depth = parent.details.get("depth", 0)
+        # 桌群店家处理事件已沿顾客来话加了一次深度。同一时刻的店家回复沿用这次深度。
+        if parent.kind != _TABLE_SHOP_WAKE:
+            depth += 1
         due = parent.due_at + _WAIT_FOR_REPLY
         can_continue = (depth < self.dialogue_turns
                         and due.astimezone(self.start_at.tzinfo).date() <= (self.start_at + timedelta(days=1)).date())
