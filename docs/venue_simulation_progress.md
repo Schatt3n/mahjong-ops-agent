@@ -14,6 +14,8 @@
 
 较新的两路复验启用了每轮 12 次模型调用预算，店家运行步数仍为默认 8。原始执行轨迹明确区分这两种限制，例如审查循环达到第 8 步后记录 `max_steps_exceeded`。起点与报告现在同时记录运行步数、模型调用次数、单次 token 上限和调用超时。新起点续跑时复用原限制，原有档案仍可按其既有选项打开。
 
+合并到 `f28f2c5` 后，仿真插件和规划结构、查桌证据、时间授权专项共 955 项通过。范围为 `tests/simulation`、`tests/test_action_response_source.py`、`tests/test_current_game_capacity_evidence_scope.py` 和 `tests/test_table_availability_authorization.py`。真实运行结果按各自的版本和账本记录。 [分案排查范围](venue_simulation_evidence/2026-11-27-scoped-empty-reply-review.json) [模型结构恢复证据](venue_simulation_evidence/2026-11-27-live-planner-missing-action.json)
+
 当前从 `codex/venue-customer-quality` 接续，早期营业仿真记录来自 `codex/venue-simulation`。架构、最终能力和分阶段验收见 [实施路径与验收](venue_simulation.md)。每个阶段先跑专项验收，再提交和推送。主 Agent 在沙盒中使用独立实例、业务库、档案和模型客户端。优先在副本中复现时间问题，先改场景时间或仿真时钟，再判断是否有可独立复现的领域缺陷。
 
 **当前没有需要你拍板的事项。** 两日 12 人 OpenCode 档已跑完，仍需修正店家查局恢复和角色续话质量，通过后再扩容。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。
