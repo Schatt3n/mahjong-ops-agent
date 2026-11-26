@@ -37,7 +37,7 @@ def test_simple_query_uses_agent_with_short_public_reply_contract() -> None:
 
     assert decision.action == "agent_loop"
     assert decision.channel == "group"
-    assert decision.reply_constraints.max_length == 20
+    assert decision.reply_constraints.max_length == 80
     assert decision.reply_constraints.no_private_info is True
 
 
@@ -57,7 +57,7 @@ def test_complex_request_from_non_friend_stays_in_group_with_privacy_contract() 
 
     assert decision.action == "agent_loop"
     assert decision.channel == "group"
-    assert decision.reply_constraints.max_length == 50
+    assert decision.reply_constraints.max_length == 80
     assert decision.reply_constraints.no_private_info is True
 
 

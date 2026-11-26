@@ -296,7 +296,7 @@ def test_group_agent_loop_receives_structured_reply_constraints() -> None:
 
     assert result.action == "agent_loop"
     assert runtime.user_messages[-1].metadata["reply_constraints"] == {
-        "max_length": 20,
+        "max_length": 80,
         "no_private_info": True,
     }
     assert messenger.group_messages[-1][1] == "还差一位"

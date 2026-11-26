@@ -33,6 +33,10 @@ class GroupMessage:
         return payload
 
 
+# 正常群答有多项信息时可以完整回答，具体隐私边界仍由通道控制。
+DEFAULT_PUBLIC_REPLY_MAX_LENGTH = 80
+
+
 @dataclass(slots=True)
 class ReplyConstraints:
     """后端发出的输出边界，不包含任何业务结论。"""

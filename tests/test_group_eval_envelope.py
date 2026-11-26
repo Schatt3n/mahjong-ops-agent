@@ -136,9 +136,9 @@ def test_original_fragmented_smoking_query_uses_production_envelope_and_persists
     assert message["metadata"] == {
         "source": "group", "room_id": "room_eta", "source_conversation_id": "wechaty:room:room_eta",
         "group_topic_source": {"channel":"wechaty", "room_id":"room_eta", "external_user_id":"customer_eta_1"},
-        "reply_constraints": {"max_length": 20, "no_private_info": True},
+        "reply_constraints": {"max_length": 80, "no_private_info": True},
     }
-    assert client.main_payloads[0]["reply_constraints"] == {"max_length": 20, "no_private_info": True}
+    assert client.main_payloads[0]["reply_constraints"] == {"max_length": 80, "no_private_info": True}
     assert main["tool_calls"] == ["search_current_games"]
     events = main["trace_events"]
     assert [event["step"] for event in events] == main["trace_steps"]
@@ -252,7 +252,7 @@ def test_group_eval_reuses_identity_isolation_and_public_board_without_private_c
     assert message["conversation_id"] == "group:public-room:customer:customer-a"
     assert message["text"] == source_message.text
     initial_context = client.main_payloads[0]
-    assert initial_context["reply_constraints"] == {"max_length": 20, "no_private_info": True}
+    assert initial_context["reply_constraints"] == {"max_length": 80, "no_private_info": True}
     assert len(initial_context["group_room_board_games"]) == 1
     public_board = initial_context["group_room_board_games"][0]
     assert public_board["game_id"] == game.game_id

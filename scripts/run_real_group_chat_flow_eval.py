@@ -57,6 +57,7 @@ from mahjong_agent_runtime.group_chat import (  # noqa: E402
     SessionMerger,
     SessionRouter,
 )
+from mahjong_agent_runtime.group_chat.models import DEFAULT_PUBLIC_REPLY_MAX_LENGTH  # noqa: E402
 from mahjong_agent_runtime.group_chat.owner_parser import _CHINESE_STAKE  # noqa: E402
 
 
@@ -636,7 +637,7 @@ class RealGroupChatFlowEvaluator:
                 notify_dispatcher=notifier, messenger=messenger, runtime=capture,
             )
             handler._handle_agent_loop(source_message,
-                RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=20),
+                RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=DEFAULT_PUBLIC_REPLY_MAX_LENGTH),
                     topic_routing={"message": {"classification": {"intent": outcome.classification.intent}}}),
                 trace_id=f"trace_main_{case['id']}")
             result = capture.result

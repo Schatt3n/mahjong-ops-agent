@@ -367,7 +367,7 @@ class AgentContextBuilder:
                 {
                     "role": "system",
                     "content": (
-                        "【本轮客户可见回复约束】只输出当前用户真正需要的最短回复；"
+                        "【本轮客户可见回复约束】简单的问题简短答，有多项问题或下一步决定时把必要信息说清；"
                         f"回复不得超过 {reply_constraints['max_length']} 个中文字符{privacy}。"
                     ),
                 }

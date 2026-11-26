@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from ..stores import AgentStore
-from .models import GroupMessage, PrivateSwitchContext, ReplyConstraints, RoutingDecision
+from .models import DEFAULT_PUBLIC_REPLY_MAX_LENGTH, GroupMessage, PrivateSwitchContext, ReplyConstraints, RoutingDecision
 
 
 class L2IntentRouter:
@@ -75,7 +75,8 @@ class L2IntentRouter:
                     reply_guidelines="根据本人原话和真实状态推进，不复述已明确信息。",
                 ), topic_routing=receipt,
             )
-        limit = 20 if intent == "query" else 10 if intent == "cancel" else 50
+        # 普通群答留出说明桌况并接一个有效问题的空间，单纯确认取消仍可短答。
+        limit = 10 if intent == "cancel" else DEFAULT_PUBLIC_REPLY_MAX_LENGTH
         return RoutingDecision(action="agent_loop", channel="group",
                                reply_constraints=ReplyConstraints(max_length=limit), topic_routing=receipt)
 
