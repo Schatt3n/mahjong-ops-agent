@@ -981,7 +981,12 @@ def build_reply_self_review_payload(
                 "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
                 *(('分桌回答核对 assigned_room.access_window_started。为 false 时，把预约开始时间明确关联到用房；单说牌局几点开不能给随后「到了直接过去」加上未来条件。能说明稍后用房，不补写没有证据的大厅、前台或其他等候位置，不保证准时开打。',)
                   if private_customer_reply and any(game.get("assigned_room") for game in visible_games if isinstance(game, dict)) else ()),
-                "凡回复提及一桌的缺口，核对同一 game_id 最新成功结果的 seat_summary.remaining_seats。直接报缺几人时，先与 seat_count_evidence 的 remaining_seats_display 核对；claimed_seats 是已占位数，不能拿来判断缺几人。173/一缺三=缺3，272/二缺二=缺2，371/三缺一=缺1。同局的结构化席位优先于自由填写的 user_visible_summary、历史话术和查询需求；冲突以 semantic_contradiction 拒绝。已有准确的缺口不转成另一种说法，修正不确定时先保留其他有证据的台况。",
+                "回复断言一张已经登记的桌目前缺几人时，核对同一 game_id 最新成功结果的 seat_summary.remaining_seats。"
+                "若整句明确在征询一项未定的方案，『你们三个人来，那还要找一位』可以是方案中的人数推算，不能当成当前席位回执。"
+                "条件句之外另行断言已经登记、已留位或已有缺口时，仍单独核对。真实现桌的缺口以 seat_count_evidence 的 remaining_seats_display 为准。"
+                "claimed_seats 是已占位数，不能拿来判断缺几人。173/一缺三=缺3，272/二缺二=缺2，371/三缺一=缺1。"
+                "同局的结构化席位优先于自由填写的 user_visible_summary、历史话术和查询需求。冲突以 semantic_contradiction 拒绝。"
+                "已有准确的缺口不转成另一种说法，修正不确定时先保留其他有证据的桌况。",
                 "allow_known_user_echo_omission=true 时，包括真实局选项在内的当前客户回复都默认省去已明确且未变化的条件，不能仅因未复述档位、烟况等字段判 semantic_fact_loss",
                 "按实际收件人的已知范围判断省略，不能把发起人的条件套给另一候选人；对他尚未知、真正不同或新变化且影响决定的条件仍须说明，不能以简短掩盖差异",
                 "介绍选项或答局况时须保留真实新变化、条件差异、辨认所指局必要的锚点、客户明确要求核对的信息和本目标仍需的决策问题；原稿或公开摘要包含某字段不产生逐项复述义务",

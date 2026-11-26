@@ -202,7 +202,11 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
                     "用 waiting_user 等本人答复，不要重新征询组局委托。仅询局时按已核实的查局结果回复。"
                     f"不要再次尝试同一建局。{soft_end}"
                 )
-            return "顾客授权找局或凑桌，但还没选定或委托你定一个固定开场。先反馈现成局或只问开场时间。"
+            return (
+                "本次未建局。顾客还没选定或委托你定一个固定开场。已有明确组局委托时保留委托，"
+                "先反馈实际查到的现成桌或房态，再单独请顾客确认具体开场。"
+                "可行的候选开场仍是方案，不能报成已登记席位、已有缺口或保证开打。不要再次尝试同一建局。"
+            )
         if (earliest and planned < earliest) or (limit and planned > limit[1]):
             return "拟建局的固定开场超出了核实过的可开打时段。"
     elif earliest and stamp < earliest:

@@ -499,6 +499,8 @@ def test_empty_query_is_separate_from_scoped_zero_seat_evidence(latest_query, ex
     interpretation = evidence["availability_claim_interpretation"]
     assert "具体桌席位声明" in interpretation and "泛问" in interpretation
     assert any("别桌" in rule and "unsupported_conclusion" in rule for rule in evidence["rules"])
+    assert any("未定的方案" in rule and "条件句之外另行断言" in rule and "remaining_seats_display" in rule
+               for rule in evidence["rules"])
     assert context == original
 
 

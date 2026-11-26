@@ -1102,8 +1102,10 @@ def test_v5_0146_repeated_arrival_time_prompts_only_the_opening_decision(tmp_pat
     assert not evidence["has_fixed_opening_authority"] and evidence["play_until_at"] == soft_end
     with using_clock(lambda: at):
         other_clock = ToolCall("create_game", {"requirement": terms | fixed | {"planned_start_at": "2026-11-25T20:00:00+08:00"}})
-        assert "还没选定" in validate_table_availability(other_clock, evidence)
-        assert "只核实为本人可到店" not in validate_table_availability(other_clock, evidence)
+        feedback = validate_table_availability(other_clock, evidence)
+        assert "还没选定" in feedback and "只核实为本人可到店" not in feedback
+        assert "单独请顾客确认具体开场" in feedback and "实际查到的现成桌或房态" in feedback
+        assert "不能报成已登记席位、已有缺口或保证开打" in feedback
     assert set(store.games) == {other.game_id}
 
     with using_clock(lambda: agreed.sent_at):
