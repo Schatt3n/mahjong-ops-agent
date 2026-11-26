@@ -32,6 +32,8 @@ max_duration_hours 只记录本人明确的最长可打时长，统一换算为�
 has_fixed_opening_authority 只在本人已定一个具体开场，或本人明确授权店家在给定的开场范围内选一个固定开场时才为 true。答应店家帮找人、本人有空、接受某个宽时间区间、或者报到店与离开钟点不足以选定新局固定开场。多钟点时，true 必须用 opening_customer_ref 指出实际明确选定或委托选定开场的本人记录；若本轮明确约定一个开场，opening_window 两端应为该 opening 候选的同一时点。其他情况为 false，opening_customer_ref 用 null。这里只核对固定开场权限，不授予建局、占席或联系权限。
 仅输出 JSON 对象，键为 clock_role、clock_roles、lookup_scope、opening_window、opening_dayparts、accepted_stake_range、known_cap_score、max_duration_hours、agreed_duration_hours、has_fixed_opening_authority、opening_customer_ref、current_ref、supporting_customer_refs，以及上文允许时的 also_requests_personal_options。opening_window 为 null 或 {"start_at":"带时区ISO","end_at":"带时区ISO"}；opening_dayparts 为 null 或 {"date":"YYYY-MM-DD","parts":["morning","afternoon"],"source_ref":1}，parts 填本人同一日期实际接受的开场时段，枚举 morning、afternoon、evening，每种最多一次，source_ref 必须也列在 supporting_customer_refs。accepted_stake_range 为 null 或 {"min":2,"max":3}，known_cap_score、max_duration_hours、agreed_duration_hours 各为 null 或正数，has_fixed_opening_authority 为布尔值。current_ref 必须是 current=true 的本人记录编号，supporting_customer_refs 列出支持判断的一个或多个本人记录编号，可包括本轮。不能引用店家编号冒充本人；无足够明确事实时保留 null，不补猜。"""
 
+_INDEPENDENT_PERSONAL_READ_PROMPT = """本次重点独立复核是否存在两项并列的查局目的。先分别理解每个问句或请求，再判断它们是否指同一桌。对原桌问玩法、余位或能否赶上，与另外询问不指向原桌的玩法、档位或时间的可玩选项，是两项不同的查询。另查现成桌不必出现「帮我找」或明确委托组局。只报能否赶上原桌或只问原桌条件，不算另查。原桌身份不清时也要独立判断是否另查。只有证据能支持两项时才用 lookup_scope=specific_table、also_requests_personal_options=true，并单独核对另查的时段和条件。"""
+
 _DECISION_KEYS = {
     "clock_role", "lookup_scope", "opening_window", "accepted_stake_range", "known_cap_score",
     "has_fixed_opening_authority", "current_ref", "supporting_customer_refs",
@@ -369,8 +371,9 @@ def _parse_decision(
 def check_table_availability(
     store: AgentStore, client: AgentLLMClient, message: UserMessage, *,
     trace_id: str, step_index: int, timeout_seconds: float, trace_recorder: Any,
+    recheck_personal_read: bool = False,
 ) -> dict[str, Any] | None:
-    """按原话独立判断并缓存同版有效结果；本函数不执行查询或授予写入。"""
+    """按原话独立判断并缓存同版结果。另查复核与原核验分开缓存，失败仍没有依据。"""
     clock = qualified_table_clock(message)
     source = _current_source(store, message) if clock else None
     if source is None:
@@ -386,11 +389,13 @@ def check_table_availability(
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = sha256(serialized.encode()).hexdigest()
+    prompt = _PROMPT + ("\n\n" + _INDEPENDENT_PERSONAL_READ_PROMPT if recheck_personal_read else "")
     identity = json.dumps([message.conversation_id, message.sender_id, message.message_id, task_id, version,
-                           sha256(_PROMPT.encode()).hexdigest(), digest], ensure_ascii=False)
+                           sha256(prompt.encode()).hexdigest(), digest], ensure_ascii=False)
     key = "table-availability:" + sha256(identity.encode()).hexdigest()
     source_info = {"input_sha256": digest, "conversation_version": version,
-                   "source_message_id": message.message_id, "task_context_id": task_id}
+                   "source_message_id": message.message_id, "task_context_id": task_id,
+                   **({"review_purpose": "independent_personal_read"} if recheck_personal_read else {})}
     if cached := store.idempotent_result(key):
         if _current_source(store, message) != source:
             return None
@@ -399,36 +404,37 @@ def check_table_availability(
         })
         return deepcopy(cached.result["decision"])
 
-    source_trace = f"{trace_id}:table-availability:{step_index}"
+    purpose = "table-availability-personal-read" if recheck_personal_read else "table-availability"
+    source_trace = f"{trace_id}:{purpose}:{step_index}"
     trace_recorder.record(trace_id, "table_availability_authorization_prompt", {
-        **source_info, "input": payload, "step_index": step_index, "system": _PROMPT,
+        **source_info, "input": payload, "step_index": step_index, "system": prompt,
     })
+    decision = None
+    record = {**source_info, "step_index": step_index}
     try:
-        raw = client.complete([{"role": "system", "content": _PROMPT}, {"role": "user", "content": serialized}],
+        raw = client.complete([{"role": "system", "content": prompt}, {"role": "user", "content": serialized}],
                               trace_id=source_trace, timeout_seconds=timeout_seconds)
     except Exception as exc:
-        trace_recorder.record(trace_id, "table_availability_authorization_unavailable", {
-            **source_info, "step_index": step_index, "error": type(exc).__name__, "diagnostics": completion_diagnostics(exc),
-        }, level="WARN")
-        return None
-    record = {
-        **source_info, "step_index": step_index, "raw": str(raw),
-        "response_source": model_response_source(raw, trace_id=source_trace, step_index=step_index),
-        "diagnostics": completion_diagnostics(raw),
-    }
-    try:
-        decision = _parse_decision(str(raw), evidence, source_dates=dates, local_at=local_at, clock=clock)
-    except (TypeError, ValueError, OverflowError) as exc:
-        trace_recorder.record(trace_id, "table_availability_authorization_invalid", {
-            **record, "error": str(exc),
-        }, level="WARN")
+        record.update(error=type(exc).__name__, diagnostics=completion_diagnostics(exc))
+        trace_recorder.record(trace_id, "table_availability_authorization_unavailable", record, level="WARN")
+    else:
+        record.update(raw=str(raw), response_source=model_response_source(raw, trace_id=source_trace,
+                      step_index=step_index), diagnostics=completion_diagnostics(raw))
+        try:
+            decision = _parse_decision(str(raw), evidence, source_dates=dates, local_at=local_at, clock=clock)
+        except (TypeError, ValueError, OverflowError) as exc:
+            record["error"] = str(exc)
+            trace_recorder.record(trace_id, "table_availability_authorization_invalid", record, level="WARN")
+    if decision is None and not recheck_personal_read:
         return None
     if _current_source(store, message) != source or _authorization_history(store, message, task_id) != (evidence, dates):
         trace_recorder.record(trace_id, "table_availability_authorization_superseded", {
             **source_info, "step_index": step_index,
         })
         return None
+    # 后续工具提议复用同版复核。失败保留审计结果，不能作为个人查局依据。
     saved = {**record, "decision": decision}
-    store.remember_result(key, ToolResult("table_availability_authorization", True, True, result=saved))
-    trace_recorder.record(trace_id, "table_availability_authorization_result", saved)
+    store.remember_result(key, ToolResult("table_availability_authorization", True, decision is not None, result=saved))
+    if decision is not None:
+        trace_recorder.record(trace_id, "table_availability_authorization_result", saved)
     return deepcopy(decision)

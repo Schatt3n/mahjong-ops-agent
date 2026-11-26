@@ -262,12 +262,13 @@ def test_mixed_named_and_personal_reads_keep_separate_verified_conditions_and_re
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("base_missed_other_target", [False, True], ids=["initial-review", "scope-recheck"])
 @pytest.mark.parametrize("qualifier,start,end,expected_match", [
     ("以后", "2026-11-26T19:00:00", "2026-11-27T06:00:00", "late"),
     ("以前", "2026-11-26T18:35:00", "2026-11-26T19:00:00", "early"),
 ])
 def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_daypart(
-    store_kind, qualifier, start, end, expected_match, tmp_path,
+    store_kind, base_missed_other_target, qualifier, start, end, expected_match, tmp_path,
 ):
     """原桌能独立查到，另查必须保留明确的开场边界，无窗口的模型判定也不能放宽。"""
     at = SENT.replace(hour=18, minute=35)
@@ -277,7 +278,9 @@ def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_d
     decision = _decision(lookup_scope="specific_table", also_requests_personal_options=True,
                          clock_role="opening", opening_window=None, opening_dayparts=dayparts,
                          accepted_stake_range={"min": 1, "max": 1})
-    client, trace = ReviewClient([decision]), InMemoryTraceRecorder()
+    independent = ([{key: value for key, value in (decision | {"opening_dayparts": None}).items()
+                     if key != "also_requests_personal_options"}, decision] if base_missed_other_target else [decision])
+    client, trace = ReviewClient(independent), InMemoryTraceRecorder()
     service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
                                    table_availability_client=client)
     verified_window = {"start_at": f"{start}+08:00", "end_at": f"{end}+08:00"}
@@ -311,14 +314,130 @@ def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_d
         assert all(boundary in rejected.error for boundary in verified_window.values())
         named = query("specific_table", {"game_type": "sichuan_mahjong"}, 2)
         filtered = query("personal", {**personal, "start_time_range": verified_window}, 3)
+        wrong_stake = query("personal", {**personal, "stake": "2", "start_time_range": verified_window}, 4)
         for actual, expected in ((named, "board"), (filtered, expected_match)):
             assert actual.called and actual.allowed and actual.error is None
             assert [row["game"]["game_id"] for row in actual.result["matches"]] == [games[expected].game_id]
         assert "start_time_range" not in named.result["requirement"]
         assert filtered.result["requirement"]["start_time_range"] == verified_window
-        assert len(client.calls) == 1
+        assert not wrong_stake.called and "档位区间" in wrong_stake.error
+        assert len(client.calls) == (2 if base_missed_other_target else 1)
+        if base_missed_other_target:
+            primary, recheck = client.calls
+            assert primary[0][1] == recheck[0][1]
+            assert "两项并列的查局目的" in recheck[0][0]["content"]
+            assert 0 < recheck[1]["timeout_seconds"] <= primary[1]["timeout_seconds"]
+            assert any(event.content.get("review_purpose") == "independent_personal_read"
+                       and event.step == "table_availability_authorization_reused"
+                       for event in trace.get_trace(message.message_id))
         assert {game_id: store.require_game(game_id).to_dict() for game_id in store.games} == initial_states
         assert not store.room_reservations
+
+
+@pytest.mark.parametrize("recheck", ["original_only", "personal_only", "no_verified_opening", "invalid", "timeout"])
+def test_personal_read_recheck_keeps_scope_and_timing_guards_and_is_not_repeated(recheck):
+    """不支持两项、缺少开场证据或核验失败时，个人查询不能绕行。"""
+    at = SENT.replace(hour=18, minute=35)
+    store = InMemoryAgentStore()
+    message = _incoming("刚才那桌是川麻吗？我大约八点到，想看下赶不赶得上。", sent=at)
+    original = _decision(lookup_scope="specific_table", clock_role="arrival_estimate", opening_window=None,
+                         accepted_stake_range=None)
+    recheck_result = {
+        "original_only": original,
+        "personal_only": original | {"lookup_scope": "personal"},
+        "no_verified_opening": original | {"also_requests_personal_options": True, "clock_role": "other"},
+        "invalid": original | {"also_requests_personal_options": True, "supporting_customer_refs": [99]},
+        "timeout": TimeoutError("recheck timed out"),
+    }[recheck]
+    client, trace = ReviewClient([original, recheck_result]), InMemoryTraceRecorder()
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                                   table_availability_client=client)
+    _activate(store, started=at)
+    _persist(store, message)
+    window = {"start_at": "2026-11-26T20:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"}
+    turns = [ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {"start_time_range": window}},
+                      call_id="personal", depends_on=[]),
+             ToolCall("search_current_games", {"lookup_scope": "specific_table", "requirement": {"game_type": "sichuan_mahjong"}},
+                      call_id="named", depends_on=[])]
+    for step in (1, 2):
+        action = AgentAction(goal="查局", objective_status="needs_tool", reasoning_summary="核对范围", tool_calls=turns)
+        personal, named = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="personal-recheck-denied",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        assert not personal.called and not personal.allowed
+        assert ("开场时间没有核实依据" if recheck == "no_verified_opening" else "查局用途") in personal.error
+        assert named.called and named.allowed
+    assert len(client.calls) == 2
+    assert not store.games and not store.invite_drafts and not store.room_reservations
+
+
+def test_personal_read_recheck_is_not_available_to_a_write_in_the_same_plan():
+    """原桌核验继续约束同计划的写工具，另一条查询的复核不能改变它。"""
+    at = SENT.replace(hour=18, minute=35)
+    store = InMemoryAgentStore()
+    message = _incoming("八点开那桌是川麻吗？另外九点开的一块红中有吗？", sent=at)
+    original = _decision(lookup_scope="specific_table", clock_role="other", opening_window=None,
+                         accepted_stake_range=None,
+                         clock_roles=[{"clock_ref": 1, "role": "opening"}, {"clock_ref": 2, "role": "opening"}])
+    opening = "2026-11-26T21:00:00+08:00"
+    range_at_opening = {"start_at": opening, "end_at": opening}
+    confirmed = original | {"also_requests_personal_options": True, "opening_window": range_at_opening}
+    client, trace = ReviewClient([original, confirmed]), InMemoryTraceRecorder()
+    creation = ReviewClient([])
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                                   table_availability_client=client, creation_authorization_client=creation)
+    _activate(store, started=at)
+    _persist(store, message)
+    with using_clock(lambda: at):
+        action = AgentAction(goal="查局", objective_status="needs_tool", reasoning_summary="核对范围", tool_calls=[
+            ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {"start_time_range": range_at_opening}},
+                     call_id="personal", depends_on=[]),
+            ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                     "requirement": {"stake": "1", "start_time_kind": "scheduled", "planned_start_at": opening}},
+                     call_id="write", depends_on=["personal"]),
+        ])
+        personal, write = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=1, run_id="personal-recheck-write-isolation",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+    assert personal.called and personal.allowed
+    assert not write.called and not write.allowed and "未核实为本人组织新局" in write.error
+    assert not write.result["table_availability_evidence"].get("also_requests_personal_options")
+    assert len(client.calls) == 2 and not creation.calls
+    assert not store.games and not store.invite_drafts and not store.room_reservations
+
+
+def test_personal_read_recheck_is_invalidated_by_new_input_before_execution():
+    """核验期间到达更新来话，旧版本的另查不进入网关。"""
+    store = InMemoryAgentStore()
+    _activate(store)
+    message = _incoming("午后那桌是川麻吗？两点以后有红中吗？")
+    _persist(store, message)
+    original = _decision(lookup_scope="specific_table", clock_role="opening", opening_window=None, accepted_stake_range=None)
+
+    class NewInputDuringRecheck(ReviewClient):
+        """第二次核验等待期间提交更新的通道来话。"""
+
+        def complete(self, messages, **options):
+            if self.calls:
+                _persist(store, _incoming("我先不看了。", sent=SENT + timedelta(seconds=1), message_id="new"))
+            return super().complete(messages, **options)
+
+    client = NewInputDuringRecheck([original, original | {"also_requests_personal_options": True}])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                                   table_availability_client=client)
+    action = AgentAction(goal="查其他局", objective_status="needs_tool", reasoning_summary="核对范围", tool_calls=[
+        ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {}}),
+    ])
+    execution = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+        previous_step_tool_results=[], step_index=1, run_id="personal-recheck-stale",
+        run_version=store.conversation_version(message.conversation_id))
+    assert len(client.calls) == 2 and execution.stop_loop
+    assert all(not result.called for result in execution.tool_results)
+    events = trace.get_trace(message.message_id)
+    assert all(event.step != "tool_called" for event in events)
+    assert any(event.step == "table_availability_authorization_superseded"
+               and event.content.get("review_purpose") == "independent_personal_read" for event in events)
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])

@@ -1,0 +1,85 @@
+{
+  "run": "replay-566ef1a310",
+  "prior_first_scope_omission_reference": "replay-d2f2db57da",
+  "scope_recheck_used_in_real_run": false,
+  "scope_recheck_exercised_with_initial_omission_in_offline_tests": true,
+  "status": "passed",
+  "checks": {
+    "board_delivered": true,
+    "private_reply_delivered": true,
+    "only_original_customer_received_the_reply": true,
+    "separate_red_center_evening_search_found_no_match": true,
+    "queries_have_separate_scoped_call_ids": true,
+    "no_successful_write_tools": true,
+    "game_room_waiting_and_invite_state_unchanged": true,
+    "same_table_found_without_personal_window": true
+  },
+  "semantic_judgment": {
+    "status": "valid",
+    "verdict": "pass",
+    "citations_valid": true,
+    "findings": {
+      "单独如实告知今晚七点后目前没有符合条件的一元红中": "pass",
+      "按已有线索试探原桌，或如实说明还不确定顾客指哪桌": "pass"
+    }
+  },
+  "model_execution": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 7200,
+    "max_concurrency": 1,
+    "retry_attempts": 2,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "none",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 45.0
+  },
+  "round": [
+    {
+      "message_id": "outbound:board:board_snapshot_349a16dd3d02300b26870de33212a0d4",
+      "direction": "outbound",
+      "kind": "group",
+      "sent_at": "2026-11-26T10:20:30+00:00",
+      "text": "当前缺人局：\n1、人齐开 川麻 2～3元 无烟 173"
+    },
+    {
+      "message_id": "customer:synthetic-mixed-board",
+      "direction": "inbound",
+      "kind": "private",
+      "sent_at": "2026-11-26T10:35:00+00:00",
+      "text": "刚才群里说一缺的那桌，是川麻吗？另外今晚七点以后有一块底的红中吗？"
+    },
+    {
+      "message_id": "outbound:trace_0a8f9e206431ba3a82d57225:1",
+      "direction": "outbound",
+      "kind": "private",
+      "sent_at": "2026-11-26T10:35:00+00:00",
+      "text": "你说的是那桌川麻吗？我这边看到一桌川麻无烟、2～3元、人齐开的，不过现在是1个人还差3位，不是只缺一个。今晚七点以后一块底的红中现在没有能搭的桌，要不我帮你组一桌？"
+    }
+  ],
+  "executed_reads": [
+    {
+      "scope": "specific_table",
+      "requirements": {
+        "game_type": "sichuan_mahjong",
+        "needed_seats": 1
+      },
+      "match_count": 1
+    },
+    {
+      "scope": "personal",
+      "requirements": {
+        "base_stake": 1.0,
+        "game_type": "red_center_mahjong",
+        "stake": "1",
+        "stake_label": "1",
+        "start_time_range": {
+          "end_at": "2026-11-27T06:00:00+08:00",
+          "start_at": "2026-11-26T19:00:00+08:00"
+        }
+      },
+      "match_count": 0
+    }
+  ]
+}
