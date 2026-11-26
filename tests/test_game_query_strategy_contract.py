@@ -59,12 +59,12 @@ def test_empty_personal_matching_default_and_reporting_share_the_same_authority(
     assert planning_contract()['game_query_strategy_contract']==strategy
     reporting=strategy['query_result_reporting']
     assert '不强制每轮先复述空结果' in reporting
+    assert '相关的独立服务征询或必要追问也可推进当前目标' in reporting
     assert '用户明确要求结果核对' in reporting
     assert '表达出来的查询结论不得虚构、反转或超出真实范围' in reporting
     default=strategy['empty_personal_matching_default']
     assert '个人找局条件足够、真实查询无可用现成局、尚未授权招募' in default
     assert '用户未拒绝继续服务' in default and 'waiting_user' in default
-    assert '不要求在征询前复述空结果' in default
     assert '不要提议没有执行路径的代联系或提醒' in default
     assert '不套用纯公开盘点、明确不需招募或已有招募委托' in default
     assert 'empty_personal_matching_default' in planning_contract()['tool_selection_hints']['new_matching_goal']
