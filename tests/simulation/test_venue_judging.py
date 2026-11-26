@@ -216,6 +216,8 @@ def test_rolling_wire_checks_explain_own_subjects_without_allowing_public_delive
     assert rules["shop_behavior"]["subject_evidence_ids"] == ["E04"]
     assert "max_duration_hours 只表示上限" in prompt["content"]
     assert "仅凭它与开场的差值不能推断已经约定" in prompt["content"]
+    assert "顾客项判重复时引用两条实际来话和适用的中间回复" in prompt["content"]
+    assert "店家选错查局时间、漏答或误写属于店家项" in prompt["content"]
 
     wrong_citation = _JudgeClient(role_evidence=("E03",), agent_evidence=("E04", "E01"), agent_verdict="fail")
     assert review_dialogue(SemanticJudge(wrong_citation), **arguments)["error"] == (
@@ -344,6 +346,7 @@ def test_rolling_duration_distinguishes_a_condition_from_a_normal_confirmation(
     assert result["findings"][-1]["evidence_ids"] == ("u2", "a2", "agent-trace-2")
     prompt = client.messages[0]["content"]
     assert "如果时长无关或明确延后，引用正常确认回复" in prompt
+    assert "未主动报时长不能作为失败理由" in prompt
     assert "没有重述旧的硬限制并不等于撤回" in prompt
     assert "缺少该证据或报错时长不能判通过" in prompt
     assert "planned_end_at 是计划排期" in prompt
