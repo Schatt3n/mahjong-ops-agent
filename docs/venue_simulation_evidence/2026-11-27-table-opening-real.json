@@ -69,5 +69,69 @@
     }
   ],
   "command": "PYTHONPATH=src python scripts/run_venue_table_opening.py",
-  "provider_limits": "受控首时刻，四位角色各自真模型生成，独立模型按实际送达来话分类。所有消息均在沙盒桌群内。"
+  "provider_limits": "受控首时刻，四位角色各自真模型生成，独立模型按实际送达来话分类。所有消息均在沙盒桌群内。",
+  "no_common_time_attempts": [
+    {
+      "run": "table-opening-5nemzawh",
+      "result": "failed",
+      "cause": "最后一轮没有备选，裁判仍返回继续建议字段。修订后末轮只判实际同意。"
+    },
+    {
+      "run": "table-opening-9iontx59",
+      "result": "transport_unavailable",
+      "cause": "最后两位角色及独立核验未返回，现场未定时。同一时段生产商有明确 HTTP 429。"
+    },
+    {
+      "run": "table-opening-3cv31z5p",
+      "original_result": "failed",
+      "reassessment": "passed_on_same_archive",
+      "cause": "19:30 有人只能打到 23:00 并表达附条件意向。此项只验是否缺少四份有效同意，同时核对实际时长冲突。",
+      "checks": {
+        "five_distinct_group_members_and_outsider_isolated": true,
+        "all_real_roles_completed_valid_actions": true,
+        "all_real_reviews_have_valid_votes": true,
+        "settlement_matches_fixture_expectation": true,
+        "no_ineligible_time_accepted_or_physical_side_effect": true,
+        "no_common_time_conflicts_observed_for_both_candidates": true
+      },
+      "settlement": {
+        "proposal_id": "opening-proposal:2",
+        "start_at": "2026-11-27T19:30:00+08:00",
+        "accepted_count": 3,
+        "committed": false
+      },
+      "rounds": [
+        {
+          "proposal": "19:00 开大家能到吗？都行的话就定这个时间。",
+          "source_messages": {
+            "table-opening:1:1": "19点我能到，打满四小时到11点也行。",
+            "table-opening:1:2": "老板，19点我能到，一底的小杭州麻将，打四个钟头到11点也成，这样能搭一桌吗？",
+            "table-opening:1:3": "19点我能到，小杭州麻将一底，打满四小时到11点也行。",
+            "table-opening:1:4": "19点我赶不上，最早19点半到。\n打满四小时到11点半行吗？\n要是定19点开，我晚点到能接上吗？"
+          },
+          "votes": {
+            "table-opening:1:1": "accept",
+            "table-opening:1:2": "accept",
+            "table-opening:1:3": "accept",
+            "table-opening:1:4": "decline"
+          }
+        },
+        {
+          "proposal": "19:30 开大家能到吗？都行的话就定这个时间。",
+          "source_messages": {
+            "table-opening:2:1": "19点半我能到，打满四小时到11点半也行。",
+            "table-opening:2:2": "老板，19点半我能到，一底的小杭州麻将，不过我只能打到11点，这样能搭一桌吗？",
+            "table-opening:2:3": "19点半我能到，小杭州麻将一底，打满四小时到11点半也行。",
+            "table-opening:2:4": "19点半我能到，小杭州麻将一底，打满四小时到11点半可以。"
+          },
+          "votes": {
+            "table-opening:2:1": "accept",
+            "table-opening:2:2": "unclear",
+            "table-opening:2:3": "accept",
+            "table-opening:2:4": "accept"
+          }
+        }
+      ]
+    }
+  ]
 }

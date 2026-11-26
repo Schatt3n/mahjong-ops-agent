@@ -27,8 +27,7 @@ _REVIEW = """你独立核对四位牌友对同一份开场提议的真实回复�
 accept 仅限本人明确同意该具体开场，比如照当前清晰提议回复行、可以、我准时到。
 decline 用于本人明确无法按该时间、拒绝或另提时间取代它。条件式接受、只报估计、问句、打招呼和不清楚的用 unclear。
 保留原回复消息 ID，每个消息恰好一次。没有回复的人不能加票。选择下一个备选只依据当前回复出现的实际时间分歧。
-JSON 格式 {"votes":{"消息ID":"accept|decline|unclear"},"try_later":false}。
-仅当目前的提议有明确反对，且可见回复表明有人提出较晚时刻或当前赶不上，并且给定较晚备选合理时，try_later 才为 true。"""
+votes 的格式为 {"消息ID":"accept|decline|unclear"}。"""
 
 
 def _review(client, proposal, replies, *, later: datetime | None, trace_id: str) -> tuple[dict, dict]:
@@ -38,17 +37,22 @@ def _review(client, proposal, replies, *, later: datetime | None, trace_id: str)
         "later_candidate": later.isoformat() if later else None,
         "replies": {row.message.message_id: row.message.text for row in replies},
     }
-    raw = client.complete([{"role": "system", "content": _REVIEW},
+    schema = ('只返回 JSON 对象 {"votes":{...}}。' if later is None else
+              '只返回 JSON 对象 {"votes":{...},"try_later":false}。只有目前有人拒绝且从原话看较晚备选仍合理，try_later 才为 true。')
+    raw = client.complete([{"role": "system", "content": f"{_REVIEW}\n{schema}"},
                            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                           trace_id=trace_id, timeout_seconds=35)
     diagnostics = {"raw": str(raw), "response_source": model_response_source(raw, trace_id=trace_id, step_index=1)}
     try:
         data = json.loads(str(raw))
         votes = data["votes"]
-        if (set(data) != {"votes", "try_later"} or type(data["try_later"]) is not bool
-                or set(votes) != set(payload["replies"])
-                or any(value not in {"accept", "decline", "unclear"} for value in votes.values())
-                or data["try_later"] and (later is None or "decline" not in votes.values())):
+        if not isinstance(votes, dict) or set(votes) != set(payload["replies"]) or any(
+            value not in ("accept", "decline", "unclear") for value in votes.values()
+        ):
+            raise ValueError("invalid table opening votes")
+        if (set(data) != ({"votes"} if later is None else {"votes", "try_later"})
+                or type(data.get("try_later", False)) is not bool
+                or data.get("try_later") and "decline" not in votes.values()):
             raise ValueError("invalid table opening review")
     except (TypeError, KeyError, ValueError) as exc:
         diagnostics["error"] = str(exc)
@@ -75,20 +79,21 @@ def _group_fixture(archive: Path, opened_at: datetime, people) -> VenueTableGrou
                            actor_ids=[person.sender_id for person in people] + ["table-outsider"], opened_at=opened_at)
 
 
-def _actor_round(actor, group, people, starts, proposal, start, opened_at, *, number: int) -> tuple[list, list]:
+def _actor_round(actor, group, people, windows, proposal, start, opened_at, *, number: int) -> tuple[list, list]:
     """只有真实收到提议的角色可自主回复。各人只知道自己的时刻及送达的小群历史。"""
     decisions, replies = [], []
-    for offset, (person, arrival) in enumerate(zip(people, starts, strict=True), 1):
+    for offset, person in enumerate(people, 1):
+        arrival, free_until = windows[person.sender_id]
         receipt = group.received(person.sender_id, proposal.message.message_id)
         if receipt is None:
             continue
         at = proposal.message.sent_at.astimezone(DEFAULT_TZ) + timedelta(seconds=offset * 10)
         details = {"case_intent": (
             "你已报名这张桌但此前没有定开场。刚收到小群的具体时间提议。按本人的可达时间和群里实际对话"
-            "决定接受、提出别的时间、回复自己不能等或先不说话。你愿意打四小时。"
+            "决定接受、提出别的时间、回复自己不能等或先不说话。这次你打算打满四小时，若四小时安排不进自己的时间就说明。"
             "如果同意，直接在小群里说明自己可以。没有决定就不用答应。"
         ), "can_arrive": True, "free_from": opened_at.isoformat(),
-            "free_until": (opened_at.replace(hour=23, minute=59)).isoformat(),
+            "free_until": free_until.isoformat(),
             "earliest_arrival": arrival.isoformat(), "scheduled_start": start.isoformat()}
         context = ActorContext(
             person, at.isoformat(), history=group.events_for(person.sender_id),
@@ -106,14 +111,33 @@ def _actor_round(actor, group, people, starts, proposal, start, opened_at, *, nu
     return decisions, replies
 
 
+def observed_time_conflict(round_record: dict) -> bool:
+    """核对确实没有同意的人是否拒绝或明示了冲突，但不把附条件当作退席。"""
+    votes = round_record["review"].get("votes") or {}
+    for row in round_record["decisions"]:
+        vote = votes.get(row["trace_id"])
+        if vote == "decline":
+            return True
+        if vote != "unclear" or not row.get("availability_reviews"):
+            continue
+        details = row["context"]["events"][-1]["details"]
+        start = datetime.fromisoformat(details["scheduled_start"])
+        claims = row["availability_reviews"][-1].get("claims") or ()
+        if any(claim["kind"] == "play_until" and datetime.fromisoformat(claim["local_at"]) < start + timedelta(hours=4)
+               for claim in claims):
+            return True
+    return False
+
+
 def run(archive: Path, *, no_common_time: bool = False) -> dict:
     """保留实际对话和独立核验，明确区分协商完成与合理未定时。"""
     opened_at = datetime(2026, 11, 27, 18, 10, tzinfo=DEFAULT_TZ)
     early, late = opened_at.replace(hour=19, minute=0), opened_at.replace(hour=19, minute=30)
-    arrivals = [opened_at.replace(hour=18, minute=45), opened_at.replace(hour=18, minute=55), early,
-                late + timedelta(minutes=30 if no_common_time else 0)]
     people = generate_personas(69012, count=4)
-    arrival_by_person = {person.sender_id: arrival for person, arrival in zip(people, arrivals, strict=True)}
+    arrivals = (opened_at.replace(hour=18, minute=45), opened_at.replace(hour=18, minute=55), early, late)
+    final_window = opened_at.replace(hour=23, minute=59)
+    windows = {person.sender_id: (arrival, early + timedelta(hours=4) if no_common_time and index == 1 else final_window)
+               for index, (person, arrival) in enumerate(zip(people, arrivals, strict=True))}
     config = _select_local_model("opencode-go", None, workers=1)
     actor, _ = _real_roles(config, force_opencode_role=True)
     group = _group_fixture(archive, opened_at, people)
@@ -123,7 +147,7 @@ def run(archive: Path, *, no_common_time: bool = False) -> dict:
         at = opened_at + timedelta(minutes=number - 1)
         proposal = group.send(opening.proposal_message(f"opening-proposal:{number}", at=at, start_at=start))
         opening.record_proposal(proposal, start_at=start)
-        decisions, replies = _actor_round(actor, group, people, arrivals, proposal, start, opened_at, number=number)
+        decisions, replies = _actor_round(actor, group, people, windows, proposal, start, opened_at, number=number)
         try:
             review, diagnostics = _review(actor.client, proposal, replies,
                 later=late if number == 1 else None, trace_id=f"table-opening-review:{number}")
@@ -134,7 +158,8 @@ def run(archive: Path, *, no_common_time: bool = False) -> dict:
             ident = reply.message.message_id
             vote = (review.get("votes") or {}).get(ident)
             if vote in {"accept", "decline"}:
-                if vote == "accept" and start < arrival_by_person[reply.message.sender_id]:
+                earliest, free_until = windows[reply.message.sender_id]
+                if vote == "accept" and (start < earliest or start + timedelta(hours=4) > free_until):
                     results[ident] = "acceptance_conflicts_with_private_schedule"
                 else:
                     results[ident] = opening.record_vote(reply, proposal_id=proposal.message.message_id,
@@ -159,8 +184,8 @@ def run(archive: Path, *, no_common_time: bool = False) -> dict:
         "all_real_reviews_have_valid_votes": all(row["review"] for row in history),
         "settlement_matches_fixture_expectation": (not settlement["committed"] if no_common_time else
             settlement["committed"] and settlement["accepted_count"] == 4 and game.planned_start_at == late),
-        "no_common_time_observed_declines_for_both_candidates": not no_common_time or (len(history) == 2 and all(
-            "declined" in row["results"].values() for row in history)),
+        "no_common_time_conflicts_observed_for_both_candidates": not no_common_time or (len(history) == 2 and all(
+            observed_time_conflict(row) for row in history)),
         "no_ineligible_time_accepted_or_physical_side_effect": not any(
             value == "acceptance_conflicts_with_private_schedule" for row in history for value in row["results"].values()
         ) and not game.actual_started_at and not group.store.room_reservations,
@@ -178,7 +203,7 @@ def main() -> int:
     """显式开启真模型并保留独立沙盒档案。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data/venue_simulation/table_opening")
-    parser.add_argument("--no-common-time", action="store_true", help="此档两项开场提议都有人赶不上")
+    parser.add_argument("--no-common-time", action="store_true", help="此档两项开场提议都有人无法参加")
     args = parser.parse_args()
     args.runs_dir.mkdir(exist_ok=True, parents=True)
     archive = Path(mkdtemp(prefix="table-opening-", dir=args.runs_dir))
