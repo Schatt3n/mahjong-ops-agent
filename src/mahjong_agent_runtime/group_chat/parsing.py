@@ -27,10 +27,17 @@ CLAIM_PATTERN = re.compile(
     r"^\s*(?P<item_no>\d{1,2})\s*(?:号|个|这个)?\s*(?:来|我来|可以|我可以|这个我来|打|我打|加我|算我一个)\s*[!！。.]?\s*$"
 )
 FIXED_TIME_PATTERN = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3])\s*[:.：]\s*(?P<minute>[0-5]\d)(?!\d)")
+_HAN_DIGITS = "一二三四五六七八九"
+_HAN_MINUTE_CHARS = f"零〇两{_HAN_DIGITS}十几多"
+_HAN_MINUTE_VALUE = re.compile(rf"(?:[零〇][{_HAN_DIGITS}]|[{_HAN_DIGITS}]?十[{_HAN_DIGITS}]?|[零〇两{_HAN_DIGITS}])")
+# 带「分」时读完整词形供校验。省略分钟单位时只接十位或带零的词形，避开相邻金额、人数和时长。
 CHINESE_TIME_PATTERN = re.compile(
     r"(?<!\d)(?P<hour>[0-2]?\d|[零一二两三四五六七八九十]{1,3})\s*[点时]"
     r"(?:(?P<half>半)|(?P<quarter>一刻|三刻)|"
-    r"(?P<minute>\s*[0-5]?\d\s*(?=分)|[0-5]?\d)(?:分)?(?!\d|\s*[.．]\s*\d))?"
+    r"(?P<minute>\s*[0-5]?\d\s*(?=分)|[0-5]?\d)(?:分)?(?!\d|\s*[.．]\s*\d)|"
+    rf"[ \t]*(?P<han_minute>[{_HAN_MINUTE_CHARS}]+(?=[ \t]*分(?!钟))"
+    rf"|[{_HAN_DIGITS}]?十[{_HAN_DIGITS}几多]?|[零〇][{_HAN_DIGITS}])"
+    rf"(?:[ \t]*分(?!钟)|(?![\d{_HAN_MINUTE_CHARS}]|[ \t]*(?:分|个|人|位|桌|局|元|块|档|点|时|[.．][ \t]*\d))))?"
 )
 CLOCK_QUALIFIER_PATTERN = re.compile(r"[ \t]*(之前|以前|之后|以后|前后|左右|前|后)")
 STAKE_CAP_PATTERN = re.compile(r"(?<!\d)(?P<base>\d+(?:\.\d+)?)\s*[-—~至]\s*(?P<cap>\d+(?:\.\d+)?)(?!\d)")
@@ -295,15 +302,24 @@ def observe_clock_candidates(text: str, *, anchor: datetime) -> list[dict[str, A
     return [dict(observation, clock_ref=ref) for ref, observation in enumerate(observations, start=1)]
 
 
+def has_unresolved_han_clock_minutes(text: str) -> bool:
+    """识别有分钟词形、却无法从原话读出精确值的钟点。"""
+    return any(
+        (minute := match.group("han_minute")) is not None and _clock_han_minute(minute) is None
+        for match in CHINESE_TIME_PATTERN.finditer(text)
+    )
+
+
 def _observe_clock(match: re.Match[str], text: str, *, anchor: datetime | None) -> dict[str, Any] | None:
     """统一读取一种钟点词法证据，避免独立核对和群查询提取出不同的候选分钟。"""
     hour = _clock_hour(match.group("hour"))
-    half = bool(match.groupdict().get("half"))
-    quarter = match.groupdict().get("quarter")
-    raw_minute = match.groupdict().get("minute")
-    minute = {"一刻": 15, "半": 30, "三刻": 45}.get("半" if half else quarter, int(raw_minute or 0))
-    if hour is None or hour > 23 or minute > 59:
-        # “三四点”这类词形不是单一钟点，保留原话给模型，同时避免误识别为档位。
+    parts = match.groupdict()
+    if han_minute := parts.get("han_minute"):
+        minute = _clock_han_minute(han_minute)
+    else:
+        minute = {"一刻": 15, "半": 30, "三刻": 45}.get(parts.get("half") or parts.get("quarter"), int(parts.get("minute") or 0))
+    if hour is None or hour > 23 or minute is None or minute > 59:
+        # 近似词形如「三四点」「七点十几分」须保留原话，避免把前缀误作单一精确钟点。
         return None
     resolution = resolve_local_time(text[:match.start()], hour=hour, minute=minute, anchor=anchor)
     qualifier_match = CLOCK_QUALIFIER_PATTERN.match(text, match.end())
@@ -384,6 +400,16 @@ def _clock_hour(value: str) -> int | None:
     if decade is None or unit is None:
         return None
     return decade * 10 + unit
+
+
+def _clock_han_minute(value: str) -> int | None:
+    """校验完整的汉字分钟词形，约数或不规范的连写不产生精确分钟。"""
+    if not _HAN_MINUTE_VALUE.fullmatch(value):
+        return None
+    if value.startswith(("零", "〇")):
+        return _clock_hour(value[1:]) if len(value) == 2 else 0
+    minute = _clock_hour(value)
+    return minute if minute is not None and minute <= 59 else None
 
 
 def _seat_structure(known: int, needed: int) -> dict[str, Any]:

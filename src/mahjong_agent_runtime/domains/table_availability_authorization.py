@@ -11,7 +11,7 @@ from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from typing import Any
 
-from ..group_chat.parsing import observe_clock_candidates
+from ..group_chat.parsing import has_unresolved_han_clock_minutes, observe_clock_candidates
 from ..llm import AgentLLMClient, completion_diagnostics, model_response_source
 from ..models import ConversationRole, ToolResult, UserMessage
 from ..stores import AgentStore
@@ -59,18 +59,27 @@ _DATE_TEXT = re.compile(
 _WEEKDAY_TEXT = re.compile(r"(?P<week>下下|下|本|这)?(?:星期|周)(?P<day>[一二三四五六日天末])")
 
 
-def _source_clocks(text: str, local_at: datetime) -> list[dict[str, Any]]:
+def _source_clock_text(text: str) -> str:
     """隔离显式日期的词面，避免把星期或日期尾数拼入钟点。"""
     lexical = unicodedata.normalize("NFKC", text)
-    separated = _WEEKDAY_TEXT.sub(" ", _DATE_TEXT.sub(" ", lexical))
-    return observe_clock_candidates(separated, anchor=local_at)
+    return _WEEKDAY_TEXT.sub(" ", _DATE_TEXT.sub(" ", lexical))
+
+
+def _source_clocks(text: str, local_at: datetime) -> list[dict[str, Any]]:
+    return observe_clock_candidates(_source_clock_text(text), anchor=local_at)
+
+
+def _is_clock_source(message: UserMessage) -> bool:
+    metadata = message.metadata
+    return bool(message.text.strip()) and not (
+        metadata.get("internal_event") or metadata.get("system_trigger")
+        or metadata.get("input_source") == "system_trigger"
+    )
 
 
 def qualified_table_clock(message: UserMessage) -> dict[str, Any] | None:
     """提供所有可识别钟点，单个未带后缀的钟点也可能是明确离店或实际开场。"""
-    metadata = message.metadata
-    if (metadata.get("internal_event") or metadata.get("system_trigger")
-            or metadata.get("input_source") == "system_trigger" or not message.text.strip()):
+    if not _is_clock_source(message):
         return None
     candidates = _source_clocks(message.text, parse_context_datetime(message.sent_at))
     if len(candidates) > 1:
@@ -78,6 +87,13 @@ def qualified_table_clock(message: UserMessage) -> dict[str, Any] | None:
     if candidates:
         return {"clock_count": 1, **{key: value for key, value in candidates[0].items() if key != "clock_ref"}}
     return None
+
+
+def requires_table_clock_review(message: UserMessage) -> bool:
+    """分钟无法精确核对时，建桌仍走既有的钟点未核实路径。"""
+    return qualified_table_clock(message) is not None or (
+        _is_clock_source(message) and has_unresolved_han_clock_minutes(_source_clock_text(message.text))
+    )
 
 
 def _current_source(store: AgentStore, message: UserMessage) -> tuple[str, int] | None:

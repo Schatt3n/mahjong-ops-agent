@@ -100,6 +100,37 @@ def test_multi_clock_eligibility_preserves_order_exact_minutes_and_each_qualifie
     assert [(item["clock_ref"], item["qualifier"]) for item in mixed["candidates"]] == [(1, "前"), (2, None)]
 
 
+@pytest.mark.parametrize("text,clock,minute,qualifier", [
+    ("我七点四十一能到", "七点四十一", 41, None),
+    ("七点四十一分以后我才到", "七点四十一分", 41, "以后"),
+    ("七点 四十分 左右能来", "七点 四十分", 40, "左右"),
+    ("七点零五能到", "七点零五", 5, None),
+    ("七点〇五分能到", "七点〇五分", 5, None),
+    ("七点五分前能来", "七点五分", 5, "前"),
+    ("七点十能到", "七点十", 10, None),
+    ("七点五十九能到", "七点五十九", 59, None),
+    ("七点三元的还有位吗", "七点", 0, None),
+    ("七点三十块封顶的那桌", "七点", 0, None),
+    ("七点三十分钟之后回我", "七点", 0, None),
+    ("七点\n四十一块的都行", "七点", 0, None),
+])
+def test_clock_observation_reads_han_minutes_without_absorbing_adjacent_amounts(text, clock, minute, qualifier):
+    """完整的汉字分钟与紧邻的金额、时长和另一条气泡分别识别。"""
+    at = SENT.replace(hour=18, minute=30)
+    observed = qualified_table_clock(_incoming(text, sent=at))
+    assert observed["clock_count"] == 1
+    assert observed["clock_text"] == clock and observed["qualifier"] == qualifier
+    assert observed["local_candidate_at"] == f"2026-11-26T19:{minute:02d}:00+08:00"
+
+
+@pytest.mark.parametrize("text", [
+    "七点十几分能到", "七点四十几能到", "七点四十多分左右能来", "七点六十一分到", "七点三四分能到",
+])
+def test_unknown_han_minute_does_not_become_a_precise_clock(text):
+    """未确定或非法的分钟保留在原话，不能截成整点或某个精确分钟。"""
+    assert qualified_table_clock(_incoming(text, sent=SENT.replace(hour=18))) is None
+
+
 @pytest.mark.parametrize("text,role,scope,hard", [
     ("这会儿有合适的吗 打到十一点", "departure_deadline", "personal", True),
     ("现在有桌吗，想打到十一点", "play_until", "personal", False),
@@ -844,6 +875,87 @@ def test_source_bound_evening_arrival_estimate_and_maximum_are_distinct_from_ope
     assert _check(store, ReviewClient([decision]), message) == {
         **decision, "arrival_lookup_floor_at": "2026-11-26T19:15:00+08:00",
     }
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_han_minutes_keep_the_exact_arrival_lookup_boundary(backend, tmp_path):
+    """实际工具保留本人来话的分钟，过滤更早的桌并拒绝可能提前开场的建局。"""
+    at = SENT.replace(hour=19, minute=30)
+    store = SQLiteAgentStore(tmp_path / "han-minutes.sqlite3") if backend == "sqlite" else InMemoryAgentStore()
+    message = _incoming("老板现在有一块底的无烟桌吗？我七点四十一能到，没现成的就帮我凑一桌", sent=at)
+    review = ReviewClient([_decision(clock_role="arrival_estimate", opening_window=None,
+                                     accepted_stake_range={"min": 1, "max": 1})])
+    authorization = ReviewClient([{"scope": "create", "customer_ref": 1, "shop_offer_ref": None}])
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=InMemoryTraceRecorder(),
+                                   table_availability_client=review, creation_authorization_client=authorization)
+    games = {}
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        for opening in ("19:40", "19:45"):
+            host = f"host-{opening}"
+            games[opening], _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name="桌主",
+                known_players=[{"customer_id": host}], trace_id=host, requirement={
+                    "smoke_preference": "no_smoking", "stake": "1", "planned_start_at": f"2026-11-26T{opening}:00+08:00",
+                })
+
+        def submit(tool, step):
+            action = AgentAction(goal="帮顾客找一桌能赶上的无烟桌", objective_status="needs_tool", reasoning_summary="核对条件",
+                                 tool_calls=[tool])
+            return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+                previous_step_tool_results=[], step_index=step, run_id="han-minutes",
+                run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+        def query(start):
+            return ToolCall("search_current_games", {"requirement": {"smoke_preference": "no_smoking", "stake": "1", "start_time_range": {
+                "start_at": f"2026-11-26T{start}:00+08:00", "end_at": "2026-11-26T23:59:00+08:00",
+            }}, "lookup_scope": "personal", "include_nearby": False})
+
+        wrong = submit(query("19:00"), 1)
+        assert not wrong.allowed and not wrong.called and "19:41:00+08:00" in wrong.error
+        result = submit(query("19:41"), 2)
+        too_early = submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+            "requirement": {"start_time_kind": "asap_when_full", "smoke_preference": "no_smoking", "stake": "1",
+                            "extra_constraints": ["19:41 到"]}}), 3)
+        assert not too_early.called and not too_early.allowed and "人齐开" in too_early.error
+        assert too_early.result["table_availability_evidence"]["arrival_lookup_floor_at"] == "2026-11-26T19:41:00+08:00"
+
+    assert result.allowed and result.called and result.error is None
+    assert {row["game"]["game_id"] for row in result.result["matches"]} == {games["19:45"].game_id}
+    assert set(store.games) == {game.game_id for game in games.values()} and not store.room_reservations
+    assert not authorization.calls and len(review.calls) == 1
+    if backend == "sqlite":
+        store._connection.close()
+
+
+def test_approximate_han_minutes_allow_a_read_without_authorizing_creation():
+    """近似到店允许查桌。分钟没有核实依据时，不能借无精确词面跳过建桌核对。"""
+    at = SENT.replace(hour=18, minute=55)
+    store = InMemoryAgentStore()
+    message = _incoming("一块底的还有位吗？我七点十几分能到，没现成的帮我凑一桌", sent=at)
+    review = ReviewClient([])
+    authorization = ReviewClient([{"scope": "create", "customer_ref": 1, "shop_offer_ref": None}])
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=InMemoryTraceRecorder(),
+                                   table_availability_client=review, creation_authorization_client=authorization)
+
+    def submit(tool, step):
+        action = AgentAction(goal="核对能赶上的桌", objective_status="needs_tool", reasoning_summary="核对时间",
+                             tool_calls=[tool])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="approximate-minutes",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        search = submit(ToolCall("search_current_games", {"requirement": {"stake": "1"}, "lookup_scope": "personal"}), 1)
+        create = submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+            "requirement": {"start_time_kind": "asap_when_full", "stake": "1"}}), 2)
+
+    assert search.allowed and search.called
+    assert not create.allowed and not create.called and "钟点用途尚未核实" in create.error
+    assert create.result["table_availability_evidence"] is None
+    assert not review.calls and not authorization.calls and not store.games
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])

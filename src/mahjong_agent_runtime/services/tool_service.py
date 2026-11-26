@@ -34,7 +34,7 @@ from ..domains.game_participants import validate_game_accepts_confirmation
 from ..domains.model_context import has_agreed_game_duration
 from ..domains.invitation_policy import tool_confirms_seat
 from ..domains.participation_authorization import check_unknown_duration_participation
-from ..domains.table_availability_authorization import check_table_availability, qualified_table_clock
+from ..domains.table_availability_authorization import check_table_availability, requires_table_clock_review
 from ..domains.tools.participation_access import participation_access_source
 from ..domains.tools.validation import validate_schema
 from .contracts import SingleToolExecution
@@ -131,7 +131,7 @@ class ToolExecutionService:
         context_payload.pop("verified_personal_table_availability", None)
         if (self.table_availability_client is not None
                 and tool_execution_scope(self.store, message) is None
-                and qualified_table_clock(message) is not None
+                and requires_table_clock_review(message)
                 and not self.stale_tool_result(call_name="table_availability", message=message,
                                                run_id=run_id, run_version=run_version)):
             self._review_table_availability(action, message, trace_id, step_index, context_payload)
