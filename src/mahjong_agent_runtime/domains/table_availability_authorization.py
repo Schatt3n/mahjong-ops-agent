@@ -120,7 +120,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 12
+_DECISION_NORMALIZATION_VERSION = 13
 _DURATION_NUMBER_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)"
 _DURATION_UNIT_TEXT = r"\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_HOURS_TEXT = _DURATION_NUMBER_TEXT + _DURATION_UNIT_TEXT
@@ -684,6 +684,7 @@ def _parse_decision(
     named_future = clock.get("named_future_opening")
     bound = [] if named_future else _bind_clock_roles(clock, decision)
     multi = "candidates" in clock
+    openings = [item for item, role in bound if role == "opening"]
     arrivals = [(item, role) for item, role in bound if role in {"arrival_estimate", "arrival_not_before"}]
     selected, clock_role = arrivals[0] if len(arrivals) == 1 else (
         (bound[0][0], "other" if multi else bound[0][1]) if bound else ({}, "other")
@@ -714,13 +715,18 @@ def _parse_decision(
             customer_rows[current] = current_text
     if dayparts is not None and has_personal_search:
         bounds = _verified_opening_daypart_bounds(dayparts, customer_rows, source_dates, local_at=local_at)
-        window = _opening_window_from_dayparts(bounds, window, local_at=local_at, clock_at=clock_at,
-                                              clock_role=clock_role, clock_resolution=selected.get("resolution", ""),
-                                              clock_qualifier=selected.get("qualifier"))
+        band_clock, band_at, band_role = selected, clock_at, clock_role
+        if (window is None and multi and clock_role == "other" and decision["lookup_scope"] == "personal"
+                and current in referenced and len(openings) == 1 and openings[0].get("qualifier") in _OPENING_NOT_BEFORE
+                and (opening_at := _supported_role_time(openings[0], current_text, local_at)) is not None):
+            # 另一个钟点是最晚到店等用途时，也要保留核实过的开场下界。两者都不产生固定开场。
+            band_clock, band_at, band_role = openings[0], opening_at, "opening"
+        window = _opening_window_from_dayparts(bounds, window, local_at=local_at, clock_at=band_at,
+                                              clock_role=band_role, clock_resolution=band_clock.get("resolution", ""),
+                                              clock_qualifier=band_clock.get("qualifier"))
     elif dayparts is not None:
         decision["opening_dayparts"] = None
     fixed = decision["has_fixed_opening_authority"]
-    openings = [item for item, role in bound if role == "opening"]
     if (type(fixed) is bool and has_personal_search and len(openings) == 1
             and (len(bound) == 1 or decision["lookup_scope"] == "personal")
             and openings[0].get("qualifier") in {"前后", "左右"}):

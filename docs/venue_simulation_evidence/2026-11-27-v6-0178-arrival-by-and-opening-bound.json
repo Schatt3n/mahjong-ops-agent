@@ -1,0 +1,67 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "customer_case": "0178",
+  "trace_id": "trace_3983e6eb45f83e19aea09859",
+  "prior_context": [
+    {"ref": 1, "speaker": "customer", "text": "老板 晚上七点半以后还有0.5无烟的桌吗"},
+    {"ref": 2, "speaker": "shop", "text": "七点半以后现在没有能搭的 0.5 无烟桌诶，要不我帮你组一桌？"},
+    {"ref": 3, "speaker": "customer", "text": "行 帮我组一桌吧 七点半以后 0.5无烟 我带朋友一起 先留位"},
+    {"ref": 4, "speaker": "shop", "text": "七点半以后暂时没有能直接搭的 0.5 无烟桌。你和朋友一共几个人？打杭麻还是红中？我好按这个给你组一桌。"}
+  ],
+  "message": {
+    "message_id": "customer:role-event:cf6c170d3668d7b48da513124179e2a05fc57184d94406919decc9e40f8bc614",
+    "sent_at": "2026-11-26T11:55:00+08:00",
+    "text": "老板 八点前能到 路上有点堵 我和朋友两个人 打四川麻将 七点半以后0.5无烟 按这个组就行"
+  },
+  "independent_opening_evidence": {
+    "call_id": "llm_call_99a5871d315e41d1aa5947fcb3a66be1",
+    "terminal_attempt_id": "llm_attempt_d11b0179a4944656824a724b3773bd3a",
+    "http_status": 200,
+    "raw_response_sha256": "68c952566178cebdd98a6a97ec022f2469d6106a93f1a18e828354bd7e864d80",
+    "lookup_scope": "personal",
+    "clock_roles": [
+      {"clock_ref": 1, "role": "arrival_by", "candidate_at": "2026-11-26T20:00:00+08:00", "qualifier": "前"},
+      {"clock_ref": 2, "role": "opening", "candidate_at": "2026-11-26T19:30:00+08:00", "qualifier": "以后"}
+    ],
+    "opening_dayparts": {"date": "2026-11-26", "parts": ["evening"], "source_ref": 5},
+    "has_fixed_opening_authority": false,
+    "raw_opening_window": null,
+    "old_normalized_opening_window": {"start_at": "2026-11-26T18:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"},
+    "supporting_customer_refs": [1, 3, 5]
+  },
+  "tool_receipts": {
+    "valid_narrow_range_rejected": [
+      {"step": 3, "call_id": "lookup_games_2"}, {"step": 6, "call_id": "lookup_games_4"}, {"step": 7, "call_id": "lookup_recheck"}
+    ],
+    "narrow_range": {"start_at": "2026-11-26T19:30:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"},
+    "actual_lookup": {
+      "step": 4, "call_id": "lookup_games_3", "called": true, "matches": [], "supports_narrower_empty_claim": false,
+      "game_type": "sichuan_mahjong", "stake": "0.5", "smoke_preference": "no_smoking", "requested_seats": 2,
+      "window": {"start_at": "2026-11-26T18:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"}
+    },
+    "asap_create_denial": {"step": 5, "call_id": "create_1", "called": false, "expires_at": "2026-11-26T15:55:00+08:00"},
+    "scheduled_create_denial": {
+      "step": 8, "call_id": "create_game_1", "called": false,
+      "main_call_id": "llm_call_e83fd563d9fb408ba84f73e65aeb9fb5",
+      "main_terminal_attempt_id": "llm_attempt_23d2b541c2d748f882e772705c7f3d06",
+      "main_raw_response_sha256": "90bcd124d156467c8a58de0cef796e609c5cc806341ed559db263c4d6f520571",
+      "submitted_clock": "19:30",
+      "submitted_planned_start_at": "2026-11-26T19:30:00+08:00",
+      "asserted_current_fixed_start_time": "2026-11-26T19:30:00+08:00",
+      "first_reject_code": "explicit_task_fact_consistency_rejected"
+    }
+  },
+  "final_output": {
+    "message_id": "outbound:trace_3983e6eb45f83e19aea09859:1", "text": "稍等一下", "runtime_status": "needs_help",
+    "runtime_reason": "max_steps_exceeded", "writes_observed": false
+  },
+  "analysis": "独立核验已把较晚可到店和最早开场分开。旧规范化只给时段函数传了一个中性钟点，因此遗漏了被核实的第二个开场下界。正确区间是当日19:30至次日06:00，20:00的到店上界不裁掉其他可开时间。18:00查询成功仅证明当时那次范围未返回候选。最后一次建局先被ISO断言与独立钟点字段冲突挡住。真实的19:30仍是下界，即便格式一致也不足以承诺此刻开场。",
+  "change": "当本轮已核实晚间等营业时段，而且当前多钟点中仅有一个明确开场下界时，沿用现有日期和钟点规范化把下界传入查询区间。保留独立到店上界和其他会话约束，不改时间字段格式校验，也不授权提前人齐开或固定开场。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v6_0178_directional_opening_preserves_a_separate_arrival_by_without_creating",
+    "focused_tests_passed": 497,
+    "live_replay": "pending"
+  }
+}

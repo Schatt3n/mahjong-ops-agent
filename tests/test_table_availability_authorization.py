@@ -2643,6 +2643,91 @@ def test_v5_room_window_does_not_become_a_customer_agreed_duration(tmp_path, cas
     store._connection.close()
 
 
+@pytest.mark.parametrize("case,start", [
+    ("archived", "19:30"), ("arrival_only", "18:00"), ("two_opening_bounds", "18:00"),
+])
+def test_v6_0178_directional_opening_preserves_a_separate_arrival_by_without_creating(tmp_path, case, start):
+    """真实「以后」限定查询下界，晚到上界与多钟点歧义不被写成固定开场。"""
+    at = datetime.fromisoformat("2026-11-26T11:55:00+08:00")
+    evening = {"date": "2026-11-26", "parts": ["evening"], "source_ref": 5}
+    broad_end, arrive_by = "2026-11-27T06:00:00+08:00", "2026-11-26T20:00:00+08:00"
+    archive = "老板 八点前能到 路上有点堵 我和朋友两个人 打四川麻将 七点半以后0.5无烟 按这个组就行"
+    texts = {
+        "archived": (archive, "arrival_by", "opening"),
+        "arrival_only": ("老板 八点前能到 路上有点堵 我和朋友两个人 打四川麻将 晚上0.5无烟 按这个组就行", "arrival_by"),
+        "two_opening_bounds": (archive + " 或者九点以后也行", "arrival_by", "opening", "opening"),
+    }
+    current, *roles = texts[case]
+    verification = _decision(5, lookup_scope="personal", clock_role=roles[0] if len(roles) == 1 else "other",
+        clock_roles=[{"clock_ref": index, "role": role} for index, role in enumerate(roles, 1)] if len(roles) > 1 else None,
+        opening_window=None, opening_dayparts=evening, accepted_stake_range={"min": 0.5, "max": 0.5},
+        opening_customer_ref=None, supporting_customer_refs=[1, 3, 5])
+    reviewer, trace = ReviewClient([verification]), InMemoryTraceRecorder()
+    store = SQLiteAgentStore(tmp_path / "v6-0178-two-clocks.sqlite3")
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=reviewer)
+    message = _incoming(current, sent=at)
+    terms = {"game_type": "sichuan_mahjong", "smoke_preference": "no_smoking", "stake": 0.5}
+    party = {"contact_id": message.sender_id, "contact_name": message.sender_name, "seat_count": 2}
+
+    def submit(call, step):
+        action = AgentAction("按本人约束查现成局", "needs_tool", "保留两人及开场条件", tool_calls=[call])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="v6-0178-bound",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    def search(bottom, step):
+        return submit(ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": False,
+            "requirement": terms | {"requesting_party": party, "start_time_range": {
+                "start_at": f"2026-11-26T{bottom}:00+08:00", "end_at": broad_end}},
+        }, call_id=f"search-{step}"), step)
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        history_time = "晚上" if case == "arrival_only" else "晚上七点半以后"
+        _persist(store, _incoming(f"老板 {history_time}还有0.5无烟的桌吗", sent=at, message_id="prior-search"))
+        store.append_assistant_turn("dm", "现在没有能搭的0.5无烟桌诶，要不我帮你组一桌？", "shop",
+                                    metadata={"delivery_status": "delivered"})
+        _persist(store, _incoming(f"行 帮我组一桌吧 {history_time} 0.5无烟 我带朋友一起 先留位",
+                                  sent=at, message_id="prior-delegation"))
+        store.append_assistant_turn("dm", "你和朋友一共几个人？打杭麻还是红中？我好按这个给你组一桌。", "shop",
+                                    metadata={"delivery_status": "delivered"})
+        _persist(store, message)
+
+        games = {}
+        for opening, known in (("2026-11-26T18:50:00+08:00", []), ("2026-11-26T19:45:00+08:00", []),
+                ("2026-11-26T20:00:00+08:00", [{"customer_id": "one"}, {"customer_id": "two"}]),
+                ("2026-11-27T00:15:00+08:00", [])):
+            game, _ = store.create_game(conversation_id=opening, organizer_id=opening, organizer_name="牌友",
+                requirement=terms | {"planned_start_at": opening, "start_time_kind": "scheduled"},
+                known_players=known, trace_id="seed-" + opening)
+            games[opening] = game.game_id
+
+        rejected = search("20:00", 1)
+        assert not rejected.called and f"T{start}:00+08:00" in rejected.error
+        proof = rejected.result["table_availability_evidence"]
+        assert proof["arrival_by_at"] == arrive_by and proof["has_fixed_opening_authority"] is False
+        assert proof["opening_window"] == {"start_at": f"2026-11-26T{start}:00+08:00", "end_at": broad_end}
+        result = search(start, 2)
+        assert result.called and result.allowed and result.result["requirement"]["requesting_party"]["seat_count"] == 2
+        expected_openings = {"2026-11-26T19:45:00+08:00", "2026-11-27T00:15:00+08:00"}
+        if case != "archived":
+            expected_openings.add("2026-11-26T18:50:00+08:00")
+        assert {row["game"]["game_id"] for row in result.result["matches"]} == {games[key] for key in expected_openings}
+
+        for step, timing in enumerate((
+            {"start_time_kind": "scheduled", "planned_start_at": "2026-11-26T19:30:00+08:00"},
+            {"start_time_kind": "asap_when_full"},
+        ), 3):
+            write = submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客",
+                "requesting_party": party, "requirement": terms | timing, "known_players": []}, call_id=f"write-{step}"), step)
+            assert not write.called and not write.allowed
+            assert "table_availability_evidence" in write.result, write.error
+            assert write.result["table_availability_evidence"]["has_fixed_opening_authority"] is False
+        assert set(store.games) == set(games.values()) and not store.room_reservations
+    assert len(reviewer.calls) == 1
+    store._connection.close()
+
+
 @pytest.mark.parametrize("evening_evidence", ["uncited", "cited_tonight", "greeting_only"])
 def test_v5_0405_keeps_approximate_opening_center_and_hard_arrival_floor(tmp_path, evening_evidence):
     """实际 V5 两个钟点分开核验，只有确有同目标晚间原话并被引用时才允许跨日。"""
