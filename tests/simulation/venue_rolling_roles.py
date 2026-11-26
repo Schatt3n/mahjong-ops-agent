@@ -349,9 +349,11 @@ class VenueRollingRoles:
         """收件预算和天气状态都按本人及门店时区的营业日计算。"""
         return actor_id, at.astimezone(self.start_at.tzinfo).date()
 
-    def _receipt_budget(self, actor_id: str, at: datetime, kind: str, room_id: str | None) -> tuple:
-        """给同一顾客参与的不同小群各留独立续聊预算。"""
-        return self._day_key(actor_id, at), kind, room_id if kind == _TABLE_RECEIPT_WAKE else None
+    def _receipt_budget(self, actor_id: str, at: datetime, kind: str, room_id: str | None,
+                        *, from_shop: bool = False) -> tuple:
+        """每个小群分别给同桌来话和店家来话留额度，避免同桌表态挤掉新版提议。"""
+        table_bucket = (room_id, from_shop) if kind == _TABLE_RECEIPT_WAKE else None
+        return self._day_key(actor_id, at), kind, table_bucket
 
     def _seed_timers(self) -> None:
         """同一个演练目录能重放计划，只补齐尚未入账的两日私人唤醒。"""
@@ -413,8 +415,14 @@ class VenueRollingRoles:
                 self._remember_private_world(event)
             if event.kind in _RECEIPT_WAKES:
                 self._receipts[event.actor_id, event.origin_id] = event.event_id
+                room_id = event.details.get("table_room_id")
+                from_shop = event.details.get("table_shop_delivery")
+                if room_id and from_shop is None and (group := self.channel.table_group(room_id)) is not None:
+                    # 旧账本没有来源标记时，从本人实际收件恢复使用的额度。
+                    receipt = group.received(event.actor_id, event.origin_id)
+                    from_shop = receipt is not None and receipt.message.sender_id == AGENT_ID
                 self._receipt_counts[self._receipt_budget(
-                    event.actor_id, event.due_at, event.kind, event.details.get("table_room_id"),
+                    event.actor_id, event.due_at, event.kind, room_id, from_shop=bool(from_shop),
                 )] += 1
             elif event.kind == _TABLE_GROUP_OPEN_WAKE:
                 self._table_openings.add(event.origin_id)
@@ -672,11 +680,14 @@ class VenueRollingRoles:
                 if saved := self._receipts.get(key):
                     scheduled.append(saved)
                     continue
-                budget = self._receipt_budget(actor_id, due, kind, table_room)
+                from_shop = item["sender_id"] == AGENT_ID
+                budget = self._receipt_budget(actor_id, due, kind, table_room, from_shop=from_shop)
                 if (actor_id not in self.actors or actor_id == item["sender_id"]
                         or self._receipt_counts[budget] >= self.dialogue_turns - 1):
                     continue
-                details = {"depth": depth, **({"table_room_id": table_room} if table_room else {})}
+                details = {"depth": depth}
+                if table_room:
+                    details.update(table_room_id=table_room, table_shop_delivery=from_shop)
                 wake = self.journal.enqueue(actor_id=actor_id, kind=kind, origin_id=message_id,
                     due_at=due, caused_by=message_id, details=details)
                 self._receipts[key] = wake.event_id
