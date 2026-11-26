@@ -1,0 +1,41 @@
+{
+  "source_run": "rolling-actual-shop-20261127",
+  "source_artifact": "events.jsonl",
+  "event_id": "role-event:12196397817e30aa771f099bdaa87e8560a45c8da6f299ff3abe743ea6bfe0ed",
+  "wake_kind": "table_receipt",
+  "role_suffix": "0004",
+  "local_at": "2026-11-27T18:09:00+08:00",
+  "active_draft": "我这边最早七点半到，你们六点三刻、七点开都赶不上。有合适晚点的开场吗？底注1块的档位。",
+  "received_peer_role_suffix": "0001",
+  "received_peer_text": "我这边七点前能到，差不多六点三刻。底注1块，无烟的啊。我能打四个钟头，你们看这个开场行不行？",
+  "visible_shop_quote": "人齐了，大家各自几点能到？咱们在这儿定个开场。",
+  "actual_role_window": {
+    "earliest_arrival": "2026-11-27T19:30:00+08:00",
+    "free_until": "2026-11-27T23:59:00+08:00"
+  },
+  "observed": {
+    "extraction_steps": [2, 3],
+    "both_http_responses_complete": true,
+    "same_raw_response_sha256": "19bc09f625ad93c9f16f389c9ee981bc12aeb45566d71aeeaad9068f7240ed7b",
+    "both_extracted": [
+      {"kind": "arrival", "quote": "我这边七点前能到，差不多六点三刻", "local_date": "2026-11-27",
+       "local_at": "2026-11-27T18:45:00+08:00", "approximate": true},
+      {"kind": "play_duration", "quote": "我能打四个钟头", "local_date": "2026-11-27", "minimum_hours": 4}
+    ],
+    "validation_error": "availability assertion must quote the actual customer draft",
+    "actor_decision": "invalid",
+    "draft_delivered": false
+  },
+  "diagnosis": "Each response took both claims from the peer's received text. The former request put received_text after the draft without a speaker label. Its retry repeated the wrong-source raw extraction after the source evidence. The original validator correctly rejected those quotations.",
+  "bounded_repair": "Table-group extraction gets attributed, same-table context and a separate last message containing the active draft. The quoted visible proposal may disambiguate a first-person acceptance. The sole retry keeps the draft and context but omits the previous bad extraction. Exact draft citation and actual-world checks stay in place.",
+  "offline_verification": {
+    "archived_retry": "tests/simulation/test_venue_actors.py::test_table_claim_retry_cites_only_current_draft_after_archived_peer_quote",
+    "first_person_acceptance": "tests/simulation/test_venue_actors.py::test_table_claim_keeps_the_quoted_opening_for_a_first_person_confirmation",
+    "assertions": [
+      "An archived wrong-source result cannot be delivered. A repeated wrong-source result remains invalid after the existing single retry.",
+      "A corrected result quoting the active 19:30 arrival can pass at the same physical boundary without any text rewrite.",
+      "A quoted same-table 19:30 proposal remains available to interpret a first-person acceptance. Other tables and private availability are absent from the extraction request."
+    ],
+    "real_model_retest": false
+  }
+}

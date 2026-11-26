@@ -592,6 +592,41 @@ def _focus_familiar_opening(projected: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _table_availability_request(
+    action: ActorAction, context: dict[str, Any], local_now: str,
+) -> list[dict[str, str]] | None:
+    """对桌群发言分开同桌接收材料与本人的唯一引文来源。"""
+    room = action.recipient_id
+    if action.kind != "group" or not room or not room.startswith("table:"):
+        return None
+    delivery = context.get("delivery") or {}
+    references = []
+    if (delivery.get("kind") == "group" and delivery.get("recipient_id") == room
+            and delivery.get("message_id") and delivery.get("text")):
+        references.append((delivery, "received"))
+    if action.quote_message_id and action.quote_message_id != delivery.get("message_id"):
+        quoted = next((row for row in context.get("history", ()) if row.get("message_id") == action.quote_message_id
+                       and row.get("kind") == "group" and row.get("recipient_id") == room and row.get("text")), None)
+        if quoted is not None:
+            references.append((quoted, "quoted"))
+    reference_context = [
+        {"context_kind": relation, "message_id": row["message_id"], "text": row["text"],
+         "speaker": "self_history" if row.get("from_self") else
+         "shop" if row.get("sender_id") == SIMULATION_AGENT else "another_customer"}
+        for row, relation in references
+    ]
+    return [
+        {"role": "system", "content": CLAIM_PROMPT + "\n"
+            "最后一条用户消息的 draft 才是本次待发正文，每个 quote 必须逐字出自 draft。"
+            "较早消息的 current_table_context_only 是同桌参考，他人的到店与时长不是本人的陈述。"
+            "原稿明确承接某个时间时可用已见同桌语境消歧，仍引用原稿自己的承接片段。"
+            "原稿自己报出能到店的时刻时，提取该句，其他人提出的开场及原稿否定赶得上的时刻都不提取。"},
+        {"role": "user", "content": json.dumps({"local_now": local_now, "current_table_context_only": reference_context},
+                                              ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({"draft": action.text}, ensure_ascii=False)},
+    ]
+
+
 class ModelActor:
     """复用兼容客户端生成角色动作，保留原回复和真实 HTTP 来源。"""
 
@@ -710,9 +745,12 @@ class ModelActor:
             evidence = {"stage": "physical_availability", "conflict": conflict}
             return replace(decision, availability_reviews=(*decision.availability_reviews, evidence)), conflict
         receipt = decision.context.get("delivery") or {}
-        payload = {"draft": action.text, "local_now": availability.now.isoformat(), "received_text": receipt.get("text")}
-        request = [{"role": "system", "content": CLAIM_PROMPT},
-                   {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        local_now = availability.now.isoformat()
+        table_request = _table_availability_request(action, decision.context, local_now)
+        payload = {"draft": action.text, "local_now": local_now, "received_text": receipt.get("text")}
+        original_request = table_request or [{"role": "system", "content": CLAIM_PROMPT},
+                                            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        request = original_request
         reviews = list(decision.availability_reviews)
         error = "availability extraction budget exhausted"
         # 提取格式错时只重读同一原稿一次，不让角色另写一条，也不把私人日程交给提取模型。
@@ -737,15 +775,20 @@ class ModelActor:
             except ValueError as exc:
                 error = str(exc)
                 evidence["error"] = error
-                request = request[:2] + [
-                    {"role": "system", "content": (
-                        "重新提取同一顾客原稿并校验 JSON。每个 claims 对象单独填写 kind、quote 和 local_date（YYYY-MM-DD），"
-                        "同一天的日期也不能省略。play_duration 必填 local_date 和 minimum_hours。"
-                        "只说最多多久或询问喜欢的时长不报告最少时长。不要修改顾客原稿。"
-                    )},
-                    {"role": "user", "content": json.dumps({"previous_extraction": str(raw), "format_error": error},
-                                                             ensure_ascii=False)},
-                ]
+                repair_prompt = (
+                    "重新提取同一顾客原稿并校验 JSON。每个 claims 对象单独填写 kind、quote 和 local_date（YYYY-MM-DD），"
+                    "同一天的日期也不能省略。play_duration 必填 local_date 和 minimum_hours。"
+                    "只说最多多久或询问喜欢的时长不报告最少时长。不要修改顾客原稿。"
+                )
+                if table_request:
+                    # 失败引文可能来自其他队员。保留同桌上下文与原稿，避免把错误引文再呈给提取器。
+                    request = [{"role": "system", "content": table_request[0]["content"] + "\n"
+                                + repair_prompt + "\n上次输出未通过校验。原因是 " + error},
+                               *table_request[1:]]
+                else:
+                    request = original_request + [{"role": "system", "content": repair_prompt},
+                        {"role": "user", "content": json.dumps({"previous_extraction": str(raw), "format_error": error},
+                                                               ensure_ascii=False)}]
                 continue
             conflict = availability.check_claims(claims)
             evidence.update(claims=claims, conflict=conflict)

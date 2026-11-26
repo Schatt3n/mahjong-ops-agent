@@ -488,6 +488,89 @@ def test_live_actor_withholds_risky_draft_when_independent_claim_evidence_is_inv
     assert [review["error"] for review in result.availability_reviews] == [result.error, result.error]
 
 
+def _table_claim_context(proposal_text="人齐了，大家各自几点能到？咱们在这儿定个开场。"):
+    """复用桌群中已送达的两位说话者及当前演员自己的到店窗口。"""
+    now = "2026-11-27T18:09:00+08:00"
+    room = "table:game_087b15a1fcd9"
+    proposal = {"message_id": "shop-proposal", "kind": "group", "recipient_id": room, "sender_id": OWNER,
+                "text": proposal_text}
+    delivered = {"message_id": "peer-receipt", "kind": "group", "recipient_id": room, "sender_id": "peer",
+                 "text": "我这边七点前能到，差不多六点三刻。底注1块，无烟的啊。我能打四个钟头，你们看这个开场行不行？"}
+    other_room = {"message_id": "other-slot", "kind": "group", "recipient_id": "table:other", "sender_id": OWNER,
+                  "text": "其他桌的开场时间"}
+    event = {"kind": "delivered", "at": now, "caused_by": delivered["message_id"], "details": {
+        "can_arrive": True, "earliest_arrival": "2026-11-27T19:30:00+08:00", "free_from": "2026-11-27T18:05:00+08:00",
+        "free_until": "2026-11-27T23:59:00+08:00", "event_condition": "ordinary_day",
+    }}
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(event,),
+                           history=(proposal, delivered, other_room), group_targets=(room, "table:other"))
+    return context, proposal, delivered
+
+
+def _table_claim_draft(proposal, text):
+    """保留独立角色选择的桌群、原话和引用。"""
+    return json.dumps({"action": "send", "kind": "group", "recipient_id": proposal["recipient_id"],
+                       "quote_message_id": proposal["message_id"], "text": text}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("corrected", [True, False])
+def test_table_claim_retry_cites_only_current_draft_after_archived_peer_quote(corrected):
+    """同桌其他顾客的可达时间不能放行，唯一的重提取保持本人的原稿。"""
+    context, proposal, delivered = _table_claim_context()
+    draft = "我这边最早七点半到，你们六点三刻、七点开都赶不上。有合适晚点的开场吗？底注1块的档位。"
+    raw = _table_claim_draft(proposal, draft)
+    peer_claims = ('{"claims":[{"kind":"arrival","quote":"我这边七点前能到，差不多六点三刻",'
+                   '"local_date":"2026-11-27","local_at":"2026-11-27T18:45:00+08:00","approximate":true},'
+                   '{"kind":"play_duration","quote":"我能打四个钟头","local_date":"2026-11-27","minimum_hours":4}]}')
+    owned = ('{"claims":[{"kind":"arrival","quote":"我这边最早七点半到","local_date":"2026-11-27",'
+             '"local_at":"2026-11-27T19:30:00+08:00"}]}')
+    captured = []
+    result = ModelActor(_client((raw, peer_claims, owned if corrected else peer_claims), captured)).decide(
+        context, trace_id="archived-table-v0004")
+
+    assert len(captured) == 3 and result.raw == raw
+    for request in captured[1:]:
+        instructions, visible, current = request["messages"]
+        assert instructions["role"] == "system" and "每个 quote 必须逐字出自 draft" in instructions["content"]
+        assert json.loads(current["content"]) == {"draft": draft}
+        assert json.loads(visible["content"]) == {"local_now": context.now, "current_table_context_only": [
+            {"context_kind": "received", "message_id": delivered["message_id"], "speaker": "another_customer",
+             "text": delivered["text"]},
+            {"context_kind": "quoted", "message_id": proposal["message_id"], "speaker": "shop", "text": proposal["text"]},
+        ]}
+        serialized = json.dumps(request, ensure_ascii=False)
+        assert "previous_extraction" not in serialized and peer_claims not in serialized
+        assert "其他桌的开场时间" not in serialized and "free_until" not in serialized
+    first, retry = result.availability_reviews
+    assert first["raw"] == peer_claims and first["error"] == "availability assertion must quote the actual customer draft"
+    assert "上次输出未通过校验" in captured[2]["messages"][0]["content"]
+    if corrected:
+        assert result.status == "valid" and result.action.text == draft
+        assert retry["claims"] == json.loads(owned)["claims"] and retry["conflict"] is None
+    else:
+        assert result.status == "invalid" and result.action is None
+        assert retry["raw"] == peer_claims and retry["error"] == first["error"]
+
+
+def test_table_claim_keeps_the_quoted_opening_for_a_first_person_confirmation():
+    """可以用已见的原桌开场解释本人确认，仍只引用本人本轮确认的片段。"""
+    context, proposal, delivered = _table_claim_context("那要不晚七点半开，打四个小时？")
+    draft = "行，那个点我能来。"
+    claim = {"kind": "arrival", "quote": "那个点我能来", "local_date": "2026-11-27",
+             "local_at": "2026-11-27T19:30:00+08:00"}
+    captured = []
+    result = ModelActor(_client((_table_claim_draft(proposal, draft),
+                                json.dumps({"claims": [claim]}, ensure_ascii=False)), captured)).decide(
+        context, trace_id="current-table-agreed-opening")
+    assert result.status == "valid" and result.action.text == draft and len(captured) == 2
+    assert result.availability_reviews[0]["claims"] == [claim]
+    messages = captured[1]["messages"]
+    assert json.loads(messages[-1]["content"]) == {"draft": draft}
+    received, quoted = json.loads(messages[-2]["content"])["current_table_context_only"]
+    assert received["message_id"] == delivered["message_id"]
+    assert quoted["message_id"] == proposal["message_id"] and quoted["text"] == proposal["text"]
+
+
 @pytest.mark.parametrize("free_until, fits", [("23:00", False), ("23:30", True)])
 def test_archived_approximate_duration_marker_keeps_minimum_and_world_check(free_until, fits):
     """真实返回中的约数标记不触发格式重试，也不会给四小时安排增加可用时间。"""
