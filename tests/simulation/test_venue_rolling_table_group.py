@@ -147,3 +147,41 @@ def test_rolling_table_group_uses_one_shop_ingress_and_exact_recipients(tmp_path
     assert scenario.channel.runtime.store.require_game(game.game_id).status == GameStatus.READY
     assert scenario.run()["rolling_table_groups"] == report["rolling_table_groups"]
     assert len(shop.handled) == 2
+
+
+def test_binding_the_fourth_contact_wakes_existing_table_shop_once(tmp_path):
+    """匿名同行绑定后在原桌群开启四人协商，进程重开不多建群或重复问时间。"""
+    from .venue_table_party import VenueTableParty
+
+    shop = _TableShop()
+    scenario = _open(tmp_path, shop)
+    store = scenario.channel.runtime.store
+    with using_clock(lambda: _AT - timedelta(minutes=1)):
+        game, _ = store.create_game(
+            conversation_id=scenario.channel.private_conversation_id(_HOST), organizer_id=_HOST,
+            organizer_name=_PEOPLE[0].name,
+            known_players=[{"customer_id": _HOST, "seat_count": 2, "anonymous_seat_count": 1}],
+            requirement={"game_type": "hangzhou_mahjong", "stake": "1", "start_time_kind": "asap_when_full"},
+            trace_id="companion-table",
+        )
+        for person in _PEOPLE[1:3]:
+            store.join_game(game_id=game.game_id, customer_id=person.sender_id, display_name=person.name,
+                            trace_id=f"confirmed:{person.sender_id}")
+    group = scenario.channel.open_table_group(game.game_id, at=_AT)
+    group.invite_companion("companion", inviter_id=_HOST, recipient_id=_D, at=_AT + timedelta(seconds=10))
+    group.respond_companion("companion", actor_id=_D, at=_AT + timedelta(seconds=20), accept=True)
+    bound_at = _AT + timedelta(seconds=30)
+    VenueTableParty(group).bind_companion("companion", actor_id=_D, at=bound_at)
+
+    report = scenario.run()
+    assert all(report["checks"].values())
+    roster_wake, = [item for item in scenario.journal.events() if item.kind == "table_roster_ready"]
+    assert roster_wake.due_at == bound_at
+    assert roster_wake.result["opened"] is False
+    assert report["rolling_table_groups"]["opened"] == 0
+    question, = [receipt for receipt in group.delivered_receipts() if receipt.message.text == _ASK]
+    assert set(question.recipient_ids) == {_HOST, _B, _C, _D}
+    assert shop.handled.count((game.game_id, None)) == 1
+    reopened = _open(tmp_path, shop)
+    reopened.run()
+    assert shop.handled.count((game.game_id, None)) == 1
