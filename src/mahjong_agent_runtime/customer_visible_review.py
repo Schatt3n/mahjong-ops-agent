@@ -877,7 +877,7 @@ def build_reply_self_review_payload(
                    "若介绍这些临近桌，须保留顾客赶不赶得上的未知；已有空席不代表会晚开或同桌愿意等候。"
                    "可直接省略这些备选；无真实本人或同桌确认的肯定保证，以 unsupported_conclusion 拒绝。",)
                   if game_availability_evidence.get("latest_search", {}).get("options_requiring_timing_confirmation") else ()),
-                "需求已建立且按有效条件查过时，当前需求下暂时没有现成局可由对话限定范围；不强求逐字重复按条件、登记中等前缀，不把正常省略误判为全店无局或无人可约",
+                "明确问有无现成局且已按有效条件完整查过时，可以直接说当前范围内没有可搭的现成桌。保留会改变结论的时间、玩法和档位，允许对话自然承接已知条件；不强制使用‘没查到’或报告查询过程。局况仍待核实、搜索未完成或失败时，不能称为当前无桌。提议组桌仍是等本人决定，不表示已开始。",
                 *(("分别核对未查到符合条件的现成局、确定存在且满座的具体桌。game_availability_evidence.latest_search.matched_count=0 只证明本次查询没返回匹配，不证明某桌存在、已满或先有位后被占。正文若把具体桌说成没位或满座，必须由这张桌自己的 zero_seat_game_ids 和 seat_count_evidence 支持；别桌、历史话术、房间无空、失败查询均不能代替。缺证据以 unsupported_conclusion 拒绝。自然转述、询问或当前范围内没查到合适桌不等于断言具体桌满座。",)
                   if game_availability_evidence else ()),
                 "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
@@ -889,7 +889,7 @@ def build_reply_self_review_payload(
                 "当前目标由真实原话和相关上下文确定；非业务交流附带招揽、业务提醒或业务回流尾句属于 unsolicited_goal_expansion，即使无工具也须拒绝，安全改写可去掉未请求背景；正常找局咨询的服务提议仍允许",
                 "客户补发短词修正本人引用的原话时，核对回复是否自然承接修正后的意思。简短确认或顺着改后的意思聊均可，无须复述错词。只有引用与新词清楚支持更正、回复却遗漏或误读这层意思时，以 semantic_fact_loss 反馈。",
                 "明确名单询问可使用 active_game_visible_summaries.public_participant_names 的后端私聊授权白名单，不把已授权公开值当私有备注；字段缺失时不能从全局画像/内部参与记录补名，角色/邀约状态/关系仍保密，不能顺带招揽或确认",
-                "未知个人适配不能先宣判有无适合的局再补问；如表达空结论，缺少 supports_narrower_empty_claim=true 时只支持本次没查到，不能自动宣判未查范围为空。不得因相关服务征询或必要追问未复述空结果就拒绝，按 game_query_strategy_contract.query_result_reporting 核对上下文合理性；不得扩大查询范围、冒充个人适配或由登记局为空推断没有潜在客户；active_games 仅是客户相关局，不是全店库存",
+                "未知个人适配不能先宣判有无适合的局再补问；缺少 supports_narrower_empty_claim=true 时只支持本次有效条件下的查询结果，不能自动宣判未查范围为空。不得因相关服务征询或必要追问未复述空结果就拒绝，按 game_query_strategy_contract.query_result_reporting 核对上下文合理性；不得扩大查询范围、冒充个人适配或由登记局为空推断没有潜在客户；active_games 仅是客户相关局，不是全店库存",
                 "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
                 *(('分桌回答核对 assigned_room.access_window_started。为 false 时，把预约开始时间明确关联到用房；单说牌局几点开不能给随后「到了直接过去」加上未来条件。能说明稍后用房，不补写没有证据的大厅、前台或其他等候位置，不保证准时开打。',)
                   if private_customer_reply and any(game.get("assigned_room") for game in visible_games if isinstance(game, dict)) else ()),

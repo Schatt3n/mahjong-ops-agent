@@ -1,0 +1,467 @@
+{
+  "business_decision": "对于后面的问题，今晚，允许跨午夜",
+  "default_evening_query_end_local": "次日 06:00",
+  "default_is_not_verified_business_hours": true,
+  "runs": [
+    {
+      "run": "replay-fb3cdfe3f8",
+      "status": "failed",
+      "fixture_source": {
+        "kind": "synthetic_sibling",
+        "reference_run": "2026-11-25-real-34fa8e9813",
+        "reference_inbound_sequence": 87,
+        "scenario": "clear_reference"
+      },
+      "model_execution": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 7200,
+        "max_concurrency": 1,
+        "retry_attempts": 2,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "none",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 45.0
+      },
+      "reply_self_review": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 16384,
+        "max_concurrency": 1,
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "low",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 180.0
+      },
+      "checks": {
+        "board_delivered": true,
+        "private_reply_delivered": true,
+        "only_original_customer_received_the_reply": true,
+        "separate_red_center_evening_search_found_no_match": false,
+        "queries_have_separate_scoped_call_ids": true,
+        "no_successful_write_tools": true,
+        "game_room_waiting_and_invite_state_unchanged": true,
+        "same_table_found_without_personal_window": true
+      },
+      "semantic_judgment": {
+        "status": "not_run",
+        "verdict": "inconclusive"
+      },
+      "conversation_excerpt": [
+        {
+          "message_id": "outbound:board:board_snapshot_53ee1cdd18a8162ce8cb6ae40457cb73",
+          "direction": "outbound",
+          "kind": "group",
+          "sent_at": "2026-11-26T10:20:30+00:00",
+          "text": "当前缺人局：\n1、人齐开 川麻 2～3元 无烟 173",
+          "quoted_message_id": null
+        },
+        {
+          "message_id": "customer:synthetic-mixed-board-clear",
+          "direction": "inbound",
+          "kind": "private",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "老板，群里1号那桌人齐开的，是川麻吗？今晚七点以后有一块底的红中吗？",
+          "quoted_message_id": null
+        },
+        {
+          "message_id": "outbound:trace_c4df071b9f47f0aab4b133f0:1",
+          "direction": "outbound",
+          "kind": "private",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "1号那桌是川麻。今晚七点以后一块底的红中，我这边暂时没看到合适的现成桌，要我帮你组一桌不？",
+          "quoted_message_id": null
+        }
+      ],
+      "verified_clock": [
+        {
+          "clock_role": "other",
+          "lookup_scope": "specific_table",
+          "also_requests_personal_options": true,
+          "opening_dayparts": {
+            "date": "2026-11-26",
+            "parts": [
+              "evening"
+            ],
+            "source_ref": 1
+          },
+          "opening_window": {
+            "end_at": "2026-11-27T06:00:00+08:00",
+            "start_at": "2026-11-26T18:35:00+08:00"
+          }
+        }
+      ],
+      "executed_scoped_queries": [
+        {
+          "lookup_scope": "specific_table",
+          "requirement": {
+            "game_type": "sichuan_mahjong",
+            "start_time_kind": "asap_when_full"
+          },
+          "match_count": 1,
+          "remaining_seats": [
+            3
+          ]
+        },
+        {
+          "lookup_scope": "personal",
+          "requirement": {
+            "base_stake": 1.0,
+            "game_type": "red_center_mahjong",
+            "stake": "1",
+            "stake_label": "1",
+            "start_time_range": {
+              "end_at": "2026-11-27T06:00:00+08:00",
+              "start_at": "2026-11-26T18:35:00+08:00"
+            }
+          },
+          "match_count": 0,
+          "remaining_seats": []
+        }
+      ],
+      "tool_requests_rejected_before_execution": [
+        {
+          "lookup_scope": "personal",
+          "requirement": {
+            "game_type": "red_center_mahjong",
+            "stake": 1,
+            "start_time_range": {
+              "end_at": "2026-11-27T00:00:00+08:00",
+              "start_at": "2026-11-26T19:00:00+08:00"
+            }
+          }
+        }
+      ],
+      "reply_reviews": [
+        {
+          "approved": false,
+          "violations": [
+            "semantic_contradiction"
+          ]
+        },
+        {
+          "approved": false,
+          "violations": [
+            "unsolicited_goal_expansion"
+          ]
+        },
+        {
+          "approved": false,
+          "violations": [
+            "unsupported_conclusion"
+          ]
+        },
+        {
+          "approved": true,
+          "violations": []
+        }
+      ],
+      "final_objective_status": "waiting_user",
+      "usage": {
+        "observed_attempts": 15,
+        "attempts_with_usage": 15,
+        "missing_usage_attempts": 0,
+        "input_tokens": 457723,
+        "output_tokens": 27544,
+        "cache_hit_input_tokens": 241536,
+        "cache_miss_input_tokens": 216187,
+        "unknown_cache_input_tokens": 0
+      }
+    },
+    {
+      "run": "replay-f15b0f474d",
+      "status": "failed",
+      "fixture_source": {
+        "kind": "synthetic_sibling",
+        "reference_run": "2026-11-25-real-34fa8e9813",
+        "reference_inbound_sequence": 87,
+        "scenario": "clear_reference"
+      },
+      "model_execution": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 7200,
+        "max_concurrency": 1,
+        "retry_attempts": 2,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "none",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 45.0
+      },
+      "reply_self_review": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 16384,
+        "max_concurrency": 1,
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "low",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 180.0
+      },
+      "checks": {
+        "board_delivered": true,
+        "private_reply_delivered": true,
+        "only_original_customer_received_the_reply": true,
+        "separate_red_center_evening_search_found_no_match": true,
+        "queries_have_separate_scoped_call_ids": true,
+        "no_successful_write_tools": true,
+        "game_room_waiting_and_invite_state_unchanged": true,
+        "same_table_found_without_personal_window": true
+      },
+      "semantic_judgment": {
+        "status": "valid",
+        "verdict": "fail",
+        "citations_valid": true,
+        "findings": {
+          "单独如实告知今晚七点后目前没有符合条件的一元红中": "pass",
+          "直接回答原桌及其真实公开情况，无需让顾客再确认是哪桌": "pass",
+          "得出完整空结果后，征询是否要帮顾客组一桌红中": "fail"
+        }
+      },
+      "conversation_excerpt": [
+        {
+          "message_id": "outbound:board:board_snapshot_c5af8099cf215cac56b41249d76b2b7a",
+          "direction": "outbound",
+          "kind": "group",
+          "sent_at": "2026-11-26T10:20:30+00:00",
+          "text": "当前缺人局：\n1、人齐开 川麻 2～3元 无烟 173",
+          "quoted_message_id": null
+        },
+        {
+          "message_id": "customer:synthetic-mixed-board-clear",
+          "direction": "inbound",
+          "kind": "private",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "老板，群里1号那桌人齐开的，是川麻吗？今晚七点以后有一块底的红中吗？",
+          "quoted_message_id": null
+        },
+        {
+          "message_id": "outbound:trace_c4df071b9f47f0aab4b133f0:1",
+          "direction": "outbound",
+          "kind": "private",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "1号那桌是川麻，2～3块底、无烟，现在一缺三。今晚七点以后现在没有一块底的红中桌诶。",
+          "quoted_message_id": null
+        }
+      ],
+      "verified_clock": [
+        {
+          "clock_role": "opening",
+          "lookup_scope": "specific_table",
+          "also_requests_personal_options": true,
+          "opening_dayparts": {
+            "date": "2026-11-26",
+            "parts": [
+              "evening"
+            ],
+            "source_ref": 1
+          },
+          "opening_window": {
+            "end_at": "2026-11-27T06:00:00+08:00",
+            "start_at": "2026-11-26T19:00:00+08:00"
+          }
+        }
+      ],
+      "executed_scoped_queries": [
+        {
+          "lookup_scope": "specific_table",
+          "requirement": {
+            "start_time_kind": "asap_when_full"
+          },
+          "match_count": 1,
+          "remaining_seats": [
+            3
+          ]
+        },
+        {
+          "lookup_scope": "personal",
+          "requirement": {
+            "base_stake": 1.0,
+            "game_type": "red_center_mahjong",
+            "stake": "1",
+            "stake_label": "1",
+            "start_time_range": {
+              "end_at": "2026-11-27T06:00:00+08:00",
+              "start_at": "2026-11-26T19:00:00+08:00"
+            }
+          },
+          "match_count": 0,
+          "remaining_seats": []
+        }
+      ],
+      "tool_requests_rejected_before_execution": [],
+      "reply_reviews": [
+        {
+          "approved": true,
+          "violations": []
+        }
+      ],
+      "final_objective_status": "completed",
+      "usage": {
+        "observed_attempts": 6,
+        "attempts_with_usage": 6,
+        "missing_usage_attempts": 0,
+        "input_tokens": 165650,
+        "output_tokens": 5848,
+        "cache_hit_input_tokens": 109824,
+        "cache_miss_input_tokens": 55826,
+        "unknown_cache_input_tokens": 0
+      }
+    },
+    {
+      "run": "replay-5e4f6218ad",
+      "status": "passed",
+      "fixture_source": {
+        "kind": "synthetic_sibling",
+        "reference_run": "2026-11-25-real-34fa8e9813",
+        "reference_inbound_sequence": 87,
+        "scenario": "clear_reference"
+      },
+      "model_execution": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 7200,
+        "max_concurrency": 1,
+        "retry_attempts": 2,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "none",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 45.0
+      },
+      "reply_self_review": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 16384,
+        "max_concurrency": 1,
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "low",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 180.0
+      },
+      "checks": {
+        "board_delivered": true,
+        "private_reply_delivered": true,
+        "only_original_customer_received_the_reply": true,
+        "separate_red_center_evening_search_found_no_match": true,
+        "queries_have_separate_scoped_call_ids": true,
+        "no_successful_write_tools": true,
+        "game_room_waiting_and_invite_state_unchanged": true,
+        "same_table_found_without_personal_window": true
+      },
+      "semantic_judgment": {
+        "status": "valid",
+        "verdict": "pass",
+        "citations_valid": true,
+        "findings": {
+          "单独如实告知今晚七点后目前没有符合条件的一元红中": "pass",
+          "直接回答原桌及其真实公开情况，无需让顾客再确认是哪桌": "pass",
+          "得出完整空结果后，征询是否要帮顾客组一桌红中": "pass"
+        }
+      },
+      "conversation_excerpt": [
+        {
+          "message_id": "outbound:board:board_snapshot_99884424add00ebbff34ea11bfcefe30",
+          "direction": "outbound",
+          "kind": "group",
+          "sent_at": "2026-11-26T10:20:30+00:00",
+          "text": "当前缺人局：\n1、人齐开 川麻 2～3元 无烟 173",
+          "quoted_message_id": null
+        },
+        {
+          "message_id": "customer:synthetic-mixed-board-clear",
+          "direction": "inbound",
+          "kind": "private",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "老板，群里1号那桌人齐开的，是川麻吗？今晚七点以后有一块底的红中吗？",
+          "quoted_message_id": null
+        },
+        {
+          "message_id": "outbound:trace_c4df071b9f47f0aab4b133f0:1",
+          "direction": "outbound",
+          "kind": "private",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "1号那桌是川麻，2到3块的，无烟，还缺三位。今晚七点以后现在没有能搭的一块底红中桌诶，要不我帮你组一桌？",
+          "quoted_message_id": null
+        }
+      ],
+      "verified_clock": [
+        {
+          "clock_role": "opening",
+          "lookup_scope": "specific_table",
+          "also_requests_personal_options": true,
+          "opening_dayparts": {
+            "date": "2026-11-26",
+            "parts": [
+              "evening"
+            ],
+            "source_ref": 1
+          },
+          "opening_window": {
+            "end_at": "2026-11-27T06:00:00+08:00",
+            "start_at": "2026-11-26T19:00:00+08:00"
+          }
+        }
+      ],
+      "executed_scoped_queries": [
+        {
+          "lookup_scope": "specific_table",
+          "requirement": {
+            "start_time_kind": "asap_when_full"
+          },
+          "match_count": 1,
+          "remaining_seats": [
+            3
+          ]
+        },
+        {
+          "lookup_scope": "personal",
+          "requirement": {
+            "base_stake": 1.0,
+            "game_type": "red_center_mahjong",
+            "stake": "1",
+            "stake_label": "1",
+            "start_time_range": {
+              "end_at": "2026-11-27T06:00:00+08:00",
+              "start_at": "2026-11-26T19:00:00+08:00"
+            }
+          },
+          "match_count": 0,
+          "remaining_seats": []
+        }
+      ],
+      "tool_requests_rejected_before_execution": [],
+      "reply_reviews": [
+        {
+          "approved": false,
+          "violations": [
+            "semantic_contradiction"
+          ]
+        },
+        {
+          "approved": true,
+          "violations": []
+        }
+      ],
+      "final_objective_status": "waiting_user",
+      "usage": {
+        "observed_attempts": 10,
+        "attempts_with_usage": 9,
+        "missing_usage_attempts": 1,
+        "input_tokens": 276707,
+        "output_tokens": 7794,
+        "cache_hit_input_tokens": 143488,
+        "cache_miss_input_tokens": 133219,
+        "unknown_cache_input_tokens": 0
+      }
+    }
+  ]
+}

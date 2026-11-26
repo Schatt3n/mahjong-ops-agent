@@ -13,6 +13,8 @@ from ..models import DEFAULT_TZ, now
 MORNING_MARKERS = ("凌晨", "早上", "上午", "清晨", "今早", "明早")
 AFTERNOON_MARKERS = ("下午", "晚上", "今晚", "明晚", "傍晚")
 NOON_MARKERS = ("中午",)
+# 缺少可信营业时间时，用次日当地 06:00 作为晚间查局上界，不代表门店实际营业到该时。
+OVERNIGHT_SEARCH_END_HOUR = 6
 
 
 @dataclass(frozen=True, slots=True)

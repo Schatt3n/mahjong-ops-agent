@@ -254,12 +254,13 @@ def test_opening_range_filters_by_authoritative_time_before_limit(duration_store
 
     store = duration_store[0]
     now_at = datetime.fromisoformat("2026-11-25T22:30:00+08:00")
-    opening_range = {"start_at": "2026-11-25T23:30:00+08:00", "end_at": "2026-11-26T01:00:00+08:00"}
+    opening_range = {"start_at": "2026-11-25T23:30:00+08:00", "end_at": "2026-11-26T06:00:00+08:00"}
     game_ids = {}
     with using_clock(lambda: now_at):
         for label, at in (("before", "2026-11-25T23:29:00+08:00"), ("middle", "2026-11-26T00:37:00+08:00"),
-                          ("left", opening_range["start_at"]), ("right", opening_range["end_at"]),
-                          ("after", "2026-11-26T01:01:00+08:00"), ("unsettled", None)):
+                          ("after_midnight", "2026-11-26T02:00:00+08:00"), ("left", opening_range["start_at"]),
+                          ("right", opening_range["end_at"]), ("after", "2026-11-26T06:01:00+08:00"),
+                          ("unsettled", None)):
             requirement = {"game_type": "red_center_mahjong"}
             if at:
                 requirement["planned_start_at"] = at
@@ -271,8 +272,10 @@ def test_opening_range_filters_by_authoritative_time_before_limit(duration_store
             game_ids[label] = game.game_id
 
         request = {"game_type": "red_center_mahjong", "start_time_range": opening_range}
-        result = query(duration_store, request, limit=3)
-        assert {entry["game"]["game_id"] for entry in result["matches"]} == {game_ids[key] for key in ("left", "middle", "right")}
+        result = query(duration_store, request, limit=4)
+        assert {entry["game"]["game_id"] for entry in result["matches"]} == {
+            game_ids[key] for key in ("left", "middle", "after_midnight", "right")
+        }
         assert all("organizer_id" not in entry["game"] for entry in result["matches"])
         assert result["customer_reply_contract"]["evidence_scope"]["applied_filter_fields"] == [
             "game_type", "start_time_range",

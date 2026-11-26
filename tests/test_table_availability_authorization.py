@@ -263,8 +263,8 @@ def test_mixed_named_and_personal_reads_keep_separate_verified_conditions_and_re
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
 @pytest.mark.parametrize("qualifier,start,end,expected_match", [
-    ("以后", "19:00:00", "23:59:59.999999", "late"),
-    ("以前", "18:35:00", "19:00:00", "early"),
+    ("以后", "2026-11-26T19:00:00", "2026-11-27T06:00:00", "late"),
+    ("以前", "2026-11-26T18:35:00", "2026-11-26T19:00:00", "early"),
 ])
 def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_daypart(
     store_kind, qualifier, start, end, expected_match, tmp_path,
@@ -280,7 +280,7 @@ def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_d
     client, trace = ReviewClient([decision]), InMemoryTraceRecorder()
     service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
                                    table_availability_client=client)
-    verified_window = {"start_at": f"2026-11-26T{start}+08:00", "end_at": f"2026-11-26T{end}+08:00"}
+    verified_window = {"start_at": f"{start}+08:00", "end_at": f"{end}+08:00"}
     widened_window = {"start_at": at.isoformat(), "end_at": "2026-11-26T23:59:59.999999+08:00"}
     with using_clock(lambda: at):
         _activate(store, started=at)
@@ -288,7 +288,8 @@ def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_d
         games = {}
         for host, game_type, opening in (("board", "sichuan_mahjong", {"start_time_kind": "asap_when_full"}),
                                          ("early", "red_center_mahjong", {"planned_start_at": "2026-11-26T18:50:00+08:00"}),
-                                         ("late", "red_center_mahjong", {"planned_start_at": "2026-11-26T19:10:00+08:00"})):
+                                         ("late", "red_center_mahjong", {"planned_start_at": "2026-11-27T02:00:00+08:00"}),
+                                         ("next_morning", "red_center_mahjong", {"planned_start_at": "2026-11-27T06:01:00+08:00"})):
             games[host], _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name="桌主",
                 requirement={"game_type": game_type, "stake": "1", **opening},
                 known_players=[{"customer_id": host}], trace_id=host)
@@ -694,8 +695,8 @@ def test_opening_dayparts_require_verified_citation_and_local_date(patch):
     assert _check(store, client, message) == without_dayparts
 
 
-def test_explicit_future_opening_daypart_uses_actual_date_and_local_midnight():
-    """有本人明确指定的开场日期才采用未来时段，并保持晚上查询在当天结束。"""
+def test_explicit_future_opening_daypart_uses_actual_date_and_overnight_boundary():
+    """有本人明确指定的开场日期才采用未来时段，延续到该日所属晚间的次日清晨。"""
     store = InMemoryAgentStore()
     prior_at = SENT - timedelta(minutes=2)
     _activate(store, started=prior_at)
@@ -704,7 +705,7 @@ def test_explicit_future_opening_daypart_uses_actual_date_and_local_midnight():
     _persist(store, message)
     dayparts = {"date": "2026-12-02", "parts": ["afternoon", "evening"], "source_ref": 1}
     decision = _decision(2, opening_window=None, opening_dayparts=dayparts, supporting_customer_refs=[1, 2])
-    expected = {"start_at": "2026-12-02T12:00:00+08:00", "end_at": "2026-12-02T23:59:59.999999+08:00"}
+    expected = {"start_at": "2026-12-02T12:00:00+08:00", "end_at": "2026-12-03T06:00:00+08:00"}
     assert _check(store, ReviewClient([decision]), message) == {**decision, "opening_window": expected}
 
 
