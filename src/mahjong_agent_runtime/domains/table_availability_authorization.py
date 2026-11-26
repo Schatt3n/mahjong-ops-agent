@@ -33,7 +33,8 @@ opening_dayparts 单独记录本人明确接受的开场时段，以时段开始
 accepted_stake_range 是本人可以接受的档位范围。像「红中2块3块的」如果原话表达可接受两个底注档位而无其他含义，记录 min=2,max=3。不要因同时出现两个数就猜第二个是封顶。known_cap_score 仅在本人另外明确给出封顶时填写正数；区间和明确封顶可以同时存在。描述「看板那桌写二到三块」后另问「还有别的无烟局吗」，另查仅要求无烟，accepted_stake_range 用 null。只有另查分句或同任务的其他本人原话明确提出同样的档位要求时才继承，例如「另外也只找二到三块的无烟局」。描述原桌、问原桌档位或想报名原桌本身不能作为另一查局目标的档位条件。不确定用 null。
 max_duration_hours 只记录本人明确的最长可打时长，统一换算为正数小时；严格最多或只能打的小时数是上限。「打四个小时左右」「大概玩四小时」是时长偏好，不是硬上限或约定时长。agreed_duration_hours 只记录本人明确选定的确切时长，不能用到店与离开钟点相减推得。仅到店钟点、最晚离开钟点、普通期望、桌本身时长、缺失或不确定时均填 null。
 has_fixed_opening_authority 只在本人已定一个具体开场，或本人明确授权店家在给定的开场范围内选一个固定开场时才为 true。答应店家帮找人、本人有空、接受某个宽时间区间、或者报到店与离开钟点不足以选定新局固定开场。多钟点时，true 必须用 opening_customer_ref 指出实际明确选定或委托选定开场的本人记录；若本轮明确约定一个开场，opening_window 两端应为该 opening 候选的同一时点。其他情况为 false，opening_customer_ref 用 null。这里只核对固定开场权限，不授予建局、占席或联系权限。
-仅输出 JSON 对象，键为 clock_role、clock_roles、lookup_scope、opening_window、opening_dayparts、accepted_stake_range、known_cap_score、max_duration_hours、agreed_duration_hours、has_fixed_opening_authority、opening_customer_ref、current_ref、supporting_customer_refs，以及上文允许时的 also_requests_personal_options。opening_window 为 null 或 {"start_at":"带时区ISO","end_at":"带时区ISO"}；opening_dayparts 为 null 或 {"date":"YYYY-MM-DD","parts":["morning","afternoon"],"source_ref":1}，parts 填本人同一日期实际接受的开场时段，枚举 morning、afternoon、evening，每种最多一次，source_ref 必须也列在 supporting_customer_refs。accepted_stake_range 为 null 或 {"min":2,"max":3}，known_cap_score、max_duration_hours、agreed_duration_hours 各为 null 或正数，has_fixed_opening_authority 为布尔值。current_ref 必须是 current=true 的本人记录编号，supporting_customer_refs 列出支持判断的一个或多个本人记录编号，可包括本轮。不能引用店家编号冒充本人；无足够明确事实时保留 null，不补猜。"""
+当前只确认开场时，仍要核对同一组局目的较早的可打到几点。若它仍适用且是柔性时点，在 prior_play_until 里引用它：{"customer_ref":较早本人编号,"clock_ref":该条 clock_candidates 的编号}。不能跨桌、跨次组局或跨日继承。顾客只补开场不是撤销原条件；如果顾客换了目标、撤回、给出新的离场或时长、或者旧来话实际是硬限制，不填该柔性引用。此引用不证明结束时刻已约定，不赋予组局或开场权限。
+仅输出 JSON 对象，键为 clock_role、clock_roles、lookup_scope、opening_window、opening_dayparts、accepted_stake_range、known_cap_score、max_duration_hours、agreed_duration_hours、has_fixed_opening_authority、opening_customer_ref、current_ref、supporting_customer_refs，以及上文允许时的 also_requests_personal_options、prior_play_until。opening_window 为 null 或 {"start_at":"带时区ISO","end_at":"带时区ISO"}；opening_dayparts 为 null 或 {"date":"YYYY-MM-DD","parts":["morning","afternoon"],"source_ref":1}，parts 填本人同一日期实际接受的开场时段，枚举 morning、afternoon、evening，每种最多一次，source_ref 必须也列在 supporting_customer_refs。accepted_stake_range 为 null 或 {"min":2,"max":3}，known_cap_score、max_duration_hours、agreed_duration_hours 各为 null 或正数，has_fixed_opening_authority 为布尔值。current_ref 必须是 current=true 的本人记录编号，supporting_customer_refs 列出支持判断的一个或多个本人记录编号，可包括本轮。不能引用店家编号冒充本人；无足够明确事实时保留 null，不补猜。"""
 
 _INDEPENDENT_PERSONAL_READ_PROMPT = """本次重点独立复核是否存在两项并列的查局目的。先分别理解每个问句或请求，再判断它们是否指同一桌。对原桌问玩法、余位或能否赶上，与另外询问不指向原桌的玩法、档位或时间的可玩选项，是两项不同的查询。另查现成桌不必出现「帮我找」或明确委托组局。只报能否赶上原桌或只问原桌条件，不算另查。原桌身份不清时也要独立判断是否另查。只有证据能支持两项时才用 lookup_scope=specific_table、also_requests_personal_options=true，并单独核对另查的时段和条件。"""
 
@@ -43,7 +44,7 @@ _DECISION_KEYS = {
 }
 _OPTIONAL_DECISION_KEYS = {
     "opening_dayparts", "max_duration_hours", "agreed_duration_hours", "clock_roles", "opening_customer_ref",
-    "also_requests_personal_options",
+    "also_requests_personal_options", "prior_play_until",
 }
 _CLOCK_ROLES = (
     "arrival_by", "arrival_not_before", "arrival_estimate", "opening", "play_until", "departure_deadline", "wait_until", "other",
@@ -162,34 +163,37 @@ def _lexical_dates(text: str, source_date: date) -> set[date]:
     return dates
 
 
-def _customer_source_dates(store: AgentStore, message: UserMessage, task_id: str,
-                           evidence: list[dict[str, Any]]) -> dict[int, date]:
-    """为日期引用使用实际发送日，避免任务跨过午夜后把较早的「明天」重新计算。"""
-    by_text: dict[str, list[date]] = {}
+def _customer_sources(
+    store: AgentStore, message: UserMessage, task_id: str, evidence: list[dict[str, Any]],
+) -> dict[int, tuple[datetime, str]]:
+    """绑定同任务本人记录的发送时钟与来源，较早来话的钟点按原时钟解释。"""
+    by_text: dict[str, list[tuple[datetime, str]]] = {}
     for turn in store.task_context_turns(message.conversation_id, task_id, 56):
+        source_id = turn.metadata.get("source_message_id")
         if (turn.role == ConversationRole.USER and turn.sender_id == message.sender_id
                 and turn.occurred_at <= message.sent_at and turn.content.strip()
                 and not turn.metadata.get("context_invalidated") and not turn.metadata.get("internal_event")
                 and not turn.metadata.get("system_trigger") and turn.metadata.get("input_source") != "system_trigger"
-                and turn.metadata.get("source_message_id")
-                and turn.metadata.get("source_message_id") != message.message_id):
-            by_text.setdefault(turn.content[:800], []).append(parse_context_datetime(turn.occurred_at).date())
-    dates = {}
+                and isinstance(source_id, str) and source_id and source_id != message.message_id):
+            by_text.setdefault(turn.content[:800], []).append((parse_context_datetime(turn.occurred_at), source_id))
+    sources = {}
     for row in reversed(evidence):
         if row["speaker"] == "customer":
             candidates = by_text.get(row["text"])
             if row.get("current"):
-                dates[row["ref"]] = parse_context_datetime(message.sent_at).date()
+                sources[row["ref"]] = (parse_context_datetime(message.sent_at), message.message_id)
             elif candidates:
-                dates[row["ref"]] = candidates.pop()
-    return dates
+                sources[row["ref"]] = candidates.pop()
+    return sources
 
 
-def _authorization_history(store: AgentStore, message: UserMessage, task_id: str) -> tuple[list[dict[str, Any]], dict[int, date]]:
-    """复用本人授权证据范围，再排除不能对应真实本人原话日的用户记录。"""
+def _authorization_history(
+    store: AgentStore, message: UserMessage, task_id: str,
+) -> tuple[list[dict[str, Any]], dict[int, tuple[datetime, str]]]:
+    """复用本人授权范围，排除无法对应实际本人来话的旧记录。"""
     evidence = customer_authorization_evidence(store, message)
-    dates = _customer_source_dates(store, message, task_id, evidence)
-    return [row for row in evidence if row["speaker"] != "customer" or row["ref"] in dates], dates
+    sources = _customer_sources(store, message, task_id, evidence)
+    return [row for row in evidence if row["speaker"] != "customer" or row["ref"] in sources], sources
 
 
 def _unique_fields(fields: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -355,14 +359,42 @@ def _verify_multi_clock_opening_source(
         raise ValueError("the cited opening is not supported by its clock references")
 
 
+def _carry_prior_play_until(
+    decision: dict[str, Any], citation: Any, *, customer_rows: dict[int, str],
+    sources: dict[int, tuple[datetime, str]], window: tuple[datetime, datetime] | None,
+) -> None:
+    """只回带新开场仍用得上的较早本人柔性时点，不增加硬条件或授权。"""
+    if (not isinstance(citation, dict) or set(citation) != {"customer_ref", "clock_ref"}
+            or decision["lookup_scope"] != "personal" or not decision["has_fixed_opening_authority"]
+            or window is None or window[0] != window[1]
+            or any(decision.get(field) is not None for field in ("agreed_duration_hours", "max_duration_hours"))):
+        return
+    ref, clock_ref = citation["customer_ref"], citation["clock_ref"]
+    if (type(ref) is not int or type(clock_ref) is not int or ref not in customer_rows
+            or ref >= decision["current_ref"]):
+        return
+    source_at, source_id = sources[ref]
+    source_text = customer_rows[ref]
+    clocks = _source_clocks(source_text, source_at)
+    if not 1 <= clock_ref <= len(clocks):
+        return
+    candidate = _supported_role_time(clocks[clock_ref - 1], source_text, source_at)
+    if candidate is None or candidate.date() != window[0].date() or candidate <= window[0]:
+        return
+    decision["play_until_at"] = candidate.isoformat()
+    decision["prior_play_until"] = {**citation, "source_message_id": source_id}
+
+
 def _parse_decision(
-    raw: str, evidence: list[dict[str, Any]], *, source_dates: dict[int, date],
+    raw: str, evidence: list[dict[str, Any]], *, sources: dict[int, tuple[datetime, str]],
     local_at: datetime, clock: dict[str, Any],
 ) -> dict[str, Any]:
     """验证有序时段、有限数值和同一任务本人证据，规范到统一时区供工具前置校验。"""
+    source_dates = {ref: stamp.date() for ref, (stamp, _) in sources.items()}
     decision = json.loads(raw, object_pairs_hook=_unique_fields)
     if not isinstance(decision, dict) or set(decision) - _OPTIONAL_DECISION_KEYS != _DECISION_KEYS:
         raise ValueError("invalid table availability schema")
+    prior_play_until = decision.pop("prior_play_until", None)
     if decision["clock_role"] not in _CLOCK_ROLES or decision["lookup_scope"] not in _LOOKUP_SCOPES:
         raise ValueError("invalid table availability scope")
     also_personal = decision.get("also_requests_personal_options", False)
@@ -457,6 +489,11 @@ def _parse_decision(
                     )
                 decision["must_end_by"] = departure_time.isoformat()
             decision["play_until_at"] = departure_time.isoformat()
+        if (not departures and prior_play_until is not None and window is not None
+                and any(role == "opening" and _supported_role_time(item, current_text, local_at) == window[0]
+                        for item, role in bound)):
+            _carry_prior_play_until(decision, prior_play_until, customer_rows=customer_rows,
+                                    sources=sources, window=window)
     if decision["lookup_scope"] == "specific_table":
         # 同轮另查时仍保留原桌的排除依据；由每次调用的目的选择校验口径。
         # 排除同时被单独指明为原桌开场的等值钟点，保留能合法定位原桌的时间。
@@ -480,19 +517,29 @@ def check_table_availability(
     if source is None:
         return None
     task_id, version = source
-    evidence, dates = _authorization_history(store, message, task_id)
+    evidence, sources = _authorization_history(store, message, task_id)
     local_at = parse_context_datetime(message.sent_at)
+    conversation = []
+    for row in evidence:
+        entry = dict(row)
+        if row["ref"] in sources:
+            source_at, _ = sources[row["ref"]]
+            entry["customer_local_date"] = source_at.date().isoformat()
+            if not row.get("current") and (clocks := _source_clocks(row["text"], source_at)):
+                entry["clock_candidates"] = clocks
+        conversation.append(entry)
     payload = {
-        "conversation": [{**row, "customer_local_date": dates[row["ref"]].isoformat()}
-                         if row["ref"] in dates else row for row in evidence],
+        "conversation": conversation,
         "customer_message_local_at": local_at.isoformat(),
         "current_clock_observation": clock,
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = sha256(serialized.encode()).hexdigest()
     prompt = _PROMPT + ("\n\n" + _INDEPENDENT_PERSONAL_READ_PROMPT if recheck_personal_read else "")
+    source_ids = [(ref, source_id) for ref, (_, source_id) in sorted(sources.items())]
     identity = json.dumps([message.conversation_id, message.sender_id, message.message_id, task_id, version,
-                           sha256(prompt.encode()).hexdigest(), _DECISION_NORMALIZATION_VERSION, digest], ensure_ascii=False)
+                           sha256(prompt.encode()).hexdigest(), _DECISION_NORMALIZATION_VERSION, digest, source_ids],
+                          ensure_ascii=False)
     key = "table-availability:" + sha256(identity.encode()).hexdigest()
     source_info = {"input_sha256": digest, "conversation_version": version,
                    "source_message_id": message.message_id, "task_context_id": task_id,
@@ -526,7 +573,7 @@ def check_table_availability(
         availability_source = model_response_source(raw, trace_id=attempt_trace, step_index=step_index)
         record.update(raw=str(raw), response_source=availability_source, diagnostics=completion_diagnostics(raw))
         try:
-            decision = _parse_decision(str(raw), evidence, source_dates=dates, local_at=local_at, clock=clock)
+            decision = _parse_decision(str(raw), evidence, sources=sources, local_at=local_at, clock=clock)
         except (TypeError, ValueError, OverflowError) as exc:
             record["error"] = str(exc)
             trace_recorder.record(trace_id, "table_availability_authorization_invalid", record, level="WARN")
@@ -548,7 +595,7 @@ def check_table_availability(
             break
     if decision is None and not recheck_personal_read:
         return None
-    if _current_source(store, message) != source or _authorization_history(store, message, task_id) != (evidence, dates):
+    if _current_source(store, message) != source or _authorization_history(store, message, task_id) != (evidence, sources):
         trace_recorder.record(trace_id, "table_availability_authorization_superseded", {
             **source_info, "step_index": step_index,
         })

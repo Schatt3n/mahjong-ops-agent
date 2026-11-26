@@ -9,6 +9,8 @@ import pytest
 from mahjong_agent_runtime import (
     AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage,
 )
+from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
+from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
 from mahjong_agent_runtime.domains.table_availability_authorization import check_table_availability, qualified_table_clock
 from mahjong_agent_runtime.models import using_clock
 from mahjong_agent_runtime.runtime import message_idempotency_key
@@ -1138,6 +1140,122 @@ def test_rolling_evening_scope_preserves_unique_hard_departure_and_real_conflict
         assert "澄清" in unchecked.error and "澄清" in with_deadline.error and not with_deadline.called
     assert len(review.calls) == 1 and len(store.games) == 2 and not store.room_reservations
     store._connection.close()
+
+
+@pytest.mark.parametrize("write_authorized", [True, False])
+def test_same_game_opening_confirmation_carries_prior_flexible_departure_into_reply_evidence(tmp_path, write_authorized):
+    """跨轮保留顾客柔性离场目标，仍经真实建局守卫，不写硬限时或默认安排。"""
+    sent = SENT.replace(hour=19)
+    earlier = sent - timedelta(minutes=2)
+    prior = _incoming("老板好 组一桌还行吗 能打到十点半 红中2到3块 无烟 我七点半左右能到",
+                      sent=earlier, message_id="prior-end")
+    current = _incoming("老板好 那就按七点半开吧 红中2到3块 无烟 帮我组一桌", sent=sent)
+    store = SQLiteAgentStore(tmp_path / "prior-play-until.sqlite3")
+    _activate(store, started=earlier)
+    with using_clock(lambda: earlier):
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "你这桌打算几点开？我按这个时间帮你组一桌。",
+                                    "shop", metadata={"delivery_status": "delivered"})
+    with using_clock(lambda: sent):
+        _persist(store, current)
+        opening = "2026-11-26T19:30:00+08:00"
+        desired_end = "2026-11-26T22:30:00+08:00"
+        reference = {"customer_ref": 1, "clock_ref": 1}
+        decision = _decision(3, clock_role="opening", opening_customer_ref=3,
+                             opening_window={"start_at": opening, "end_at": opening},
+                             supporting_customer_refs=[1, 3], has_fixed_opening_authority=True,
+                             prior_play_until=reference)
+        review = ReviewClient([decision])
+        creation = ReviewClient([{"scope": "create" if write_authorized else "inquire",
+                                  "customer_ref": 3, "shop_offer_ref": None}])
+        trace = InMemoryTraceRecorder()
+        service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review,
+                                       creation_authorization_client=creation)
+        requirement = {"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3},
+                       "smoke_preference": "no_smoking", "planned_start_at": opening, "start_time_kind": "scheduled"}
+
+        def execute(step, **updates):
+            call = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                            "requirement": {**requirement, **updates}})
+            action = AgentAction(goal="按确认开场组织同一桌", objective_status="needs_tool", reasoning_summary="已选开场",
+                                 tool_calls=[call])
+            return service.execute_tool_calls(action, message=current, trace_id=current.message_id, step_index=step,
+                previous_step_tool_results=[], run_id="carry-prior-duration",
+                run_version=store.conversation_version("dm")).tool_results[0]
+
+        for index, field, value in ((1, "max_duration_hours", 3), (2, "duration_hours", 3)):
+            invalid = execute(index, **{field: value})
+            assert not invalid.called and not invalid.allowed
+            assert invalid.result["table_availability_evidence"]["play_until_at"] == desired_end
+        assert not store.games and not creation.calls
+        created = execute(3)
+
+    assert len(creation.calls) == 1
+    if not write_authorized:
+        assert not created.allowed and not store.games
+        assert "table_availability_evidence" not in created.result
+        store._connection.close()
+        return
+    assert created.called and created.allowed and len(store.games) == 1
+    game = next(iter(store.games.values()))
+    assert game.planned_start_at.isoformat() == opening
+    assert all(key not in game.requirement for key in ("must_end_by", "max_duration_hours", "duration_hours"))
+    proof = {"play_until_at": desired_end, "prior_play_until": {**reference, "source_message_id": "prior-end"}}
+    compact = compact_tool_payload(created.result)
+    assert compact["table_availability_evidence"] == proof
+    action = AgentAction(goal="告诉顾客这桌正在组", objective_status="waiting_user", reasoning_summary="询问离场条件",
+                         reply_to_user="七点半这桌给你记上了。十点半是得走吗？")
+    presented = build_reply_self_review_payload(
+        message=current, action=action, review_items=[{"recipient_id": "guest", "text": action.reply_to_user}],
+        context_payload={"turn_tool_evidence": [{**created.to_dict(), "result": compact}]}, review_scope="reply_to_user",
+    )
+    assert presented["turn_tool_evidence"][0]["result"]["table_availability_evidence"] == proof
+    assert len(review.calls) == 1
+    history = json.loads(review.calls[0][0][1]["content"])["conversation"]
+    assert history[0]["clock_candidates"][0]["local_candidate_at"] == desired_end
+    store._connection.close()
+
+
+@pytest.mark.parametrize(("text", "source_change", "citation", "current_hard", "agreed_duration"), [
+    ("那就按七点半开吧，最晚十点走", None, {"customer_ref": 1, "clock_ref": 1}, True, None),
+    ("那就按七点半开吧，就打两个钟头", None, {"customer_ref": 1, "clock_ref": 1}, False, 2),
+    ("今晚就算了，之前时间不用管", None, None, False, None),
+    ("另一桌改成今晚七点半开", "new_task", {"customer_ref": 1, "clock_ref": 1}, False, None),
+    ("那就按七点半开吧", "prior_day", {"customer_ref": 1, "clock_ref": 1}, False, None),
+    ("那就按七点半开吧", None, {"customer_ref": 2, "clock_ref": 1}, False, None),
+    ("那就按七点半开吧", None, {"customer_ref": 1, "clock_ref": 3}, False, None),
+])
+def test_prior_flexible_departure_yields_to_current_scope_or_replacement(text, source_change, citation,
+                                                                 current_hard, agreed_duration):
+    """日期和原话引用收窄继承，明确新条件及撤回继续按本轮原话核对。"""
+    sent = SENT.replace(hour=19)
+    earlier = sent - (timedelta(days=1, minutes=2) if source_change == "prior_day" else timedelta(minutes=2))
+    store = InMemoryAgentStore()
+    _activate(store, started=earlier)
+    _persist(store, _incoming("能打到十点半 红中无烟", sent=earlier, message_id="prior-end"))
+    if source_change == "new_task":
+        _activate(store, started=sent, reset=True)
+    message = _incoming(text, sent=sent)
+    _persist(store, message)
+    if citation is None:
+        assert _check(store, ReviewClient([]), message) is None
+        return
+    current_ref = 1 if source_change == "new_task" else 2
+    opening = "2026-11-26T19:30:00+08:00"
+    specific = _decision(current_ref, clock_role="opening",
+        opening_window={"start_at": opening, "end_at": opening}, has_fixed_opening_authority=True,
+        opening_customer_ref=current_ref, supporting_customer_refs=list(range(1, current_ref + 1)),
+        prior_play_until=citation, agreed_duration_hours=agreed_duration)
+    if current_hard:
+        specific["clock_role"] = "other"
+        specific["clock_roles"] = [{"clock_ref": 1, "role": "opening"}, {"clock_ref": 2, "role": "departure_deadline"}]
+    checked = _check(store, ReviewClient([specific]), message)
+    assert checked is not None and "prior_play_until" not in checked
+    if current_hard:
+        assert checked["must_end_by"] == checked["play_until_at"] == "2026-11-26T22:00:00+08:00"
+    else:
+        assert "must_end_by" not in checked and "play_until_at" not in checked
+    assert checked["agreed_duration_hours"] == agreed_duration
 
 
 def test_evening_arrival_can_disambiguate_same_date_departure_without_selecting_opening(tmp_path):

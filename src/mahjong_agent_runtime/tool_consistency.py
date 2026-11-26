@@ -188,6 +188,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     elif earliest and stamp < earliest:
         return "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
     if play_until:
+        if evidence.get("prior_play_until") and (requested_end is not None or proposed_cap is not None):
+            return "前文可打到的钟点仍是柔性条件。它不能充当硬离店或相减算出的小时上限。"
         if paired_creation and planned == fixed_opening:
             # 两端是已确认开场与本人离店。相减只限定局能安排多久，不能冒充同桌已约定的固定时长。
             available_hours = min(departure_cap, duration_cap) if duration_cap is not None else departure_cap

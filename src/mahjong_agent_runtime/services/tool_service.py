@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any
 
@@ -421,6 +421,14 @@ class ToolExecutionService:
                 execution_scope=tool_execution_scope(self.tool_gateway.store, message),
             )
         result.call_id = call_id
+        verified_schedule = (context_payload or {}).get("verified_table_availability") or {}
+        if (call.name == "create_game" and result.called and result.allowed and not result.error
+                and verified_schedule.get("prior_play_until")):
+            # 回执附同一目标的本人柔性时点。脱离网关缓存副本，避免变成以后其它来话的桌况。
+            result = replace(result, result={**result.result, "table_availability_evidence": {
+                "play_until_at": verified_schedule["play_until_at"],
+                "prior_play_until": verified_schedule["prior_play_until"],
+            }})
         if superseded_duration is not None and result.called and result.allowed and not result.error:
             self.trace_recorder.record(trace_id, "tool_read_duration_superseded", {
                 **superseded_duration,

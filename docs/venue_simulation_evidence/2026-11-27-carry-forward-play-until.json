@@ -1,0 +1,86 @@
+{
+  "source_run": "2026-11-25-real-85ac9eba42",
+  "source_code_commit": "c60faeb",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev2_20261127/2026-11-25-real-85ac9eba42",
+  "customer_case": "0235",
+  "earlier_turn": {
+    "trace_id": "trace_8189f6f59755852704bdacc9",
+    "message": {
+      "message_id": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+      "sent_at": "2026-11-26T19:05:00+08:00",
+      "text": "老板好 组一桌还行吗 能打到十点半 红中2到3块 无烟 我七点半左右能到"
+    },
+    "independent_response_source": {
+      "call_id": "llm_call_c13aaa0f087448ef8ec7b639b37874d1",
+      "http_response_complete": true,
+      "raw_response_sha256": "fb4b6d5b84b7f0dbb41be18b967df1cc2e62f7e79885722acda0eafda1159f35",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_c2796f303f01471c90846557efb52416",
+      "trace_id": "trace_8189f6f59755852704bdacc9:table-availability:1"
+    },
+    "clock_roles": [
+      {
+        "clock_ref": 1,
+        "role": "play_until"
+      },
+      {
+        "clock_ref": 2,
+        "role": "arrival_estimate"
+      }
+    ],
+    "play_until_at": "2026-11-26T22:30:00+08:00",
+    "must_end_by": null
+  },
+  "opening_turn": {
+    "trace_id": "trace_e2f61824ed635f7347475367",
+    "message": {
+      "message_id": "customer:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255",
+      "sent_at": "2026-11-26T19:07:00+08:00",
+      "text": "老板好 那就按七点半开吧 红中2到3块 无烟 帮我组一桌"
+    },
+    "independent_response_source": {
+      "call_id": "llm_call_7c44142ee04841beb64d9c73a435d7fa",
+      "http_response_complete": true,
+      "raw_response_sha256": "001693b3d6a99293314219f5eb0db8f37f9d6613653204dc49b4a5c104e7baad",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_ba88dddc1e4d4e0fa17ac1a1906eda50",
+      "trace_id": "trace_e2f61824ed635f7347475367:table-availability:1"
+    },
+    "supporting_customer_refs": [
+      1,
+      3
+    ],
+    "opening_window": {
+      "end_at": "2026-11-26T19:30:00+08:00",
+      "start_at": "2026-11-26T19:30:00+08:00"
+    },
+    "prior_play_until_projected": false,
+    "actual_game": {
+      "game_id": "game_548beef1a0ad",
+      "status": "forming",
+      "planned_start_at": "2026-11-26T19:30:00+08:00",
+      "planned_end_at": "2026-11-26T23:30:00+08:00"
+    },
+    "agreed_duration_present": false,
+    "delivered_reply": "好，七点半这桌给你记上了，还在凑人，目前还差三位。"
+  },
+  "analysis": "顾客确认的是开场，先前说能打到十点半仍值得承接。原运行已识别为柔性时点，建局当轮的结构化核对丢了该条件。业务库23:30为内部推算，不能视作同桌约定，也不能反推顾客已确认可以晚走。",
+  "change": "同一目的确认具体开场时，独立核对可以显式引用较早本人已表达的柔性钟点。按原发送时间复核，该时点仅进入同一来话的建局回执和审查证据。按现有权限执行，不存强制结束或推算时长。明确变更、撤回或新任务不沿用。较早的硬离场不走这条柔性继承合同。",
+  "verification": {
+    "offline_test": "tests/test_table_availability_authorization.py::test_same_game_opening_confirmation_carries_prior_flexible_departure_into_reply_evidence",
+    "guards": [
+      "相减推定时长或小时上限被挡",
+      "有时间依据但没有建局授权时仍拒绝",
+      "本轮新硬时点或已约定时长保留",
+      "撤回、跨任务、旧日期、错误来源不继承"
+    ],
+    "offline_tests_passed": 579,
+    "live_replay": "pending"
+  }
+}
