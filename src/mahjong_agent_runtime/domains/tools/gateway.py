@@ -22,6 +22,17 @@ from ..recruitment_options import validate_reported_withdrawal
 
 _IDEMPOTENCY_LOCKS: dict[str, threading.RLock] = {}
 _IDEMPOTENCY_LOCKS_GUARD = threading.RLock()
+_PARTICIPATION_TOOLS_REQUIRING_QUOTE_REFERENCE = frozenset({
+    "join_game", "record_candidate_reply", "record_registered_member_withdrawal",
+})
+
+
+def _quote_reference_is_unresolved(contract: dict[str, Any] | None) -> bool:
+    """向模型展示和实际执行参与工具时使用同一引用边界。"""
+    return bool(
+        contract and contract.get("quoted_message_present") is True
+        and contract.get("business_reference_resolved") is not True
+    )
 
 
 @dataclass(slots=True)
@@ -43,9 +54,14 @@ class ToolGateway:
         if not self.tools:
             self.tools.update(default_tool_definitions(self.store))
 
-    def tool_specs_for_prompt(self) -> list[dict[str, Any]]:
-        """向模型暴露声明式工具契约；工具是否真的可执行仍由网关在运行时裁决。"""
-        return [definition.to_prompt_dict() for definition in self.tools.values()]
+    def tool_specs_for_prompt(
+        self, *, message_reference_contract: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """展示本轮可提出的工具，避免模型把未解析引用误当成参与操作的入口。"""
+        hidden = _PARTICIPATION_TOOLS_REQUIRING_QUOTE_REFERENCE if _quote_reference_is_unresolved(
+            message_reference_contract
+        ) else ()
+        return [definition.to_prompt_dict() for name, definition in self.tools.items() if name not in hidden]
 
     def execute(
         self,
@@ -349,11 +365,9 @@ class ToolGateway:
         引用了历史消息的入局操作，还要求先解析出权威业务引用，禁止凭语义猜测落库。
         """
 
-        reference_contract = message_reference_contract or {}
         if (
-            call.name in {"join_game", "record_candidate_reply", "record_registered_member_withdrawal"}
-            and reference_contract.get("quoted_message_present") is True
-            and reference_contract.get("business_reference_resolved") is not True
+            call.name in _PARTICIPATION_TOOLS_REQUIRING_QUOTE_REFERENCE
+            and _quote_reference_is_unresolved(message_reference_contract)
         ):
             return (
                 "authoritative quoted-message business reference required: "

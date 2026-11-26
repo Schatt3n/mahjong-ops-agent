@@ -23,6 +23,7 @@ from ..tool_consistency import (
     explicit_fact_sources_for_call,
     latest_read_requirement,
     validate_explicit_task_fact_consistency,
+    validate_model_create_game_stake,
     validate_tool_call_consistency,
 )
 from ..domains.tools import ToolGateway
@@ -220,7 +221,7 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
             return SingleToolExecution(result=result, blocked_by_consistency=True)
 
-        consistency_error = validate_tool_call_consistency(call, observed_results)
+        consistency_error = validate_tool_call_consistency(call, observed_results) or validate_model_create_game_stake(call)
         if consistency_error:
             result = ToolResult(
                 name=call.name,
@@ -229,8 +230,10 @@ class ToolExecutionService:
                 call_id=call_id,
                 result={
                     "instruction": (
-                        "Fix the tool arguments and call the tool again. Preserve explicit requirement fields "
-                        "from previous read-only tool results unless the user has clearly changed them."
+                        "Preserve explicit requirement fields from previous read-only tool results unless the user "
+                        "has clearly changed them. When a required customer fact is still unknown, keep the current "
+                        "goal and ask for that fact before proposing another write. Otherwise correct the arguments "
+                        "and call the tool again."
                     ),
                     "call": call.to_dict(),
                     "reference_tool_name": "search_current_games",

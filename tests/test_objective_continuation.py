@@ -269,7 +269,7 @@ class _ReadThenRememberClient:
                 ],
             )
 
-        payload = json.loads(messages[1]["content"])
+        payload = json.loads(messages[-1]["content"])
         self.third_step_tool_names = [
             str(item.get("name") or "") for item in payload["turn_tool_evidence"]
         ]

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from contextlib import nullcontext
 import datetime as dt
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,8 +25,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from eval_gate_reporting import candidate_evidence, first_failed_case, model_evidence  # noqa: E402
+from eval_impact import print_eval_impact  # noqa: E402
+from eval_retry import BLOCKED_EXIT_CODE, SCOPE_ENV, WINDOW_ENV, is_inconclusive, write_json  # noqa: E402
+from eval_run_state import candidate_fingerprint, evidence_fingerprint, resume_directory, resume_report, run_lock  # noqa: E402
 
 
 LIVE_SCOPES = (
@@ -40,6 +48,8 @@ LIVE_SCOPES = (
     "conversation_topic_continuity",
     "empty_pool_evidence_calibration",
 )
+LIVE_CONCURRENCY_WORKERS = 4
+LIVE_CONCURRENCY_REPEATS = 1
 GROUP_TOPIC_DATASETS = (
     "group_delegation_acceptance_20261105.jsonl",
     "group_topic_recovery_20261105.jsonl",
@@ -52,9 +62,13 @@ RECRUITMENT_OBLIGATION_EXPECTATION = {"required_meaning": [{"id": "grounded_obli
 OFFLINE_SEMANTIC_NOTICE = "未运行真实模型语义评测，不能称全量业务通过"
 
 
-def run_command(args: list[str], *, log_path: Path | None = None) -> None:
+def run_command(args: list[str], *, log_path: Path | None = None, retry_scope: Path | None = None, retry_window: int = 0) -> None:
     """顺序执行已有评测命令，保留失败退出码和独立日志，不把未执行阶段算作通过。"""
     env = os.environ.copy()
+    env.pop(SCOPE_ENV, None)
+    env.pop(WINDOW_ENV, None)
+    if retry_scope is not None:
+        env.update({SCOPE_ENV: str(retry_scope), WINDOW_ENV: str(retry_window)})
     existing_pythonpath = env.get("PYTHONPATH")
     src_path = str(ROOT / "src")
     # 路径列表分隔符由运行平台决定；Windows 盘符本身包含冒号。
@@ -76,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--collect-all", action="store_true",
-        help="with --full, continue after failed scopes to collect all independent failures (may incur additional API cost)",
+        help="with --full, continue across independent live failures after all offline checks pass",
     )
     parser.add_argument(
         "--live-real-owner",
@@ -94,10 +108,32 @@ def parse_args() -> argparse.Namespace:
         help="also replay semantic real-group cases through the configured model and main Agent",
     )
     parser.add_argument(
-        "--live-case-workers", type=int, choices=range(1, 5), default=2,
+        "--live-case-workers", type=int, choices=range(1, 5),
         help="independent case workers for owner chat and conversation topic live evals (default: 2)",
     )
+    parser.add_argument("--scope", help="run one named offline or live scope for diagnosis")
+    parser.add_argument("--case", help="with a group topic scope, diagnose one case")
+    parser.add_argument(
+        "--impact", nargs="?", const="HEAD", metavar="BASE_REF",
+        help="inspect the worktree against BASE_REF (default HEAD) and suggest verification without running it",
+    )
+    parser.add_argument("--resume", metavar="RUN_ID", help="open a new bounded window in the same blocked full run")
     args = parser.parse_args()
+    if args.impact is not None and (args.full or args.collect_all or args.live_real_owner or args.live_concurrency
+                                   or args.live_real_group or args.scope is not None or args.case is not None
+                                   or args.resume is not None or args.live_case_workers is not None):
+        parser.error("--impact cannot be combined with evaluation or resume flags")
+    if args.resume and (args.full or args.collect_all or args.live_real_owner or args.live_concurrency
+                        or args.live_real_group or args.scope or args.case or args.live_case_workers is not None):
+        parser.error("--resume inherits the original full-run plan and cannot be combined with mode flags")
+    if args.scope and (args.full or args.live_real_owner or args.live_concurrency or args.live_real_group):
+        parser.error("--scope cannot be combined with full or partial-live modes")
+    if args.case and not args.scope:
+        parser.error("--case requires --scope")
+    if args.resume:
+        args.full = True
+    elif args.live_case_workers is None:
+        args.live_case_workers = 2
     if args.collect_all and not args.full:
         parser.error("--collect-all requires --full")
     return args
@@ -112,7 +148,8 @@ def create_run_directory() -> Path:
 
 
 def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, Any]]:
-    """两种门禁各运行一次全量 pytest；完整门禁追加不筛场景的真实模型范围。"""
+    """完整门禁追加全量真模型范围；定向诊断复用同一计划和证据验证器。"""
+    complete_plan = args.full or args.scope is not None
     plan: list[dict[str, Any]] = []
     case_workers = getattr(args, "live_case_workers", 2)
 
@@ -128,7 +165,10 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
         ("group_dataset_validation", "scripts/validate_real_group_chat_dataset.py"),
     ):
         add(scope, [sys.executable, script])
-    group_datasets = sorted((ROOT / "eval" / "golden").glob("real_group_chat_*.jsonl")) if args.full else [None]
+    # 离线门禁和部分真模型门禁报告的是未带日期的默认群回放范围，按原名字支持复跑。
+    undated_group_scopes = {"group_flow_deterministic", LIVE_SCOPES[1]}
+    dated_group_datasets = complete_plan and args.scope not in undated_group_scopes
+    group_datasets = sorted((ROOT / "eval" / "golden").glob("real_group_chat_*.jsonl")) if dated_group_datasets else [None]
     if not group_datasets:
         raise ValueError("full gate requires the existing dated group golden datasets")
     for dataset in group_datasets:
@@ -160,7 +200,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             str(deterministic_report),
         ], report_path=str(deterministic_report))
     add("all_pytest", [sys.executable, "-m", "pytest", "-q"])
-    if args.full:
+    if complete_plan:
         add("chinese_docstrings", [sys.executable, "scripts/check_chinese_docstrings.py"])
         add("git_diff_check", ["git", "diff", "--check"])
         # 分来源直接运行原资产，不能依赖只含八条的默认数据集，也不拼接历史成绩。
@@ -194,7 +234,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             add(scope, [sys.executable, "scripts/" + script, "--work-dir", str(work_dir), *worker_args],
                 dataset=str(dataset), dataset_sha256=file_digest(dataset), work_dir=str(work_dir),
                 report_path=str(work_dir / "report.json"), **({"case_workers": case_workers} if worker_args else {}))
-    if args.full or args.live_real_owner:
+    if complete_plan or args.live_real_owner:
         report = run_dir / "real_owner_chat_live_eval_report.json"
         add(LIVE_SCOPES[0], [
                 sys.executable,
@@ -207,14 +247,14 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 "--report-path",
                 str(report),
             ], report_path=str(report), case_workers=case_workers)
-    if args.full:
+    if complete_plan:
         report = run_dir / "reply_semantic_calibration_report.json"
         add(LIVE_SCOPES[5], [sys.executable, "scripts/run_real_owner_chat_live_eval.py", "--calibration-only", "--strict",
             "--report-path", str(report)], report_path=str(report))
         report = run_dir / "reply_scope_calibration_report.json"
         add(LIVE_SCOPES[6], [sys.executable, "scripts/run_reply_scope_calibration.py", "--strict",
             "--report-path", str(report)], report_path=str(report))
-    if args.full or args.live_real_group:
+    if complete_plan or args.live_real_group:
         for dataset in group_datasets:
             suffix = f"_{dataset.stem.removeprefix('real_group_chat_')}" if dataset is not None else ""
             report = run_dir / f"real_group_chat_flow_eval_live{suffix}.json"
@@ -222,14 +262,14 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 sys.executable,
                 "scripts/run_real_group_chat_flow_eval.py",
                 *(["--dataset", str(dataset)] if dataset is not None else []),
-                *(["--env-file", str(ROOT / ".env")] if args.full else []),
+                *(["--env-file", str(ROOT / ".env")] if complete_plan else []),
                 "--live",
                 "--strict",
                 "--report-path",
                 str(report),
             ], report_path=str(report), scope_family=LIVE_SCOPES[1],
                 dataset=str(dataset) if dataset is not None else "default_20260722")
-    if args.full or args.live_concurrency:
+    if complete_plan or args.live_concurrency:
         report = run_dir / "concurrency_eval_live_report.json"
         add(LIVE_SCOPES[2], [
                 sys.executable,
@@ -237,16 +277,16 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 "--mode",
                 "live",
                 "--live-workers",
-                "4",
+                str(LIVE_CONCURRENCY_WORKERS),
                 "--live-repeats",
-                "2",
+                str(LIVE_CONCURRENCY_REPEATS),
                 "--work-dir",
                 str(run_dir / "concurrency_live"),
                 "--strict",
                 "--report-path",
                 str(report),
             ], report_path=str(report))
-    if args.full:
+    if complete_plan:
         inquiry_run_id = f"{run_dir.name}_inquiry"
         source_report = ROOT / "runtime_data" / "periodic_chat_simulation" / "runs" / inquiry_run_id / "report.json"
         add(LIVE_SCOPES[3], [sys.executable, "scripts/run_inquiry_grounding_eval.py", "--run-id", inquiry_run_id],
@@ -257,6 +297,17 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             "--db-path", str(run_dir / "privacy" / "privacy_live.sqlite3"),
             "--report-path", str(report),
         ], report_path=str(report))
+    if args.scope:
+        plan = [phase for phase in plan if phase["scope"] == args.scope]
+        if not plan:
+            raise ValueError(f"unknown evaluation scope: {args.scope}")
+        if args.case:
+            phase = plan[0]
+            if phase.get("scope_family") != LIVE_SCOPES[7] or args.case not in phase["expected_case_ids"]:
+                raise ValueError("--case must identify a case in the selected group topic scope")
+            phase["selected_case"] = args.case
+            phase["expected_case_ids"] = [args.case]
+            phase["command"].extend(["--case", args.case])
     return plan
 
 
@@ -301,7 +352,7 @@ def prioritize_previous_failures(plan: list[dict[str, Any]], run_dir: Path) -> t
 
 def save_gate_report(report_path: Path, report: dict[str, Any]) -> None:
     """保存本次执行范围与阶段状态；未选择或未运行的范围不能被计为通过。"""
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(report_path, report)
 
 
 def scope_failure_metadata(stage: str, error: Exception | KeyboardInterrupt) -> dict[str, str | int]:
@@ -313,12 +364,54 @@ def scope_failure_metadata(stage: str, error: Exception | KeyboardInterrupt) -> 
     return {"stage": stage, "kind": f"{stage}_error"}
 
 
+def _verified_cache_usage(values: dict[str, set[int]]) -> tuple[int, int] | None:
+    """只有回执的总输入、命中与未命中能够互相核对时，才使用该响应的缓存数据。"""
+
+    prompt_values = values.get("prompt_tokens", ())
+    hit_values = values.get("prompt_cache_hit_tokens", ())
+    miss_values = values.get("prompt_cache_miss_tokens", ())
+    if len(prompt_values) != 1 or len(hit_values) > 1 or len(miss_values) > 1 or not (hit_values or miss_values):
+        return None
+    prompt = next(iter(prompt_values))
+    hit = next(iter(hit_values)) if hit_values else prompt - next(iter(miss_values))
+    miss = next(iter(miss_values)) if miss_values else prompt - hit
+    if min(hit, miss) < 0 or hit + miss != prompt:
+        return None
+    return hit, miss
+
+
+def _observed_response_usage(responses: list[dict[str, set[int]]]) -> dict[str, Any]:
+    """汇总去重后的回执，并让命中率的分子和分母使用同一批已核验响应。"""
+
+    result: dict[str, Any] = {"observed_provider_responses": len(responses)}
+    for field in ("prompt_tokens", "completion_tokens"):
+        # 同一响应若有矛盾用量，按未知处理；没有任何已知值时不能报零。
+        known = [next(iter(row[field])) for row in responses if len(row.get(field, ())) == 1]
+        result[f"observed_{field}"] = sum(known) if known else None
+        result[f"responses_without_verified_{field}"] = len(responses) - len(known)
+
+    cache_usage = [usage for row in responses if (usage := _verified_cache_usage(row)) is not None]
+    hit = sum(hit_tokens for hit_tokens, _ in cache_usage)
+    miss = sum(miss_tokens for _, miss_tokens in cache_usage)
+    covered = hit + miss
+    result["prompt_cache"] = {
+        "observed_hit_tokens": hit if cache_usage else None,
+        "observed_miss_tokens": miss if cache_usage else None,
+        "covered_prompt_tokens": covered if cache_usage else None,
+        "hit_rate": hit / covered if covered else None,
+        "responses_with_verified_cache_usage": len(cache_usage),
+        "responses_without_verified_cache_usage": len(responses) - len(cache_usage),
+    }
+    return result
+
+
 def observed_scope_usage(payload: Any) -> dict[str, Any]:
     """只合计本范围报告可见的供应商响应；同一响应的多份投影、重试和缺失用量分别处理。"""
     attempts: set[str] = set()
     attempts_with_id: set[str] = set()
     responses: dict[tuple[str, str], dict[str, set[int]]] = {}
-    fields = ("prompt_tokens", "completion_tokens")
+    returned_models: dict[tuple[str, str], set[str]] = {}
+    fields = ("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
 
     def visit_diagnostics(diag: Any) -> None:
         """降级路由将两条传输路径保存在各自诊断中，外层调用本身没有单独响应。"""
@@ -343,13 +436,22 @@ def observed_scope_usage(payload: Any) -> dict[str, Any]:
             if not isinstance(response_id, str) or not response_id:
                 continue
             attempts_with_id.add(attempt_id)
-            values = responses.setdefault((provider, response_id), {})
+            key = (provider, response_id)
+            values = responses.setdefault(key, {})
+            returned_model = entry.get("returned_model")
+            if isinstance(returned_model, str) and returned_model:
+                returned_models.setdefault(key, set()).add(returned_model)
             usage = entry.get("usage")
             if isinstance(usage, dict):
                 for field in fields:
                     value = usage.get(field)
                     if type(value) is int and value >= 0:
                         values.setdefault(field, set()).add(value)
+                # 兼容协议已在传输层标准化；嵌套与显式命中字段应同值，冲突不选择其中一个。
+                details = usage.get("prompt_tokens_details")
+                cached_tokens = details.get("cached_tokens") if isinstance(details, dict) else None
+                if type(cached_tokens) is int and cached_tokens >= 0:
+                    values.setdefault("prompt_cache_hit_tokens", set()).add(cached_tokens)
 
     def walk(node: Any) -> None:
         """仅提取传输诊断；用户输入、评测估算及普通 usage 字段不能充当供应商回执。"""
@@ -364,18 +466,25 @@ def observed_scope_usage(payload: Any) -> dict[str, Any]:
                 walk(child)
 
     walk(payload)
-    result = {
+    model_groups: dict[tuple[str, str | None], list[dict[str, set[int]]]] = {}
+    for key, values in responses.items():
+        models = returned_models.get(key, ())
+        model = next(iter(models)) if len(models) == 1 else None
+        model_groups.setdefault((key[0], model), []).append(values)
+    return {
         "coverage": "partial_scope_report_diagnostics",
         "observed_attempts": len(attempts),
         "attempts_without_response_id": len(attempts - attempts_with_id),
-        "observed_provider_responses": len(responses),
+        **_observed_response_usage(list(responses.values())),
+        "by_provider_model": [
+            {
+                "provider": provider,
+                "returned_model": model,
+                **_observed_response_usage(model_groups[(provider, model)]),
+            }
+            for provider, model in sorted(model_groups, key=lambda key: (key[0], key[1] or ""))
+        ],
     }
-    for field in fields:
-        # 同一响应若有矛盾用量，按未知处理；没有任何已知值时不能报零。
-        known = [next(iter(row[field])) for row in responses.values() if len(row.get(field, ())) == 1]
-        result[f"observed_{field}"] = sum(known) if known else None
-        result[f"responses_without_verified_{field}"] = len(responses) - len(known)
-    return result
 
 
 def record_observed_usage(phase: dict[str, Any]) -> None:
@@ -389,6 +498,18 @@ def record_observed_usage(phase: dict[str, Any]) -> None:
             folder = Path(phase["source_report_path"]).parent
             payload = [payload, *[json.loads(path.read_text(encoding="utf-8"))
                 for path in folder.glob("*/report.json")]]
+        if phase.get("retry_scope"):
+            retry_scope = Path(phase["retry_scope"])
+            payload = [payload, *[json.loads(path.read_text(encoding="utf-8"))
+                for path in retry_scope.glob("*/*/case/eval_result.json")]]
+            retries = [json.loads(path.read_text(encoding="utf-8"))
+                       for path in retry_scope.glob("*/window_*_retry_*.json")]
+            if retries:
+                from collections import Counter
+
+                phase["retry_summary"] = {"count": len(retries),
+                    "by_stage": dict(Counter(item["stage"] for item in retries)),
+                    "by_category": dict(Counter(item["category"] for item in retries))}
         phase["observed_usage"] = observed_scope_usage(payload)
     except (KeyError, OSError, TypeError, ValueError, RecursionError):
         phase["observed_usage"] = {"coverage": "report_unavailable"}
@@ -461,18 +582,13 @@ def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[st
         or type(criterion["passed"]) is not bool for criterion in criteria
     ):
         raise ValueError(f"{scope} outward criteria require boolean passed and exact criterion fields")
-    # outward 是后端派生的通过方向；先验类型，再反向投影，不能把字符串或数字强转为布尔。
-    structured = _parse_semantic_assessment(json.dumps({
-        "reason": assessment.get("reason"), "criteria": [
-            {"id": criterion["id"], "verdict": ("violated" if not criterion["passed"] else "clear"), "reason": criterion["reason"]}
-            for criterion in criteria
-        ],
-    }, ensure_ascii=False), expected_ids)
+    # 归档使用原始规则标识，供应商回执使用本次请求内的编号。
+    structured = {"reason": assessment.get("reason"), "criteria": criteria, "passed": assessment["passed"]}
     raw = assessment.get("raw_response")
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"{scope} semantic assessment requires its original judge JSON")
     original = _parse_semantic_assessment(raw, expected_ids)
-    if structured["passed"] is not expected_passed or original != structured:
+    if original != structured:
         raise ValueError(f"{scope} judge criteria failed or contradict their original JSON")
 
 
@@ -590,6 +706,89 @@ def validate_owner_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]
         golden_reply_total=len(golden_ids), golden_reply_passed=len(golden_ids), golden_case_ids=golden_ids,
         timeline_assets=contract["timeline_assets"],
     )
+
+
+def validate_concurrency_execution(payload: dict[str, Any], live: dict[str, Any], *, retry_scope: Path | None) -> None:
+    """核对每场景一次的固定编排，并单独验证首轮并发调用证据。"""
+    configuration = payload.get("configuration")
+    expected_configuration = {"live_workers": LIVE_CONCURRENCY_WORKERS, "live_repeats": LIVE_CONCURRENCY_REPEATS}
+    if not isinstance(configuration, dict) or any(
+        type(configuration.get(key)) is not int or configuration[key] != value
+        for key, value in expected_configuration.items()
+    ):
+        raise ValueError("concurrency execution requires four workers and one planned repetition per scenario")
+
+    checks = live.get("checks")
+    expected_checks = {
+        "all_scenarios_returned", "all_scenarios_passed", "real_model_calls_overlapped",
+        "no_model_call_failed", "active_goal_revision_passed", "customer_visible_review_contract_passed",
+    }
+    if (not isinstance(checks, list) or len(checks) != len(expected_checks)
+            or any(not isinstance(check, dict) or check.get("passed") is not True
+                   or not isinstance(check.get("name"), str) for check in checks)
+            or {check.get("name") for check in checks} != expected_checks or live.get("errors") != []):
+        raise ValueError("concurrency execution did not pass all runtime and overlap checks")
+    metrics = live.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError("concurrency execution has no runtime measurements")
+
+    reports = live["reports"]
+    final_ids = [case.get("execution_id") for case in reports]
+    if any(not isinstance(identity, str) or not identity for identity in final_ids) or len(set(final_ids)) != len(final_ids):
+        raise ValueError("concurrency cases need distinct execution identities")
+    if any(identity != f"{case.get('scenario_id')}_run_1" for identity, case in zip(final_ids, reports)):
+        raise ValueError("concurrency case identity differs from the planned first repetition")
+    waves = live.get("initial_owner_waves")
+    if not isinstance(waves, list) or not waves:
+        raise ValueError("concurrency execution has no initial owner waves")
+
+    initial_ids: set[str] = set()
+    peaks: list[int] = []
+    for index, wave in enumerate(waves, start=1):
+        if (not isinstance(wave, dict) or type(wave.get("wave_index")) is not int
+                or wave["wave_index"] != index or wave.get("errors") != []):
+            raise ValueError("concurrency initial wave returned execution errors")
+        identities = wave.get("execution_ids")
+        cases = wave.get("initial_cases")
+        if (not isinstance(identities, list) or not identities
+                or any(not isinstance(identity, str) or not identity for identity in identities)
+                or len(set(identities)) != len(identities) or initial_ids.intersection(identities)
+                or not isinstance(cases, list) or len(cases) != len(identities)
+                or any(not isinstance(case, dict) or case.get("status") not in ("passed", "blocked")
+                       or not isinstance(case.get("execution_id"), str) for case in cases)
+                or {case["execution_id"] for case in cases} != set(identities)):
+            raise ValueError("concurrency initial waves must contain each scenario once")
+        runtime = wave.get("runtime_metrics")
+        peak = runtime.get("max_concurrent_client_calls") if isinstance(runtime, dict) else None
+        if type(peak) is not int or not 1 <= peak <= min(LIVE_CONCURRENCY_WORKERS, len(identities)):
+            raise ValueError("concurrency initial wave lacks valid observed runtime overlap")
+        if retry_scope is not None:
+            path = retry_scope / f"initial_owner_wave_{index:03d}.json"
+            if not path.is_file():
+                raise ValueError("concurrency initial wave lacks its original archived measurements")
+            source = json.loads(path.read_text(encoding="utf-8"))
+            original_cases = source.get("reports") if isinstance(source, dict) else None
+            if (not isinstance(original_cases, list) or any(not isinstance(case, dict) for case in original_cases)
+                    or type(source.get("scenario_count")) is not int or source["scenario_count"] != len(identities)):
+                raise ValueError("concurrency original wave has invalid case evidence")
+            original = {key: source.get(key) for key in ("execution_ids", "errors", "runtime_metrics")}
+            original["initial_cases"] = [
+                {key: case.get(key) for key in ("execution_id", "status", "attempt_dir")} for case in original_cases
+            ]
+            if json.dumps(original, sort_keys=True) != json.dumps({key: wave.get(key) for key in original}, sort_keys=True):
+                raise ValueError("concurrency initial wave contradicts its original archived measurements")
+        peaks.append(peak)
+        initial_ids.update(identities)
+    if initial_ids != set(final_ids):
+        raise ValueError("concurrency final scenario coverage differs from the initial execution waves")
+
+    peak = max(peaks)
+    reported_peak = metrics.get("owner_wave_max_concurrent_client_calls")
+    overlap = next(check for check in checks if check["name"] == "real_model_calls_overlapped")
+    if (peak < 2 or type(reported_peak) is not int or reported_peak != peak
+            or type(overlap.get("actual")) is not int or overlap["actual"] != peak
+            or type(metrics.get("failed_calls")) is not int or metrics["failed_calls"] != 0):
+        raise ValueError("concurrency overlap must come from measured concurrent owner execution")
 
 
 def validate_inquiry_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]) -> None:
@@ -1296,6 +1495,8 @@ def validate_group_topic_scope(payload: dict[str, Any], phase: dict[str, Any]) -
     if file_digest(dataset) != phase["dataset_sha256"]:
         raise ValueError("group topic source changed during this gate")
     cases = load_cases(dataset)
+    if phase.get("selected_case"):
+        cases = [case for case in cases if case["case_id"] == phase["selected_case"]]
     ids = [case["case_id"] for case in cases]
     source = Path(phase["source_report_path"])
     if not source.resolve().is_relative_to(Path(phase["work_dir"]).resolve()):
@@ -1458,14 +1659,15 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
         if (not isinstance(reports, list) or len(reports) != count
                 or any(not isinstance(item, dict) or item.get("status") != "passed" for item in reports)):
             raise ValueError("concurrency case reports are missing or contain failures")
+        retry_scope = Path(phase["retry_scope"]) if phase.get("retry_scope") else None
+        validate_concurrency_execution(payload, live, retry_scope=retry_scope)
         phase["case_coverage"] = {"total": count, "passed": count, "failed": 0, "skipped": 0}
         contract = load_owner_semantic_contract()
-        repeat = int(phase["command"][phase["command"].index("--live-repeats") + 1])
         # 并发场景来自同一个老板目录；复用逐案例核验，不能只信子报告自报的通过次数。
         validate_owner_scope_coverage({
             "execution_scope": "all_live_scenarios", "semantic_judge_ran": True,
             "scenario_count": count, "scenario_definition_count": len(contract["scenario_ids"]),
-            "repeat": repeat, "reports": live.get("reports", []),
+            "repeat": LIVE_CONCURRENCY_REPEATS, "reports": reports,
             "recovery_summary": live.get("recovery_summary"),
             "golden_reply_coverage": {
                 "total_cases": len(contract["golden_case_ids"]),
@@ -1532,22 +1734,55 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
 def main() -> int:
     """逐范围记录耗时和失败阶段；默认在首个失败范围归档后停止。"""
     args = parse_args()
-    # 子运行器在解析参数时读取环境默认值，须先加载应用配置再启动各范围；外部环境优先。
-    load_dotenv_defaults(ROOT / ".env")
-    run_dir = create_run_directory()
+    try:
+        if args.impact is not None:
+            print_eval_impact(ROOT, args.impact)
+            return 0
+        # 子运行器在解析参数时读取环境默认值，须先加载应用配置再启动各范围；外部环境优先。
+        load_dotenv_defaults(ROOT / ".env")
+        run_dir = (resume_directory(ROOT / "runtime_data" / "eval_runs", args.resume)
+                   if args.resume else create_run_directory())
+        with run_lock(run_dir) if args.full else nullcontext():
+            return run_gate(args, run_dir)
+    except ValueError as exc:
+        print(f"评测无法继续：{exc}", file=sys.stderr)
+        return 1
+
+
+def run_gate(args: argparse.Namespace, run_dir: Path) -> int:
+    """首次创建或恢复同一门禁，保留原范围顺序与已通过证据。"""
     print(f"本次评测证据目录：{run_dir}", flush=True)
     if not args.full:
-        if not (args.live_real_owner or args.live_real_group or args.live_concurrency):
+        if not (args.scope or args.live_real_owner or args.live_real_group or args.live_concurrency):
             print(OFFLINE_SEMANTIC_NOTICE, flush=True)
+        elif args.scope:
+            print("仅运行指定诊断范围；其他范围未执行，不能称全量业务通过。", flush=True)
         else:
             print("仅运行显式选择的部分真实模型评测；其他范围未执行，不能称全量业务通过。", flush=True)
+    if args.resume:
+        # 续跑沿用原窗口并发度，计划核验随即检查其余调用参数。
+        prior = json.loads((run_dir / "gate_report.json").read_text(encoding="utf-8"))
+        args.live_case_workers = prior.get("live_case_workers", 2)
+        if type(args.live_case_workers) is not int or args.live_case_workers not in range(1, 5):
+            raise ValueError("invalid original live case worker count")
+        failure_policy = prior.get("failure_policy")
+        if failure_policy not in {"collect_all", "fail_fast"}:
+            raise ValueError("invalid original failure policy")
+        args.collect_all = failure_policy == "collect_all"
     plan = build_eval_plan(args, run_dir)
+    fingerprint = candidate_fingerprint(ROOT, run_dir.name) if args.full else None
+    if args.resume:
+        report = resume_report(run_dir, plan, fingerprint)
+        return execute_plan(args, run_dir, report)
     priority_source, priorities = prioritize_previous_failures(plan, run_dir) if args.full else (None, [])
     if priorities:
         print("离线阶段之后优先复测已知失败范围：" + ", ".join(priorities), flush=True)
     requested = {phase.get("scope_family", phase["scope"]) for phase in plan}
     report: dict[str, Any] = {
         "run_id": run_dir.name, "full": args.full, "status": "running",
+        "candidate": candidate_evidence(ROOT),
+        "diagnostic_scope": args.scope, "diagnostic_case": args.case,
+        "candidate_fingerprint": fingerprint, "retry_window": 0, "live_case_workers": args.live_case_workers,
         "failure_policy": "collect_all" if args.collect_all else "fail_fast",
         "priority_source_run_id": priority_source, "prioritized_live_scopes": priorities,
         "started_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1558,24 +1793,57 @@ def main() -> int:
             "group_adversarial": "既有数据校验覆盖；现有群聊运行器只执行明确选中的golden，不声称歧义对抗集已真实回放",
         },
     }
+    if requested.intersection(LIVE_SCOPES):
+        try:
+            report["model_configuration"] = model_evidence()
+        except ValueError as exc:
+            for phase in plan:
+                phase["status"] = "not_run"
+            report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+                          first_failure={"scope": "model_preflight", "error_type": type(exc).__name__})
+            report_path = run_dir / "gate_report.json"
+            save_gate_report(report_path, report)
+            print(f"模型预检失败：{exc}；报告：{report_path}", flush=True)
+            return 1
+    return execute_plan(args, run_dir, report)
+
+
+def execute_plan(args: argparse.Namespace, run_dir: Path, report: dict) -> int:
+    """按原硬断言验收；只有带本轮证据的暂态中止才允许续跑。"""
+    plan = report["scopes"]
     report_path = run_dir / "gate_report.json"
     save_gate_report(report_path, report)
     for index, phase in enumerate(plan, start=1):
+        if phase.get("status") == "passed":
+            continue
+        retry_scope = None
+        if args.full and phase.get("scope_family", phase["scope"]) in LIVE_SCOPES:
+            retry_scope = (Path(phase["work_dir"]) / "_eval_retry" if phase.get("work_dir")
+                           else run_dir / "retry" / f"scope_{index:02d}")
+            phase["retry_scope"] = str(retry_scope)
+            # 原窗口的受阻记录已封存，仅接受本窗口子进程写入的明确结论。
+            (retry_scope / "blocked.json").unlink(missing_ok=True)
+        window = report["retry_window"]
+        log_suffix = f".window_{window:03d}" if window else ""
+        # 上一窗口已独立封存；新的运行中阶段只能显示当前窗口的状态和计时。
+        for key in ("failure", "error", "archive_error", "blocked_case", "finished_at_utc", "elapsed_seconds"):
+            phase.pop(key, None)
         start = monotonic()
-        phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}.log"),
+        phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}{log_suffix}.log"),
                      started_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
         save_gate_report(report_path, report)
         stage = "command"
         interrupted = False
         try:
-            run_command(phase["command"], log_path=Path(phase["log_path"]))
+            run_command(phase["command"], log_path=Path(phase["log_path"]), retry_scope=retry_scope, retry_window=window)
             stage = "evidence_archive"
             archive_external_scope_report(phase, required=True)
             stage = "evidence_validation"
             validate_scope_report(phase)
         except (Exception, KeyboardInterrupt) as exc:
             interrupted = isinstance(exc, KeyboardInterrupt)
-            phase.update(status="failed", error=f"{type(exc).__name__}: {exc}",
+            error_type = type(exc).__name__
+            phase.update(status="failed", error=f"{error_type}: {exc}",
                          failure=scope_failure_metadata(stage, exc))
             report["failed_scopes"].append(phase["scope"])
             try:
@@ -1587,8 +1855,35 @@ def main() -> int:
         phase.update(finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                      elapsed_seconds=monotonic() - start)
         if phase["status"] == "failed":
+            interrupted_case = blocked_scope_evidence(phase, retry_scope, window) if retry_scope else None
+            if interrupted_case and report["failed_scopes"] == [phase["scope"]]:
+                if phase.get("report_path") and Path(phase["report_path"]).is_file():
+                    original = Path(phase["report_path"])
+                    shutil.copy2(original, original.with_name(f"{original.name}.window_{window:03d}"))
+                phase.update(status="blocked", blocked_case=interrupted_case)
+                for later in plan[index:]:
+                    later["status"] = "not_run"
+                report["failed_scopes"].clear()
+                report.update(status="blocked", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+                              evidence_fingerprint=evidence_fingerprint(run_dir, plan))
+                if reject_changed_candidate(args, run_dir, report):
+                    save_gate_report(report_path, report)
+                    return 1
+                save_gate_report(report_path, report)
+                command = shlex.join([sys.executable, "scripts/run_evals.py", "--resume", run_dir.name])
+                if "PYTHONPATH" in os.environ:
+                    command = f"PYTHONPATH={shlex.quote(os.environ['PYTHONPATH'])} {command}"
+                print(f"评测受阻，继续命令：{command}", flush=True)
+                return BLOCKED_EXIT_CODE
+            case_failure = first_failed_case(phase)
+            if case_failure:
+                phase["case_failure"] = case_failure
+            report.setdefault("first_failure", {
+                "scope": phase["scope"], "error_type": error_type, **case_failure,
+            })
             print(f"评测失败范围：{phase['scope']}；日志：{phase['log_path']}", flush=True)
-            if not args.collect_all or interrupted:
+            if (not args.collect_all or interrupted
+                    or phase.get("scope_family", phase["scope"]) not in LIVE_SCOPES):
                 for later in plan[index:]:
                     later["status"] = "not_run"
                 report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
@@ -1606,6 +1901,7 @@ def main() -> int:
         save_gate_report(report_path, report)
     report.update(status="failed" if report["failed_scopes"] else "passed",
                   finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
+    reject_changed_candidate(args, run_dir, report)
     save_gate_report(report_path, report)
     if report["failed_scopes"]:
         print("本次门禁未通过，失败范围：" + ", ".join(report["failed_scopes"]), flush=True)
@@ -1615,7 +1911,38 @@ def main() -> int:
     for name, limitation in report["coverage_limits"].items():
         print(f"覆盖说明 {name}：{limitation}", flush=True)
     print(f"范围与结果清单：{report_path}", flush=True)
-    return 1 if report["failed_scopes"] else 0
+    return 1 if report["status"] == "failed" else 0
+
+
+def reject_changed_candidate(args: argparse.Namespace, run_dir: Path, report: dict) -> bool:
+    """本轮执行期间代码或模型配置发生变化时，报告保留但失去验收资格。"""
+    if args.full and candidate_fingerprint(ROOT, run_dir.name) != report["candidate_fingerprint"]:
+        report.update(status="failed", invalidated_reason="candidate_changed_during_run")
+        print("评测期间候选文件或模型配置发生变化，本轮无法作为验收。", flush=True)
+        return True
+    return False
+
+
+def blocked_scope_evidence(phase: dict, retry_scope: Path, window: int) -> dict | None:
+    """退出码只是控制信号，同时核对该窗口逐例账本和结构化失败原因。"""
+    if phase["failure"].get("returncode") != BLOCKED_EXIT_CODE:
+        return None
+    try:
+        marker = json.loads((retry_scope / "blocked.json").read_text(encoding="utf-8"))
+        key = marker.get("key")
+        if not isinstance(key, str):
+            return None
+        folder = retry_scope / hashlib.sha256(key.encode()).hexdigest()
+        checkpoint = json.loads((folder / "blocked.json").read_text(encoding="utf-8"))
+        failure = checkpoint["result"]["eval_inconclusive"]
+        attempt = Path(checkpoint["result"]["attempt_dir"])
+        if (attempt.resolve().parent.parent != folder.resolve()
+                or json.loads((attempt / "eval_result.json").read_text(encoding="utf-8")) != checkpoint["result"]
+                or marker != {**failure, "key": key, "window": window} or not is_inconclusive(failure)):
+            return None
+        return marker
+    except (OSError, AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 if __name__ == "__main__":

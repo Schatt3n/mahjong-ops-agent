@@ -196,7 +196,7 @@ def test_sqlite_restart_resumes_from_checkpoint_with_complete_tool_evidence(
     assert recovered_deliveries == [
         ("msg_recovery_sqlite", "现在没有现成的，要组一个吗？")
     ]
-    resumed_payload = json.loads(second_client.calls[0]["messages"][1]["content"])
+    resumed_payload = json.loads(second_client.calls[0]["messages"][-1]["content"])
     assert resumed_payload["previous_tool_results"][0]["name"] == "search_current_games"
     assert resumed_payload["turn_tool_evidence"][0]["name"] == "search_current_games"
     persisted = second_store.agent_run(failed_run.run_id)

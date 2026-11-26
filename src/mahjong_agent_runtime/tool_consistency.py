@@ -15,7 +15,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import ToolResult
+from .models import ToolCall, ToolResult
 from .domains import normalize_requirement
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import known_players_with_requesting_party
@@ -188,6 +188,26 @@ def validate_explicit_task_fact_consistency(
         f"tool argument consistency violation: {call.name}.{argument_name} conflicts with "
         "explicit current-task facts; " + "; ".join(mismatches),
         normalized_reference,
+    )
+
+
+def validate_model_create_game_stake(call: ToolCall) -> str | None:
+    """主模型发起招募需要有效档位；受信群自招入口仍可登记档位待确认的局。"""
+
+    if call.name != "create_game" or not isinstance(call.arguments, dict):
+        return None
+    requirement = call.arguments.get("requirement")
+    if not isinstance(requirement, dict):
+        return None  # 参数缺失和类型错误仍由工具 schema 处理。
+    try:
+        normalized = normalize_requirement(requirement)
+    except ValueError as exc:
+        return f"tool argument consistency violation: invalid proposed create_game.requirement; {exc}"
+    if stake_options(normalized):
+        return None
+    return (
+        "tool argument consistency violation: create_game requires a confirmed stake, set of stakes, or stake range. "
+        "If the stake is unknown, retain the delegation and ask for it without creating a game."
     )
 
 
@@ -423,12 +443,14 @@ def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> di
         "preserve_requirement": preserve,
         "revision_policy": (
             "默认复用preserve_requirement中的实际已查条件；模型计划、known_facts或fact_assertions的重写不能自行替换。"
-            "若用户新输入或来源重核支持修订，在plan_revision_reason说明依据，先按修订条件重新成功查询，再据新结果写入。"
+            "若用户新输入或来源重核支持修订，在plan_revision_reason说明依据，先按修订条件重新成功查询。"
+            "写入前置条件已独立核实后，才按新结果填写写入参数。"
             "失败查询不替换有效参考；新运行以新用户输入为准，不从历史运行继承此投影。"
         ),
         "boundary": (
             "这里只记录真实执行参数，不把模型先前理解升级为不可修订的用户事实，也不授予建局或外发权限。"
             "目标桌况人数、参与者身份及查询容量不在本投影中，不能机械复制成新局占座。"
+            "target_tool只说明建局获准后这些参数放在哪里。空结果不会补足己方人数或档位，其中有缺项时，保留原委托并追问，暂不调用create_game。"
         ),
     }
 

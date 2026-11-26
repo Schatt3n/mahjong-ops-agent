@@ -18,6 +18,8 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime import (  # noqa: E402
     AgentContextBuilder,
@@ -33,6 +35,9 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations  # noqa: E402
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from eval_retry import (  # noqa: E402
+    BLOCKED_EXIT_CODE, checkpointed_case, current_budget, is_inconclusive, latest_agent_transport_failure, scope_directory,
+)
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "privacy_isolation_live_eval.sqlite3"
@@ -499,8 +504,31 @@ def run_case(
         "raw_trace_path": raw_trace_path,
         "db_path": str(db_path),
     }
+    missing_after_interrupted_main = {
+        "customer_visible_review_ran", "main_model_call_ran", "final_output_matches_actual",
+        "no_model_or_contract_error", "agent_did_not_fall_back_to_human",
+    }
+    if (current_budget() is not None and result.status == "needs_human" and len(outgoing_texts) == 1
+            and "action_contract_error" not in trace_steps
+            and all(passed or name in missing_after_interrupted_main for name, passed in checks.items())):
+        # 只恢复未完成的模型调用，已经观察到的上下文、关系和泄露失败仍须按原硬断言阻断。
+        if failure := latest_agent_transport_failure(events):
+            report.update(status="blocked", eval_inconclusive=failure)
     store._connection.close()
     return report
+
+
+def run_case_attempt(client: OpenAICompatibleAgentClient, args: argparse.Namespace, probe: PrivacyProbe) -> dict[str, Any]:
+    """门禁为每次补试配独立数据库和轨迹，保持报告所属的统一运行身份。"""
+    scope = scope_directory()
+    if scope is None:
+        return run_case(client, args, probe)
+
+    def run(attempt_dir: pathlib.Path) -> dict[str, Any]:
+        """保留原 CLI 测试预算、路径校验和所有隐私硬断言，只替换可变数据库位置。"""
+        return run_case(client, argparse.Namespace(**{**vars(args), "db_path": attempt_dir / args.db_path.name}), probe)
+
+    return checkpointed_case(probe.case_id, run, case_dir=scope)
 
 
 def write_report(payload: dict[str, Any], path: pathlib.Path) -> None:
@@ -509,6 +537,7 @@ def write_report(payload: dict[str, Any], path: pathlib.Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """仅在当前门禁沙盒的暂态故障受阻时暂停；其余失败保持原有严格验收。"""
     parser = argparse.ArgumentParser(description="Run data-driven real-LLM privacy isolation adversarial cases.")
     parser.add_argument("--db-path", type=pathlib.Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--report-path", type=pathlib.Path, default=DEFAULT_REPORT_PATH)
@@ -544,10 +573,17 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             parser.error(f"unknown case id(s): {', '.join(unknown)}")
         probes = [probe for probe in probes if probe.case_id in selected]
-    reports = [run_case(client, args, probe) for probe in probes]
+    reports = []
+    for probe in probes:
+        item = run_case_attempt(client, args, probe)
+        reports.append(item)
+        if is_inconclusive(item.get("eval_inconclusive")):
+            break
     passed_count = sum(report["status"] == "passed" for report in reports)
+    failures = [item for item in reports if item["status"] == "failed"]
+    blocked = bool(failures) and all(is_inconclusive(item.get("eval_inconclusive")) for item in failures)
     payload = {
-        "status": "passed" if passed_count == len(reports) else "failed",
+        "status": "blocked" if blocked else "passed" if passed_count == len(reports) else "failed",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "model": client.config.model,
         "cases_path": str(args.cases_path),
@@ -560,6 +596,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     write_report(payload, args.report_path)
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    if blocked:
+        return BLOCKED_EXIT_CODE
     return 1 if args.strict and payload["status"] != "passed" else 0
 
 

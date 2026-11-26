@@ -337,7 +337,7 @@ def test_create_cannot_hide_a_customer_count_change_in_another_argument(chain, c
 
 
 def test_separately_named_companion_is_part_of_the_confirmed_initial_count(chain):
-    call = create_call({"known_player_count": 2, "needed_seats": 2}, seats=1)
+    call = create_call({"stake": "1", "known_player_count": 2, "needed_seats": 2}, seats=1)
     call.arguments["known_players"] = [{"customer_id": "friend", "display_name": "同行朋友", "seat_count": 1}]
     result = execute(chain, call, facts={"known_player_count": 2, "needed_seats": 2})
     assert result.allowed and result.called
@@ -356,7 +356,7 @@ def test_explicit_own_party_size_is_checked_separately_from_game_population(chai
 
 def test_candidate_search_keeps_persisted_game_population_over_the_old_customer_snapshot(chain):
     store = chain[0]
-    created = execute(chain, create_call({"game_type": "hangzhou_mahjong", "known_player_count": 1, "needed_seats": 3}),
+    created = execute(chain, create_call({"game_type": "hangzhou_mahjong", "stake": "1", "known_player_count": 1, "needed_seats": 3}),
                       facts={"known_player_count": 1, "needed_seats": 3})
     game_id = created.result["game"]["game_id"]
     store.record_candidate_reply(
@@ -400,7 +400,7 @@ def test_same_customer_constraints_still_cannot_drift_between_query_and_creation
 
 @pytest.mark.parametrize("invalid", ["party_schema", "capacity", "ownership"])
 def test_scope_separation_does_not_weaken_gateway_or_store_guards(chain, invalid):
-    call = create_call({"game_type": "hangzhou_mahjong"})
+    call = create_call({"game_type": "hangzhou_mahjong", "stake": "1"})
     if invalid == "party_schema":
         call.arguments["requesting_party"]["seat_count"] = 5
         error = "seat_count must be <= 4"

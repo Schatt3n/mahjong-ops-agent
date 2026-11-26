@@ -57,6 +57,34 @@ def test_authorized_projection_retains_summary_but_conditions_its_preservation(s
     assert 'PRIVATE_' not in json.dumps(summary, ensure_ascii=False)
 
 
+def test_live_seats_take_precedence_over_saved_summary_after_join(scoped_store):
+    """同一局加入后，以实时座位核对人数，保留旧摘要中的公开识别信息。"""
+    game, _ = scoped_store.create_game(
+        conversation_id='current', organizer_id='customer', organizer_name='客户',
+        requirement={'game_type': 'hangzhou_mahjong', 'stake': '1', 'start_time_kind': 'asap_when_full',
+                     'user_visible_summary': '七点星月的局，1缺3'},
+        known_players=[{'customer_id': 'customer', 'display_name': '客户'}], trace_id='count-create',
+    )
+    scoped_store.join_game(game_id=game.game_id, customer_id='guest', display_name='客人', trace_id='count-join')
+    message, context = _build(scoped_store, '我那局现在几个人了')
+    summary = next(item for item in context['active_game_visible_summaries'] if item['game_id'] == game.game_id)
+    assert summary['seat_summary']['claimed_seats'] == summary['seat_summary']['remaining_seats'] == 2
+    contract = summary['status_query_reply_contract']
+    assert contract['seat_count_source'] == 'seat_summary'
+    assert contract['preferred_reply_text'] == '七点星月的局，1缺3'
+    assert '冲突的旧人数、缺口或短码不属于应保留的锚点' in contract['rule']
+
+    action = AgentAction(goal='答当前人数', objective_status='completed', reasoning_summary='',
+                         reply_to_user='现在两个人，还差两个。')
+    review = build_reply_self_review_payload(
+        message=message, action=action, context_payload=context, review_scope='reply_to_user',
+        review_items=[{'item_id': 'reply_to_user', 'recipient_id': message.sender_id, 'text': action.reply_to_user}],
+    )
+    assert summary in review['active_game_visible_summaries']
+    assert any('优先于旧公开摘要中的人数、缺口和短码' in rule
+               for rule in review['semantic_fidelity_contract']['source_order'])
+
+
 @pytest.mark.parametrize('expanded_proposal', [False, True])
 def test_review_payload_keeps_actual_request_authoritative_over_expanded_draft(scoped_store, expanded_proposal):
     """复现首次正确目标及被错误反馈污染后的目标，后者也不能产生用户授权。"""

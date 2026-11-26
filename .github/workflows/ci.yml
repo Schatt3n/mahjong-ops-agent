@@ -1,0 +1,78 @@
+name: Offline CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: Runtime offline checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      # 全量 pytest 也包含由 Node 执行的工作台前端回归。
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Check changed lines for whitespace errors
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          git diff --check "$BASE_SHA" HEAD
+      - name: Install test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Check Chinese docstrings
+        run: python scripts/check_chinese_docstrings.py
+      - name: Run the offline evaluation gate
+        id: eval
+        env:
+          PYTHONPATH: src
+          PYTEST_ADDOPTS: --exitfirst --tb=short
+        run: python scripts/run_evals.py
+      - name: Show offline pytest failure
+        if: failure() && steps.eval.outcome == 'failure'
+        run: |
+          # 离线 job 只运行仓库夹具。暂停工作流命令解析后再展示失败日志。
+          for pytest_log in runtime_data/eval_runs/*/*_all_pytest.log; do
+            [[ -f "$pytest_log" ]] || continue
+            marker="$(cat /proc/sys/kernel/random/uuid)"
+            echo "::stop-commands::$marker"
+            tail -n 100 "$pytest_log"
+            echo "::$marker::"
+          done
+      - name: Summarize evaluation scopes
+        if: always() && steps.eval.outcome != 'skipped'
+        run: python .github/scripts/write_eval_summary.py
+
+  adapter:
+    name: WeChat adapter tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Test the adapter
+        run: npm --prefix integrations/agent-wechat-adapter test

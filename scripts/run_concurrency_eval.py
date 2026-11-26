@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import copy_context
 from copy import deepcopy
 import datetime as dt
 import hashlib
@@ -12,6 +13,7 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,6 +37,8 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.token_estimation import estimate_tokens  # noqa: E402
+from eval_retry import (BLOCKED_EXIT_CODE, checkpointed_case, defer_case_retries,
+                       current_budget, is_inconclusive, scope_directory, write_json)  # noqa: E402
 
 
 DEFAULT_WORK_DIR = ROOT / "runtime_data" / "concurrency_eval"
@@ -875,6 +879,80 @@ def run_query_reply_state_calibration(
             "test_kind": "controlled_reply_state_calibration", "source_evidence": deepcopy(evidence), "cases": cases}
 
 
+def _active_revision_evidence_hashes(report: dict) -> dict:
+    """绑定本次真实并发的两条轨迹和关闭后的 SQLite，供独立判定续跑读取。"""
+    return {name: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() for name, path in {
+        "old_raw_trace": report["old_raw_trace_path"],
+        "latest_raw_trace": report["recovery_evidence"]["raw_trace_path"],
+        "database": report["db_path"],
+    }.items()}
+
+
+def _finish_active_revision_judgment(report: dict, newest_events: list, assessment: dict) -> dict:
+    """只更新一般语义断言及其依赖的恢复结论，其他业务和受控判定证据原样保留。"""
+    from run_real_owner_chat_live_eval import assess_action_contract_recovery
+
+    report.pop("eval_inconclusive", None)
+    checks = report["checks"]
+    key = "latest_reply_matches_human_meaning"
+    latest = report["latest_result"]
+    semantic_passed = assessment.get("passed") is True and not assessment.get("error")
+    next(item for item in checks if item["name"] == key).update(passed=semantic_passed, actual=assessment)
+    prerequisites = (all(item["passed"] for item in checks if item["name"] != key)
+                     and report["reply_state_calibration"]["status"] == "passed")
+    def recovery(semantic_ok: bool):
+        """结构预核只授权补判，最终恢复证据仍绑定真正的独立语义。"""
+        return assess_action_contract_recovery(newest_events, runtime_status=latest["status"], final_reply=latest["final_reply"],
+            business_checks_passed=prerequisites and semantic_ok, semantic_passed=semantic_ok)
+
+    audit = recovery(semantic_passed)
+    report.update(semantic_assessment=assessment,
+                  status="passed" if prerequisites and semantic_passed and audit["quality_status"] == "passed" else "failed")
+    report["recovery_evidence"].update(checks=checks, recovery_metrics=audit)
+    failure = assessment.get("eval_inconclusive")
+    if (current_budget() is not None and prerequisites and is_inconclusive(failure) and failure["stage"] == "judge"
+            and recovery(True)["quality_status"] == "passed"):
+        report.update(status="blocked", eval_inconclusive=failure)
+    return report
+
+
+def resume_active_revision_judgment(client, previous: dict, work_dir: pathlib.Path) -> dict:
+    """用同轮对话、SQLite、盲分类和审计补判，绝不重放两条真实并发请求。"""
+    from run_evals import validate_active_reply_state_calibration
+    from run_inquiry_grounding_eval import resume_reply_semantics
+    from run_real_owner_chat_live_eval import assess_action_contract_recovery
+
+    source = pathlib.Path(previous["attempt_dir"]) / "report.json"
+    report = json.loads(source.read_text(encoding="utf-8"))
+    metadata = {"attempt_dir", "runtime_metrics", "model_call_latencies_ms"}
+    if (report != {key: value for key, value in previous.items() if key not in metadata}
+            or report.get("status") != "blocked" or report.get("eval_inconclusive", {}).get("stage") != "judge"
+            or report["fixture"] != load_active_revision_fixture()
+            or report.get("frozen_evidence_hashes") != _active_revision_evidence_hashes(report)):
+        raise ValueError("active revision frozen execution differs from the case checkpoint")
+    checks, latest, fixture = report["checks"], report["latest_result"], report["fixture"]
+    if ({item["name"] for item in checks} != set(fixture["expected"]["hard_checks"])
+            or not all(item["passed"] for item in checks if item["name"] != "latest_reply_matches_human_meaning")):
+        raise ValueError("active revision frozen hard checks failed")
+    trace_path = pathlib.Path(report["recovery_evidence"]["raw_trace_path"])
+    events = [SimpleNamespace(**event) for event in json.loads(trace_path.read_text(encoding="utf-8"))["events"]]
+    inputs = [event.content.get("message") for event in events if event.step == "user_input"]
+    outputs = [event.content for event in events if event.step == "final_output"]
+    original = report["semantic_assessment"]
+    audit = assess_action_contract_recovery(events, runtime_status=latest["status"], final_reply=latest["final_reply"],
+        business_checks_passed=True, semantic_passed=True)
+    if (inputs != [original["evidence"]["request"]] or len(outputs) != 1
+            or outputs[0].get("reply") != latest["final_reply"] or outputs[0].get("objective_status") != latest["status"]
+            or audit["quality_status"] != "passed"):
+        raise ValueError("active revision frozen facts differ from the authoritative trace")
+    validate_active_reply_state_calibration(report, fixture)
+    assessment = resume_reply_semantics(client, original)
+    report = _finish_active_revision_judgment(report, events, assessment)
+    work_dir.mkdir(parents=True, exist_ok=False)
+    write_json(work_dir / "report.json", report)
+    return {**report, **{key: previous[key] for key in metadata - {"attempt_dir"} if key in previous}}
+
+
 def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Path) -> dict[str, Any]:
     """在旧模型调用阻塞时接收明确改向，用同一真实 Runtime 核对失效与重新规划。
 
@@ -931,10 +1009,10 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
         messages = [UserMessage(conversation_id=fixture["conversation_id"], sender_id=customer_id,
             sender_name="改向测试客户", text=item["text"], message_id=item["message_id"]) for item in fixture["messages"]]
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(runtime.handle_user_message, messages[0], trace_id="trace_active_revision_old")
+            first = pool.submit(copy_context().run, runtime.handle_user_message, messages[0], trace_id="trace_active_revision_old")
             if not entered.wait(timeout=max(10, args.timeout_seconds)):
                 raise TimeoutError("old main model call never started")
-            latest = pool.submit(runtime.handle_user_message, messages[1], trace_id="trace_active_revision_latest")
+            latest = pool.submit(copy_context().run, runtime.handle_user_message, messages[1], trace_id="trace_active_revision_latest")
             try:
                 deadline = time.monotonic() + max(10, args.timeout_seconds)
                 while store.conversation_version(fixture["conversation_id"]) < 2 and time.monotonic() < deadline:
@@ -947,9 +1025,6 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
         events = trace.get_trace(result.trace_id)
         scenario = SimpleNamespace(message=messages[1])
         evidence = owner_eval.reply_semantic_evidence(result, scenario, events, store)
-        assessment = assess_reply_semantics(client, evidence=evidence,
-            expectation=active_business_semantic_expectation(fixture["expected"]),
-            trace_id="trace_active_revision_semantics", judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
         state_assessment = assess_reply_communication(client, evidence=evidence,
             trace_id="trace_active_revision_communication", timeout_seconds=args.timeout_seconds)
         calibration = run_query_reply_state_calibration(client, args, evidence=evidence,
@@ -976,13 +1051,10 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
             check("no_old_creation_or_implicit_join_or_follow_up", [game.to_dict() for game in store.games.values()] == baseline
                   and not store.invite_drafts and not store.outbound_message_drafts and len(store.scheduled_tasks) == scheduled_count,
                   "fixture games unchanged and no new outbound or scheduled work", {"games": len(store.games), "invites": len(store.invite_drafts), "scheduled": len(store.scheduled_tasks)}),
-            check("latest_reply_matches_human_meaning", assessment.get("passed") is True and not assessment.get("error"), True, assessment),
+            check("latest_reply_matches_human_meaning", False, True, None),
         ]
         if {item["name"] for item in checks} != set(fixture["expected"]["hard_checks"]):
             raise ValueError("active revision runner did not execute every declared hard check")
-        recovery = owner_eval.assess_action_contract_recovery(events, runtime_status=result.status,
-            final_reply=result.final_reply, business_checks_passed=all(item["passed"] for item in checks),
-            semantic_passed=assessment.get("passed") is True and not assessment.get("error"))
         # 改向回放同样保留完整边界，不能只给旧58例计量而漏掉最新目标的合同错误。
         # 被新输入淘汰的旧轮也保留完整原迹，不能只凭简化决策快照证明隔离边界。
         old_events = trace.get_trace(old_result.trace_id)
@@ -994,22 +1066,33 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
             "iteration": 1, "events": [event.to_dict() for event in events]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         recovery_evidence = {"trace_id": result.trace_id, "scenario_id": fixture["id"], "iteration": 1,
             "runtime_status": result.status, "final_reply": result.final_reply, "checks": checks,
-            "trace_steps": [event.step for event in events], "raw_trace_path": str(raw_trace_path), "recovery_metrics": recovery}
-        report.update(status="passed" if all(item["passed"] for item in checks) and recovery["quality_status"] == "passed"
-                      and calibration["status"] == "passed" else "failed", checks=checks,
+            "trace_steps": [event.step for event in events], "raw_trace_path": str(raw_trace_path)}
+        report.update(checks=checks,
             old_raw_trace_path=str(old_raw_trace_path), old_trace_steps=[event.step for event in old_events],
-            old_result=old_result.to_dict(), latest_result=result.to_dict(), semantic_assessment=assessment,
+            old_result=old_result.to_dict(), latest_result=result.to_dict(),
             reply_state_assessment=state_assessment,
             recovery_evidence=recovery_evidence, reply_state_calibration=calibration,
             old_decision_trace=owner_eval.decision_trace_snapshots(trace.get_trace(old_result.trace_id)),
             latest_decision_trace=owner_eval.decision_trace_snapshots(events), db_path=str(store.path))
+        hard_passed = (all(item["passed"] for item in checks if item["name"] != "latest_reply_matches_human_meaning")
+                       and calibration["status"] == "passed")
+        structural = owner_eval.assess_action_contract_recovery(events, runtime_status=result.status, final_reply=result.final_reply,
+            business_checks_passed=hard_passed, semantic_passed=True)
+        semantic = {}
+        if current_budget() is None or (hard_passed and structural["quality_status"] == "passed"):
+            semantic = assess_reply_semantics(client, evidence=evidence,
+                expectation=active_business_semantic_expectation(fixture["expected"]),
+                trace_id="trace_active_revision_semantics", judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+        _finish_active_revision_judgment(report, events, semantic)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         report["error"] = error.replace(client.config.api_key, "[redacted]") if client.config.api_key else error
     finally:
         release.set()
         store._connection.close()
-    (work_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if report.get("status") == "blocked":
+        report["frozen_evidence_hashes"] = _active_revision_evidence_hashes(report)
+    write_json(work_dir / "report.json", report)
     return report
 
 
@@ -1283,6 +1366,126 @@ def run_live_customer_visible_review_contract(
     return payload
 
 
+def _owner_execution_id(scenario, iteration: int) -> str:
+    """标识同一评测中一个场景的一次初始执行及后续补试。"""
+    return f"{scenario.scenario_id}_run_{iteration}"
+
+
+def _owner_case_checkpoint_key(scenario, iteration: int) -> str:
+    """生成逐例补试账本键，与波次指标及其他校准阶段隔离。"""
+    return f"concurrent_owner_case:{scenario.scenario_id}:{iteration}"
+
+
+def _run_concurrent_owner_case(client, base_args, scenario, iteration, folder, owner_eval) -> dict[str, Any]:
+    """用独立 SQLite 执行一个场景，并记录本次尝试专属的主模型计量。"""
+    case_client = ObservedLLMClient(client)
+    scenario_args = SimpleNamespace(**{**vars(base_args), "db_path": folder / "owner_live.sqlite3"})
+    started = time.perf_counter()
+    report = owner_eval.run_scenario(case_client, scenario_args, scenario, iteration=iteration)
+    metrics = case_client.metrics()
+    failure = report.get("eval_inconclusive")
+    if report["status"] == "blocked" and (not is_inconclusive(failure)
+            or metrics["failed_calls"] != int(failure["stage"] == "agent")):
+        # 主执行阶段的单个失败必须与用例已核实的暂态归因一致；判定器故障不计入主执行。
+        report.update(status="failed", unverified_retry_disposition=report.pop("eval_inconclusive", None))
+    return {**report, "execution_id": _owner_execution_id(scenario, iteration),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000), "owner_runtime_attempt": True,
+            "runtime_metrics": metrics, "model_call_latencies_ms": case_client.latencies_ms}
+
+
+def _checkpoint_owner_case(client, base_args, scenario, iteration, case_dir, owner_eval, *,
+                           defer_initial_retry: bool = False) -> dict[str, Any]:
+    """为同一场景保留所有尝试；判定器补试继续使用该场景已经冻结的业务证据。"""
+    def run(folder):
+        """主执行暂态故障仅在新沙盒重放同一场景。"""
+        # 各次重放单独计量供应商并发与 HTTP 尝试，避免复用客户端的累计快照重计。
+        runtime_client = client if defer_initial_retry else OpenAICompatibleAgentClient.from_env()
+        if runtime_client is None:
+            raise RuntimeError("owner retry model configuration is unavailable")
+        return _run_concurrent_owner_case(runtime_client, base_args, scenario, iteration, folder, owner_eval)
+
+    def resume(prior, _folder):
+        """只补判，沿用原主执行的用量与数据库，但本尝试不重复记主执行用量。"""
+        return {**owner_eval.resume_owner_judge(client, prior), "owner_runtime_attempt": False}
+
+    return checkpointed_case(_owner_case_checkpoint_key(scenario, iteration), run, case_dir=case_dir,
+                             resume_judge=resume, defer_initial_retry=defer_initial_retry)
+
+
+def _run_concurrent_owner_batch(observed, base_args, tasks, live_dir, workers, owner_eval, *,
+                                managed: bool = False) -> dict[str, Any]:
+    """共享客户端只观测原始并发波次；每个用例的补试预算由协调线程另行扣减。"""
+    live_dir.mkdir(parents=True, exist_ok=False)
+
+    def evaluate(scenario, iteration):
+        """真实场景共享客户端，隔离数据库路径与来源身份。"""
+        folder = live_dir / f"run_{iteration:02d}" / scenario.scenario_id
+        if managed:
+            return _checkpoint_owner_case(observed, base_args, scenario, iteration, folder, owner_eval,
+                                          defer_initial_retry=True)
+        return _run_concurrent_owner_case(observed, base_args, scenario, iteration, folder, owner_eval)
+
+    reports, errors = [], []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(copy_context().run, evaluate, scenario, iteration):
+                   _owner_execution_id(scenario, iteration) for scenario, iteration in tasks}
+        for future in as_completed(futures):
+            try:
+                reports.append(future.result())
+            except Exception as exc:
+                key = observed.config.api_key
+                error = f"{futures[future]}: {type(exc).__name__}: {exc}"
+                errors.append(error.replace(key, "[redacted]") if key else error)
+    reports.sort(key=lambda item: (item.get("scenario_id", ""), item.get("iteration", 0)))
+    if managed and observed.call_count != sum(report["runtime_metrics"]["call_count"] for report in reports):
+        # 波次文件提交之前若进程中断，不能用重启之后的局部峰值冒充原波次的并发证据。
+        errors.append("initial owner wave metrics do not cover all original calls")
+    return {"reports": reports, "errors": errors, "scenario_count": len(tasks),
+            "execution_ids": [_owner_execution_id(scenario, iteration) for scenario, iteration in tasks],
+            "runtime_metrics": observed.metrics(), "model_call_latencies_ms": observed.latencies_ms}
+
+
+def _initial_owner_wave_evidence(batches: list[dict]) -> list[dict]:
+    """用初始实测波次和原尝试记录证明重叠，补试结果只进入逐例最终报告。"""
+    return [{"wave_index": index, "execution_ids": batch["execution_ids"], "errors": batch["errors"],
+             "runtime_metrics": batch["runtime_metrics"], "initial_cases": [
+                 {key: report.get(key) for key in ("execution_id", "status", "attempt_dir")}
+                 for report in batch["reports"]]}
+            for index, batch in enumerate(batches, start=1)]
+
+
+def _concurrent_checkpoint_metrics(batches: list[dict], owner_reports: list[dict], extra_stages: list[dict],
+                                   scope: pathlib.Path, tasks: list[tuple]) -> dict:
+    """分别统计最终验收与实际全部调用，重叠峰值只引用真实的首轮并发波次。"""
+    evidence = [*owner_reports, *extra_stages]
+    units = [item["runtime_metrics"] for item in evidence]
+    counters = ("call_count", "failed_calls", "estimated_prompt_tokens")
+    wave_metrics = [item["runtime_metrics"] for item in batches]
+    provider = [unit["provider_concurrency"] for unit in [*wave_metrics, *units] if unit.get("provider_concurrency")]
+    owner_attempts = []
+    for scenario, iteration in tasks:
+        key = _owner_case_checkpoint_key(scenario, iteration)
+        for path in (scope / hashlib.sha256(key.encode()).hexdigest()).glob("*/case/eval_result.json"):
+            attempt = json.loads(path.read_text(encoding="utf-8"))
+            if attempt.get("owner_runtime_attempt") is True:
+                owner_attempts.append(attempt)
+    accepted = {item["execution_id"] for item in owner_reports if item["status"] == "passed"}
+    observed = {key: sum(item["runtime_metrics"][key] for item in owner_attempts) for key in counters}
+    observed["confirmed_recovered_failed_calls"] = sum(
+        item["runtime_metrics"]["failed_calls"] for item in owner_attempts
+        if item["execution_id"] in accepted and item["status"] == "blocked"
+        and is_inconclusive(item.get("eval_inconclusive")))
+    return {"measurement_scope": "shared_runtime_client_only", "independent_semantic_judge_included": False,
+            **{key: sum(unit[key] for unit in units) for key in counters},
+            "max_concurrent_client_calls": max((unit["max_concurrent_client_calls"]
+                                                for unit in [*wave_metrics, *units]), default=0),
+            "owner_wave_max_concurrent_client_calls": max((unit["max_concurrent_client_calls"]
+                                                          for unit in wave_metrics), default=0),
+            "model_call_latency_ms": latency_summary([latency for item in evidence
+                for latency in item["model_call_latencies_ms"]]),
+            "provider_concurrency_by_execution_unit": provider, "observed_owner_attempts": observed}
+
+
 def run_live_suite(
     work_dir: pathlib.Path,
     *,
@@ -1312,9 +1515,7 @@ def run_live_suite(
             "reason": "missing MAHJONG_LLM_API_KEY/DEEPSEEK_API_KEY or MAHJONG_LLM_MODEL",
         }
     observed = ObservedLLMClient(base_client)
-    live_dir = work_dir / "live"
-    shutil.rmtree(live_dir, ignore_errors=True)
-    live_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
     base_args = SimpleNamespace(
         db_path=None,
         max_tokens_per_call=max_tokens_per_call,
@@ -1332,46 +1533,85 @@ def run_live_suite(
     ]
     started = time.perf_counter()
 
-    def evaluate(scenario, iteration):
-        """只为执行轮次生成隔离路径，不改决定黄金期望映射的 scenario_id。"""
+    scope = scope_directory()
+    waves, extra_stages = [], []
+    active_revision, review_contract = {"status": "not_run"}, {"status": "not_run"}
+    pending = None
+    if scope is not None:
+        for offset in range(0, len(tasks), workers):
+            wave = tasks[offset:offset + workers]
+            evidence_path = scope / f"initial_owner_wave_{offset // workers + 1:03d}.json"
+            if evidence_path.exists():
+                initial = json.loads(evidence_path.read_text(encoding="utf-8"))
+                if initial["execution_ids"] != [_owner_execution_id(scenario, iteration) for scenario, iteration in wave]:
+                    raise ValueError("checkpointed owner wave has different case identities")
+            else:
+                wave_client = ObservedLLMClient(OpenAICompatibleAgentClient.from_env())
+                folder = pathlib.Path(tempfile.mkdtemp(prefix="owner_wave_", dir=work_dir)) / "live"
+                initial = _run_concurrent_owner_batch(wave_client, base_args, wave, folder, workers, owner_eval,
+                                                      managed=True)
+                write_json(evidence_path, initial)
+            waves.append(initial)
+            if initial["errors"] or any(report["status"] == "failed" for report in initial["reports"]):
+                break
+        final_reports = {report["execution_id"]: report for wave in waves for report in wave["reports"]}
+        initial_hard_passed = (len(final_reports) == len(tasks) and not any(wave["errors"] for wave in waves)
+            and all(report["status"] in {"passed", "blocked"} for report in final_reports.values()))
+        if initial_hard_passed:
+            for scenario, iteration in tasks:
+                execution_id = _owner_execution_id(scenario, iteration)
+                if final_reports[execution_id]["status"] != "blocked":
+                    continue
+                # 补试只打开该用例的账本。其余用例的最终结果及首轮并发指标已冻结。
+                result = _checkpoint_owner_case(base_client, base_args, scenario, iteration, work_dir, owner_eval)
+                final_reports[execution_id] = result
+                if result["status"] == "failed":
+                    pending = None
+                    break
+                if result["status"] == "blocked":
+                    pending = result["eval_inconclusive"]
+        reports = list(final_reports.values())
+        if initial_hard_passed and all(report["status"] == "passed" for report in reports):
+            for key, evaluate in (("active_input_revision", run_live_active_input_revision),
+                                  ("customer_visible_review_contract", run_live_customer_visible_review_contract)):
+                def execute(folder):
+                    """额外校准是独立硬断言，结果及指标分别封存。"""
+                    stage_client = ObservedLLMClient(OpenAICompatibleAgentClient.from_env())
+                    if key == "active_input_revision":
+                        result = evaluate(stage_client, base_args, folder)
+                    else:
+                        with defer_case_retries():
+                            result = evaluate(stage_client, base_args, folder, True)
+                    return {**result, "runtime_metrics": stage_client.metrics(),
+                            "model_call_latencies_ms": stage_client.latencies_ms}
 
-        scenario_started = time.perf_counter()
-        # 实时语义用例刻意复用同一会话标识，使断言贴近真实老板会话。
-        # 但各用例不能共享持久化状态，否则无关夹具会被视为同一客户的并发消息，
-        # 还可能让用例 A 的引用错误解析到用例 B 的历史。模型客户端仍然共享，
-        # 因而这里依旧能够测量真实模型服务调用的重叠情况。
-        scenario_args = SimpleNamespace(
-            **{
-                **vars(base_args),
-                "db_path": live_dir / f"run_{iteration:02d}" / "owner_live.sqlite3",
-            }
-        )
-        report = owner_eval.run_scenario(observed, scenario_args, scenario, iteration=iteration)
-        report["execution_id"] = f"{scenario.scenario_id}_run_{iteration}"
-        report["elapsed_ms"] = int((time.perf_counter() - scenario_started) * 1000)
-        return report
-
-    reports: list[dict[str, Any]] = []
-    execution_errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        future_to_id = {
-            pool.submit(evaluate, scenario, iteration): f"{scenario.scenario_id}_run_{iteration}"
-            for scenario, iteration in tasks
-        }
-        for future in as_completed(future_to_id):
-            try:
-                reports.append(future.result())
-            except Exception as exc:
-                execution_errors.append(f"{future_to_id[future]}: {type(exc).__name__}: {exc}")
+                resume = (lambda previous, folder: resume_active_revision_judgment(base_client, previous, folder)
+                          ) if key == "active_input_revision" else None
+                stage = checkpointed_case(key, execute, case_dir=work_dir / key, resume_judge=resume)
+                extra_stages.append(stage)
+                if key == "active_input_revision":
+                    active_revision = stage
+                else:
+                    review_contract = stage
+                if stage["status"] != "passed":
+                    pending = stage.get("eval_inconclusive")
+                    break
+        metrics = _concurrent_checkpoint_metrics(waves, reports, extra_stages, scope, tasks)
+    else:
+        waves = [_run_concurrent_owner_batch(observed, base_args, tasks,
+            pathlib.Path(tempfile.mkdtemp(prefix="owner_live_", dir=work_dir)) / "live", workers, owner_eval)]
+        reports = waves[0]["reports"]
+        active_revision = run_live_active_input_revision(observed, base_args, work_dir / "active_input_revision")
+        review_contract = run_live_customer_visible_review_contract(observed, base_args, work_dir / "customer_visible_review_contract", True)
+        metrics = observed.metrics()
+        metrics["owner_wave_max_concurrent_client_calls"] = waves[0]["runtime_metrics"]["max_concurrent_client_calls"]
+    execution_errors = [failure for wave in waves for failure in wave["errors"]]
     reports.sort(key=lambda item: (item.get("scenario_id", ""), item.get("iteration", 0)))
     passed_count = sum(1 for report in reports if report.get("status") == "passed")
     expected_count = len(tasks)
     scenario_latencies = [float(report.get("elapsed_ms", 0)) for report in reports]
     provider = base_client.config.provider
     model = base_client.config.model
-    active_revision = run_live_active_input_revision(observed, base_args, work_dir / "active_input_revision")
-    review_contract = run_live_customer_visible_review_contract(observed, base_args, work_dir / "customer_visible_review_contract", True)
-    metrics = observed.metrics()
     metrics["scenario_latency_ms"] = latency_summary(scenario_latencies)
     metrics["independent_semantic_judge"] = {
         "included_in_shared_runtime_metrics": False,
@@ -1384,15 +1624,21 @@ def run_live_suite(
     checks = [
         check("all_scenarios_returned", len(reports) == expected_count and not execution_errors, expected_count, len(reports)),
         check("all_scenarios_passed", passed_count == expected_count, expected_count, passed_count),
-        check("real_model_calls_overlapped", observed.max_active_calls >= min(2, workers), f">={min(2, workers)}", observed.max_active_calls),
-        check("no_model_call_failed", observed.failed_calls == 0, 0, observed.failed_calls),
+        check("real_model_calls_overlapped",
+            metrics.get("owner_wave_max_concurrent_client_calls", metrics["max_concurrent_client_calls"]) >= min(2, workers),
+            f">={min(2, workers)}", metrics.get("owner_wave_max_concurrent_client_calls", metrics["max_concurrent_client_calls"])),
+        check("no_model_call_failed", metrics["failed_calls"] == 0, 0, metrics["failed_calls"]),
         check("active_goal_revision_passed", active_revision.get("status") == "passed", "passed", active_revision.get("status")),
         check("customer_visible_review_contract_passed", review_contract.get("status") == "passed", "passed", review_contract.get("status")),
     ]
     return {
-        "status": "passed" if not execution_errors and all(item["passed"] for item in checks) else "failed",
+        "status": ("blocked" if is_inconclusive(pending)
+                   else "passed" if not execution_errors and all(item["passed"] for item in checks) else "failed"),
+        **({"eval_inconclusive": pending} if is_inconclusive(pending) else {}),
         "provider": provider,
         "model": model,
+        "repeat": max(1, repeats),
+        "workers": max(1, workers),
         "scenario_count": expected_count,
         "passed_count": passed_count,
         "failed_count": expected_count - passed_count,
@@ -1400,6 +1646,7 @@ def run_live_suite(
         "checks": checks,
         "errors": execution_errors,
         "metrics": metrics,
+        "initial_owner_waves": _initial_owner_wave_evidence(waves),
         "reports": reports,
         "recovery_summary": owner_eval.summarize_action_contract_recovery(reports),
         "active_input_revision": active_revision,
@@ -1436,6 +1683,7 @@ def print_summary(payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """保存确定性与真实并发证据；可续跑的传输中断由统一门禁识别。"""
     parser = argparse.ArgumentParser(description="Run deterministic and real-DeepSeek concurrency evaluations.")
     parser.add_argument("--mode", choices=["all", "deterministic", "live"], default="all")
     parser.add_argument("--operations", type=int, default=40)
@@ -1484,8 +1732,9 @@ def main(argv: list[str] | None = None) -> int:
     deterministic_payload = [result.to_dict() for result in deterministic_results]
     deterministic_passed = all(result.passed for result in deterministic_results)
     live_passed = live_result is None or live_result.get("status") == "passed"
+    blocked = deterministic_passed and live_result is not None and live_result.get("status") == "blocked"
     payload = {
-        "status": "passed" if deterministic_passed and live_passed else "failed",
+        "status": "blocked" if blocked else "passed" if deterministic_passed and live_passed else "failed",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "mode": args.mode,
         "configuration": {
@@ -1498,10 +1747,10 @@ def main(argv: list[str] | None = None) -> int:
         "live": live_result,
     }
     args.report_path.parent.mkdir(parents=True, exist_ok=True)
-    args.report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json(args.report_path, payload)
     print_summary(payload)
     print(f"report: {args.report_path}")
-    return 1 if args.strict and payload["status"] != "passed" else 0
+    return BLOCKED_EXIT_CODE if blocked else int(args.strict and payload["status"] != "passed")
 
 
 if __name__ == "__main__":

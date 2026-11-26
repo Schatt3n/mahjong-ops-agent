@@ -218,6 +218,26 @@ def test_new_input_wins_before_delivery_claim_and_old_reply_cannot_revive(store)
     assert not store.claim_assistant_reply_delivery("conversation", trace_id="unknown")
 
 
+def test_native_delivery_claim_checks_unrouted_input_in_same_transaction(store) -> None:
+    """等候路由的同一原生会话输入已能阻止交付，其他会话的待办不影响当前交付。"""
+    store.append_assistant_turn("conversation", "尚未发出的微信回复", "reply", metadata={
+        "delivery_status": "pending_operator_send", "conversation_version": 0,
+    })
+    observation = {"channel": "agent-wechat", "source_message_id": "next", "conversation_id": "conversation",
+                   "trace_id": "ingress", "route_mode": "ingress_queue"}
+    store.enqueue_channel_ingress(observation)
+    store.enqueue_channel_ingress({**observation, "source_message_id": "elsewhere", "conversation_id": "other"})
+    assert not store.claim_assistant_reply_delivery("conversation", trace_id="reply", pending_ingress_channel="agent-wechat")
+    assert store.recent_turns("conversation")[-1].metadata["delivery_status"] == "pending_operator_send"
+    store.upsert_channel_observation({**observation, "route_mode": "filtered"})
+    assert store.claim_assistant_reply_delivery("conversation", trace_id="reply", pending_ingress_channel="agent-wechat")
+    assert store.mark_assistant_reply_delivery_unsuccessful("conversation", trace_id="reply", state="needs_review")
+    assert store.mark_assistant_reply_delivery_unsuccessful("conversation", trace_id="reply", state="needs_review")
+    assert not store.claim_assistant_reply_delivery("conversation", trace_id="reply", pending_ingress_channel="agent-wechat")
+    assert not store.mark_assistant_reply_delivered("conversation", trace_id="reply")
+    assert store.recent_turns("conversation")[-1].metadata["delivery_status"] == "needs_review"
+
+
 def test_source_batch_version_is_checked_even_when_conversation_version_is_current(store) -> None:
     """较晚捕获的会话版本不能洗白已过期 batch 的待交付来源。"""
     from datetime import timedelta

@@ -72,6 +72,86 @@ def count_full_contracts(value, contract):
     return 0
 
 
+def request_contract(messages):
+    assert messages[0]['role'] == 'system'
+    _, marker, contract_section = messages[0]['content'].partition('\n【主 Agent 请求合同】\n')
+    assert marker
+    return json.loads(contract_section.split('\n', 1)[1])
+
+
+def test_main_request_prefix_is_stable_across_customers_steps_and_channel_constraints(store):
+    trace = InMemoryTraceRecorder()
+    builder = AgentContextBuilder(store, ToolGateway(store))
+    lifecycle = ContextLifecycleManager(builder, trace)
+    customer = UserMessage(conversation_id='alice-private', sender_id='alice', sender_name='甲',
+        text='ONLY_ALICE_MESSAGE', message_id='alice-inbound')
+    group_customer = UserMessage(conversation_id='group:bob', sender_id='bob', sender_name='乙',
+        text='ONLY_BOB_MESSAGE', message_id='bob-inbound',
+        metadata={'source': 'group', 'reply_constraints': {'max_length': 17, 'no_private_info': True}})
+    store.append_user_turn(customer, 'alice-history')
+    store.append_user_turn(group_customer, 'bob-history')
+    first = lifecycle.build_and_trace_context(customer, trace_id='alice-first', pending_tool_results=[],
+        turn_tool_evidence=[], run_id='alice-run', run_version=0, step_index=1)
+    result = query_result()
+    hint = '继续处理最近反馈，先核对已有事实。'
+    step_context = {'trace_id': 'alice-next', 'pending_tool_results': [result], 'turn_tool_evidence': [result],
+                    'run_id': 'alice-run', 'run_version': 0, 'step_index': 2, 'progress_hint': hint}
+    next_step = lifecycle.build_and_trace_context(customer, **step_context)
+    next_step, transition = lifecycle.summarize_and_rebuild_context_if_needed(
+        customer, built=next_step, budget=TokenBudget(max_tokens_per_call=64000), **step_context)
+    grouped = builder.build(group_customer, trace_id='bob-first')
+
+    assert transition is None
+    assert first.messages[0] == next_step.messages[0] == grouped.messages[0]
+    keys = ('output_contract', 'planning_contract', 'available_tools')
+    contract = request_contract(first.messages)
+    assert tuple(contract) == keys
+    assert contract == {key: first.payload[key] for key in keys}
+    assert next_step.messages[1] == {'role': 'system', 'content': hint}
+    assert grouped.messages[1]['role'] == 'system'
+    assert '17 个中文字符' in grouped.messages[1]['content']
+    for context, text, foreign_text in ((first, customer.text, group_customer.text),
+                                        (next_step, customer.text, group_customer.text),
+                                        (grouped, group_customer.text, customer.text)):
+        assert context.messages[-1]['role'] == 'user'
+        sent = json.loads(context.messages[-1]['content'])
+        assert tuple(sent)[:3] == ('current_message', 'recent_conversation', 'explicit_task_facts')
+        assert sent['current_message']['text'] == text
+        assert set(keys).isdisjoint(sent)
+        assert text not in context.messages[0]['content']
+        assert all(foreign_text not in message['content'] for message in context.messages)
+    audit, initial, compacted = [
+        event.content for event in trace.get_trace('alice-next')
+        if event.step in {'context_built', 'llm_prompt', 'llm_prompt_after_context_compaction'}
+    ]
+    assert audit == next_step.payload
+    assert initial['messages'][0] == compacted['messages'][0]
+    assert json.loads(initial['messages'][-1]['content'])['previous_tool_results'][0]['result']
+    assert compacted['messages'] == next_step.messages
+
+
+def test_main_request_prefix_respects_unresolved_quote_tool_visibility(store):
+    builder = AgentContextBuilder(store, ToolGateway(store))
+    message = UserMessage(conversation_id='private', sender_id='customer', sender_name='本人',
+                          text='我可以', message_id='source')
+    default = builder.build(message, trace_id='without-quote')
+    quoted = builder.build(UserMessage(
+        conversation_id='private', sender_id='customer', sender_name='本人',
+        text='我可以', message_id='quoted-source', quoted_message=QuotedMessageRef('missing-quote')),
+        trace_id='with-unresolved-quote')
+    unrestricted = request_contract(default.messages)
+    restricted = request_contract(quoted.messages)
+    assert unrestricted['output_contract'] == restricted['output_contract']
+    assert unrestricted['planning_contract'] == restricted['planning_contract']
+    assert restricted['available_tools'] == quoted.payload['available_tools']
+    visible_names = {tool['name'] for tool in restricted['available_tools']}
+    assert 'search_current_games' in visible_names
+    assert {tool['name'] for tool in unrestricted['available_tools']} - visible_names == {
+        'join_game', 'record_candidate_reply', 'record_registered_member_withdrawal',
+    }
+    assert 'available_tools' not in json.loads(quoted.messages[-1]['content'])
+
+
 def test_latest_feedback_references_complete_evidence_below_total_budget(store):
     result = query_result()
     original = deepcopy(result.to_dict())
@@ -96,8 +176,9 @@ def test_shared_query_contract_is_single_definition_and_dynamic_history_is_prese
     current = query_result('read-now', pool_empty=False)
     built, sent, before, _, _ = transported(store, [current], [current])
     shared = game_query_strategy_contract()
-    assert sent['planning_contract']['game_query_strategy_contract'] == shared
-    assert count_full_contracts(sent, shared) == 1
+    fixed = request_contract(built.messages)
+    assert fixed['planning_contract']['game_query_strategy_contract'] == shared
+    assert count_full_contracts([fixed, sent], shared) == 1
     old = json.loads(next(turn['content'] for turn in sent['recent_conversation'] if turn['role'] == 'tool'))[0]
     for actual, expected in ((old, history), (sent['turn_tool_evidence'][0], current)):
         reply = actual['result']['customer_reply_contract']
@@ -121,9 +202,9 @@ def test_nonidentical_shared_contract_is_never_replaced_by_current_definition(st
     custom = deepcopy(result.result['customer_reply_contract']['game_query_strategy_contract'])
     custom['query_result_reporting'] = '本次范围只涉及原门店，不能扩大到其他门店'
     result.result['customer_reply_contract']['game_query_strategy_contract'] = custom
-    _, sent, _, _, _ = transported(store, [result], [result])
+    built, sent, _, _, _ = transported(store, [result], [result])
     assert sent['turn_tool_evidence'][0]['result']['customer_reply_contract']['game_query_strategy_contract'] == custom
-    assert sent['planning_contract']['game_query_strategy_contract'] == game_query_strategy_contract()
+    assert request_contract(built.messages)['planning_contract']['game_query_strategy_contract'] == game_query_strategy_contract()
 
 
 def test_failed_feedback_reference_keeps_rejection_source_and_recovery_information(store):
@@ -242,7 +323,7 @@ def test_selected_history_survives_transport_and_total_budget_without_false_summ
     assert actual['call_id'] == history.call_id
     assert actual['result']['requirement'] == history.result['requirement']
     assert actual['result']['customer_reply_contract']['evidence_scope'] == history.result['customer_reply_contract']['evidence_scope']
-    assert count_full_contracts(sent, game_query_strategy_contract()) == 1
+    assert count_full_contracts([request_contract(first.messages), sent], game_query_strategy_contract()) == 1
     assert first.payload == before and 'PRIVATE_FOREIGN_QUERY' not in json.dumps(sent, ensure_ascii=False)
     sent_tokens = sum(estimate_tokens(message['content']) for message in first.messages)
     threshold = (original_tokens + sent_tokens) // 2
@@ -257,7 +338,7 @@ def test_selected_history_survives_transport_and_total_budget_without_false_summ
         budget=budget, summary_manager=NoUnneededSummary())
     assert final.payload == audit_before
     assert resent['recent_conversation'] == sent['recent_conversation']
-    assert count_full_contracts(resent, game_query_strategy_contract()) == 1
+    assert count_full_contracts([request_contract(final.messages), resent], game_query_strategy_contract()) == 1
     assert sum(estimate_tokens(message['content']) for message in final.messages) < budget
     events = trace.get_trace('current-trace')
     assert sum(event.step == 'context_built' for event in events) == 1

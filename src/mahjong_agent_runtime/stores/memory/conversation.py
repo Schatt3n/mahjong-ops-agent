@@ -111,9 +111,13 @@ class InMemoryConversationStoreMixin:
                 return {"trace_id": turn.trace_id, "preparation": deepcopy(turn.metadata["input_receipt_preparation"])}
         return None
 
-    def claim_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str) -> bool:
+    def claim_assistant_reply_delivery(
+        self, conversation_id: str, *, trace_id: str, pending_ingress_channel: str | None = None,
+    ) -> bool:
         """在同一锁内核对回复版本并声明交付开始，未来输入不追溯已经开始的交付。"""
         with self._lock:
+            if pending_ingress_channel and self.has_queued_channel_ingress(pending_ingress_channel, conversation_id):
+                return False
             for turn in self.turns.get(conversation_id, []):
                 if turn.role != ConversationRole.ASSISTANT or turn.trace_id != trace_id:
                     continue
@@ -140,15 +144,26 @@ class InMemoryConversationStoreMixin:
 
     def mark_assistant_reply_delivered(self, conversation_id: str, *, trace_id: str) -> bool:
         """按会话和精确 trace 确认已展示回复，已过期轮次不复活，重复确认保持幂等。"""
-        delivered = False
+        return self._finish_assistant_reply_delivery(conversation_id, trace_id=trace_id, state="delivered")
+
+    def mark_assistant_reply_delivery_unsuccessful(self, conversation_id: str, *, trace_id: str, state: str) -> bool:
+        """为已开始交付的回复记录不能重试的结果，未知状态保留给人工核对。"""
+        if state not in {"failed", "withheld", "needs_review"}:
+            raise ValueError("invalid unsuccessful reply delivery state")
+        return self._finish_assistant_reply_delivery(conversation_id, trace_id=trace_id, state=state)
+
+    def _finish_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str, state: str) -> bool:
+        """用精确轮次写入交付终态，只有正向回执允许直接确认尚未声明的待发轮次。"""
+        eligible = {"pending_operator_send", "dispatching"} if state == "delivered" else {"dispatching"}
+        finished = False
         with self._lock:
             for turn in self.turns.get(conversation_id, []):
                 if turn.role != ConversationRole.ASSISTANT or turn.trace_id != trace_id:
                     continue
-                if turn.metadata.get("delivery_status") in {"pending_operator_send", "dispatching"}:
-                    turn.metadata = {**turn.metadata, "delivery_status": "delivered"}
-                delivered = delivered or turn.metadata.get("delivery_status") == "delivered"
-        return delivered
+                if turn.metadata.get("delivery_status") in eligible:
+                    turn.metadata = {**turn.metadata, "delivery_status": state}
+                finished = finished or turn.metadata.get("delivery_status") == state
+        return finished
 
     def append_user_turn(self, message, trace_id: str) -> None:
         """追加用户turn，保留原有时间顺序和审计信息。"""

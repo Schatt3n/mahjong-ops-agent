@@ -7,10 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 from mahjong_agent_runtime import AgentLLMConfig
+from mahjong_agent_runtime.llm import external_call_deadline
 
 SCRIPTS=Path(__file__).resolve().parents[1]/'scripts'
 if str(SCRIPTS) not in sys.path:sys.path.insert(0,str(SCRIPTS))
 import reply_money_eval as money
+import eval_retry
 
 
 def candidate(*,stake='1',cap=256,extra=False,stake_range=None):
@@ -23,7 +25,7 @@ def candidate(*,stake='1',cap=256,extra=False,stake_range=None):
              'result':{'matches':games}}]
 
 
-def run_check(monkeypatch,reply,*,scope='existing_option_fact',role='stake',form=None,tools=None,outputs=None):
+def run_check(monkeypatch,reply,*,scope='existing_option_fact',role='stake',form=None,tools=None,outputs=None,frozen_check=None):
     """固定作用域输出只验证合同及硬比较，不冒充真实语言分类能力通过。"""
     calls=[];queue=list(outputs) if outputs is not None else None
     class Judge:
@@ -42,7 +44,8 @@ def run_check(monkeypatch,reply,*,scope='existing_option_fact',role='stake',form
     monkeypatch.setattr(money,'OpenAICompatibleAgentClient',Judge)
     client=SimpleNamespace(config=AgentLLMConfig(api_key='unit-only',model='unit-model',base_url='https://example.invalid'))
     source=candidate() if tools is None else tools
-    result=money.check_reply_money_facts(client,reply=reply,tool_results=source,trace_id='money-test',timeout_seconds=1)
+    result=money.check_reply_money_facts(client,reply=reply,tool_results=source,trace_id='money-test',timeout_seconds=1,
+                                       frozen_check=frozen_check)
     return result,calls,source
 
 
@@ -61,6 +64,37 @@ def test_literal_two_is_not_replaced_by_truth_one_and_hard_mismatch_rejects(monk
     assert row['scope']=='existing_option_fact' and row['role']=='stake'
     assert row['values']==['2'] and row['expected']['values']==['1'] and row['game_id']=='private-candidate-one'
     assert money.validate_money_fact_check(result,reply=reply,tool_results=tools,trace_id='money-test')
+
+
+def test_resumed_money_check_keeps_original_candidate_and_valid_conflict(monkeypatch, tmp_path):
+    """只有原候选可继续判断，实际收到的有效金额冲突始终保留。"""
+    monkeypatch.setattr(eval_retry, 'sleep', lambda _seconds: None)
+    error = RuntimeError('test timed out')
+    error._completion_diagnostics = {'schema_version': 1, 'route': 'primary', 'error_type': 'RuntimeError',
+        'attempts': [{'failure_reason': 'timeout_reading_response_body'}]}
+    deadline = external_call_deadline.set(None)
+    try:
+        monkeypatch.setattr(eval_retry, 'current_budget', lambda: first_budget)
+        first_budget = eval_retry.CaseBudget(tmp_path, 0)
+        frozen, calls, actual = run_check(monkeypatch, '这局2块。', outputs=[error] * 4)
+        assert len(calls) == 4 and calls == [calls[0]] * 4
+        assert frozen['status'] == 'error' and frozen['blocks'] is True
+        assert frozen['scope_assessment']['attempts'] == []
+        assert frozen['eval_inconclusive']['stage'] == 'judge'
+    finally:
+        external_call_deadline.reset(deadline)
+    deadline = external_call_deadline.set(None)
+    try:
+        next_budget = eval_retry.CaseBudget(tmp_path, 1)
+        monkeypatch.setattr(eval_retry, 'current_budget', lambda: next_budget)
+        tampered, tampered_calls, _ = run_check(monkeypatch, '这局2块。', tools=candidate(stake='2'), frozen_check=frozen)
+        assert not tampered_calls and tampered['status'] == 'source_error' and tampered['blocks'] is True
+        result, resumed_calls, _ = run_check(monkeypatch, '这局2块。', tools=actual, frozen_check=frozen)
+        assert resumed_calls == [calls[0]] and result['status'] == 'conflict' and result['blocks'] is True
+        assert 'eval_inconclusive' not in result and len(result['scope_assessment']['attempts']) == 1
+        assert money.validate_money_fact_check(result, reply='这局2块。', tool_results=actual, trace_id='money-test')
+    finally:
+        external_call_deadline.reset(deadline)
 
 
 @pytest.mark.parametrize('reply',['晚上七点三缺一，你打吗？','房间有空，你几个人，打多大？'])

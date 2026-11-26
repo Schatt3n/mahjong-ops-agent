@@ -22,16 +22,105 @@ def test_partial_usage_deduplicates_copies_and_preserves_unknowns():
         {"estimated": {"usage": {"prompt_tokens": 900}}},
     ]
     actual = gate.observed_scope_usage(payload)
-    assert actual == {
-        "coverage": "partial_scope_report_diagnostics", "observed_attempts": 4,
-        "attempts_without_response_id": 1, "observed_provider_responses": 2,
-        "observed_prompt_tokens": 11, "observed_completion_tokens": 7,
-        "responses_without_verified_prompt_tokens": 0, "responses_without_verified_completion_tokens": 1,
+    assert actual["coverage"] == "partial_scope_report_diagnostics"
+    assert actual["observed_attempts"] == 4
+    assert actual["attempts_without_response_id"] == 1
+    assert actual["observed_provider_responses"] == 2
+    assert actual["observed_prompt_tokens"] == 11
+    assert actual["observed_completion_tokens"] == 7
+    assert actual["responses_without_verified_prompt_tokens"] == 0
+    assert actual["responses_without_verified_completion_tokens"] == 1
+    assert actual["prompt_cache"] == {
+        "observed_hit_tokens": None, "observed_miss_tokens": None,
+        "covered_prompt_tokens": None, "hit_rate": None,
+        "responses_with_verified_cache_usage": 0, "responses_without_verified_cache_usage": 2,
     }
     first["usage"]["completion_tokens"] = 8
     payload.append({"completion_diagnostics": diagnostics(
         {**first, "usage": {"prompt_tokens": True, "completion_tokens": 7}})})
     assert gate.observed_scope_usage(payload)["observed_completion_tokens"] is None
+
+
+def test_cache_usage_uses_same_response_set_for_token_weighted_hit_rate():
+    deepseek = {"provider": "deepseek", "requested_model": "flash", "attempts": [
+        {"attempt_id": "a", "response_id": "r1", "returned_model": "actual-model-a", "usage": {
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 80}}},
+        {"attempt_id": "b", "response_id": "r2", "usage": {"prompt_tokens": 50}},
+        {"attempt_id": "c", "response_id": "r3", "returned_model": "actual-model-a", "usage": {
+            "prompt_tokens": 20, "prompt_cache_miss_tokens": 5}},
+    ]}
+    fallback = {"provider": "openai", "attempts": [
+        {"attempt_id": "d", "response_id": "r1", "returned_model": "actual-model-b", "usage": {
+            "prompt_tokens": 10, "completion_tokens": 3,
+            "prompt_tokens_details": {"cached_tokens": 0}}},
+    ]}
+    payload = [
+        {"completion_diagnostics": deepseek},
+        {"completion_diagnostics": {"route": "fallback", "primary": deepseek, "fallback": fallback}},
+    ]
+    actual = gate.observed_scope_usage(payload)
+    assert actual["observed_attempts"] == 4
+    assert actual["observed_provider_responses"] == 4
+    assert actual["observed_prompt_tokens"] == 180
+    assert actual["observed_completion_tokens"] == 8
+    assert actual["prompt_cache"] == {
+        "observed_hit_tokens": 95, "observed_miss_tokens": 35,
+        "covered_prompt_tokens": 130, "hit_rate": 95 / 130,
+        "responses_with_verified_cache_usage": 3, "responses_without_verified_cache_usage": 1,
+    }
+    unknown, model_a, model_b = actual["by_provider_model"]
+    assert (unknown["provider"], unknown["returned_model"]) == ("deepseek", None)
+    assert unknown["observed_prompt_tokens"] == 50
+    assert unknown["prompt_cache"]["observed_hit_tokens"] is None
+    assert (model_a["provider"], model_a["returned_model"]) == ("deepseek", "actual-model-a")
+    assert model_a["prompt_cache"]["hit_rate"] == 95 / 120
+    assert (model_b["provider"], model_b["returned_model"]) == ("openai", "actual-model-b")
+    assert model_b["prompt_cache"]["hit_rate"] == 0
+
+
+@pytest.mark.parametrize("usages", [
+    [{"prompt_tokens": 100, "prompt_cache_hit_tokens": 80, "prompt_tokens_details": {"cached_tokens": 75}}],
+    [{"prompt_tokens": 100, "prompt_cache_hit_tokens": 80}, {"prompt_tokens_details": {"cached_tokens": 75}}],
+    [{"prompt_tokens": 100, "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 30}],
+    [{"prompt_tokens": 100, "prompt_cache_hit_tokens": 80}, {"prompt_tokens": 99}],
+    [{"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 101}}],
+    [{"prompt_tokens": 100, "prompt_cache_miss_tokens": 101}],
+    [{"prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 20}],
+    [{"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": True}}],
+])
+def test_invalid_or_contradictory_cache_usage_is_unknown(usages):
+    payload = [
+        {"completion_diagnostics": {"provider": "unit", "attempts": [
+            {"attempt_id": "same-attempt", "response_id": "same-response", "usage": usage},
+        ]}}
+        for usage in usages
+    ]
+    actual = gate.observed_scope_usage(payload)
+    assert actual["observed_provider_responses"] == 1
+    assert actual["prompt_cache"] == {
+        "observed_hit_tokens": None, "observed_miss_tokens": None,
+        "covered_prompt_tokens": None, "hit_rate": None,
+        "responses_with_verified_cache_usage": 0, "responses_without_verified_cache_usage": 1,
+    }
+
+
+def test_zero_cache_usage_is_verified_without_dividing_by_zero():
+    diagnostics = {"provider": "unit", "attempts": [{
+        "attempt_id": "a", "response_id": "r", "returned_model": "model-a",
+        "usage": {"prompt_tokens": 0, "prompt_cache_hit_tokens": 0},
+    }]}
+    payload = [{"completion_diagnostics": diagnostics}, {"completion_diagnostics": {
+        **diagnostics, "attempts": [{**diagnostics["attempts"][0], "returned_model": "model-b"}],
+    }}]
+    actual = gate.observed_scope_usage(payload)
+    assert actual["prompt_cache"] == {
+        "observed_hit_tokens": 0, "observed_miss_tokens": 0,
+        "covered_prompt_tokens": 0, "hit_rate": None,
+        "responses_with_verified_cache_usage": 1, "responses_without_verified_cache_usage": 0,
+    }
+    assert [group["returned_model"] for group in actual["by_provider_model"]] == [None]
 
 
 @pytest.mark.parametrize("return_error", [False, True])
@@ -42,10 +131,11 @@ def test_main_records_usage_on_success_or_error(monkeypatch, tmp_path, return_er
     monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
     monkeypatch.setattr(gate, "create_run_directory", lambda: tmp_path)
     monkeypatch.setattr(gate, "load_dotenv_defaults", lambda path: None)
+    monkeypatch.setattr(gate, "model_evidence", lambda: {})
     monkeypatch.setattr(gate, "build_eval_plan", lambda args, run_dir: plan)
     monkeypatch.setattr(gate, "validate_scope_report", lambda phase: None)
 
-    def run(command, log_path):
+    def run(command, log_path, *, retry_scope=None, retry_window=0):
         path.write_text(json.dumps({"completion_diagnostics": {"provider": "unit", "attempts": [
             {"attempt_id": "a", "response_id": "response", "usage": {"prompt_tokens": 10}}]}}))
         if return_error:

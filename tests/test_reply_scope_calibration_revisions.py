@@ -105,8 +105,10 @@ def test_original_rule_overlap_passes_calibration_without_leaking_revision_label
         result = real_assess(client, **kwargs)
         if kwargs['evidence']['reply'] == '晚上七点2块三缺一，你打吗？':
             next(item for item in result['criteria'] if item['id'] == EXTRA)['passed'] = False
+            numbers = {criterion: number for number, criterion in
+                       enumerate(inquiry._semantic_criteria_ids(kwargs['expectation']), start=1)}
             raw = json.dumps({'reason':result['reason'],'criteria':[
-                {'id':item['id'],"verdict":("violated" if not item['passed'] else "clear"),'reason':item['reason']}
+                {'id':numbers[item['id']],"verdict":("violated" if not item['passed'] else "clear"),'reason':item['reason']}
                 for item in result['criteria']]},ensure_ascii=False)
             result['raw_response'] = raw
             actual = semantic_http_completion(raw, config=inquiry.make_semantic_judge_config(client.config, judge_transport=result["judge_transport"]),

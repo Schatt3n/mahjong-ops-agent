@@ -312,7 +312,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
                 "required": ["game_id", "customer_id", "display_name"],
                 "additionalProperties": False,
                 "properties": {
-                    "game_id": non_empty_string,
+                    "game_id": {**non_empty_string, "description": "逐字符复制客户所确认选项在真实查询回执中的完整牌局 ID。"},
                     "customer_id": non_empty_string,
                     "display_name": non_empty_string,
                     "seat_count": {"type": "integer", "minimum": 1, "maximum": 4},

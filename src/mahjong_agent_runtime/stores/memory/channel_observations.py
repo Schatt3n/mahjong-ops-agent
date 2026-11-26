@@ -71,6 +71,15 @@ class InMemoryChannelObservationsStoreMixin:
             record = self.channel_observations.get(f"{channel}:{source_message_id}")
             return deepcopy(record) if record is not None else None
 
+    def has_queued_channel_ingress(self, channel: str, conversation_id: str) -> bool:
+        """判断指定会话是否仍有已接收、尚未完成路由的原始消息。"""
+        with self._lock:
+            return any(
+                row["channel"] == channel and row["conversation_id"] == conversation_id
+                and row["route_mode"] == "ingress_queue"
+                for row in self.channel_observations.values()
+            )
+
     def list_channel_observations(
         self,
         *,

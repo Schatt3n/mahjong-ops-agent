@@ -5,11 +5,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from typing import Any
 
 from ..budget import TokenBudget
 from ..domains.context_builders import AgentContextBuilder, BuiltContext
+from ..domains.context_builders.builder import main_agent_user_message
 from ..domains.context_builders.tool_results import (
     reference_duplicate_latest_tool_results,
     reference_shared_query_contracts,
@@ -79,13 +79,8 @@ class ContextLifecycleManager:
             # 只提升本步正式合同错误的修复提示。原始提案仍是未执行的审计证据，绝不在这里改写工具。
             built.messages[0] = {**built.messages[0], "content": _TOOL_PHASE_RETRY + "\n\n" + built.messages[0]["content"]}
         if progress_hint:
-            if built.messages and built.messages[0].get("role") == "system":
-                built.messages[0] = {
-                    **built.messages[0],
-                    "content": built.messages[0].get("content", "").rstrip() + "\n\n" + progress_hint,
-                }
-            else:
-                built.messages.insert(0, {"role": "system", "content": progress_hint})
+            # 提示仍是可信的系统指令，但步骤变化不能改写可跨请求复用的首条系统消息。
+            built.messages.insert(1, {"role": "system", "content": progress_hint})
             self.trace_recorder.record(
                 trace_id,
                 "agent_progress_hint_injected",
@@ -263,14 +258,8 @@ class ContextLifecycleManager:
                 "latest_tool_results_reference_source": "turn_tool_evidence",
                 "shared_query_contract_reference_count": contract_count,
             }
-        for index in range(len(built.messages) - 1, -1, -1):
-            if built.messages[index].get("role") != "user":
-                continue
-            built.messages[index] = {
-                **built.messages[index],
-                "content": json.dumps(transport_payload, ensure_ascii=False, sort_keys=True),
-            }
-            break
+        # 构建器保证末条消息是动态用户上下文；压缩结果仍引用首条系统消息的合同。
+        built.messages = [*built.messages[:-1], main_agent_user_message(transport_payload)]
         compacted_estimated = sum(
             estimate_tokens(item.get("content", ""))
             for item in built.messages

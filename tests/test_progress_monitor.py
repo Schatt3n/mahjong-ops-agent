@@ -170,7 +170,7 @@ def test_runtime_feeds_progress_guard_back_to_model_and_aborts_repeated_loop() -
 
     assert result.final_reply == "这边暂时没处理好。"
     assert len(client.calls) == 3
-    third_payload = json.loads(client.calls[2]["messages"][1]["content"])
+    third_payload = json.loads(client.calls[2]["messages"][-1]["content"])
     assert any(item["name"] == "agent_progress_guard" for item in third_payload["previous_tool_results"])
 
     events = runtime.trace_recorder.get_trace("trace_progress_loop_runtime")
@@ -231,21 +231,24 @@ def test_runtime_injects_progress_hint_from_second_private_step() -> None:
     )
 
     assert result.final_reply == "现在没有。"
-    marker = "\n[执行进度] 已执行"
-    assert not any(marker in item["content"] for item in client.calls[0]["messages"])
+    marker = "[执行进度] 已执行"
+    first_messages = client.calls[0]["messages"]
+    second_messages = client.calls[1]["messages"]
+    assert first_messages[0] == second_messages[0]
+    assert not any(item["content"].startswith(marker) for item in first_messages)
     hints = [
-        item["content"]
-        for item in client.calls[1]["messages"]
-        if marker in item["content"]
+        item for item in second_messages
+        if item["content"].startswith(marker)
     ]
-    assert len(hints) == 1
-    assert "已执行 1 步" in hints[0]
+    assert hints == [second_messages[1]]
+    assert hints[0]["role"] == "system"
+    assert "已执行 1 步" in hints[0]["content"]
     prompt_events = [
         event for event in runtime.trace_recorder.get_trace("trace_progress_hint_private")
         if event.step == "llm_prompt"
     ]
     assert any(
-        marker in item["content"]
+        item["content"].startswith(marker)
         for item in prompt_events[1].content["messages"]
     )
 
@@ -283,7 +286,7 @@ def test_runtime_does_not_inject_progress_hint_into_group_agent_loop() -> None:
 
     assert len(client.calls) == 2
     assert not any(
-        "\n[执行进度] 已执行" in item["content"]
+        item["content"].startswith("[执行进度] 已执行")
         for call in client.calls
         for item in call["messages"]
     )

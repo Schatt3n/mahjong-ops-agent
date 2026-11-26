@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime import (  # noqa: E402
     AgentRuntime,
@@ -30,8 +32,11 @@ from mahjong_agent_runtime import (  # noqa: E402
     UserMessage,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
-from mahjong_agent_runtime.llm import completion_diagnostics  # noqa: E402
+from mahjong_agent_runtime.llm import ExternalCallBudgetExhausted, completion_diagnostics, eval_transport_failure  # noqa: E402
 from mahjong_agent_runtime.tracing import JsonlTraceRecorder  # noqa: E402
+from eval_retry import (  # noqa: E402
+    BLOCKED_EXIT_CODE, checkpointed_case, current_budget, is_inconclusive, latest_agent_transport_failure,
+)
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
     BoardEngine,
     BoardItem,
@@ -124,6 +129,17 @@ def _partial_state(store: Any, room_id: str | None) -> dict[str, Any]:
     return {"domain_counts": {"games": len(store.games), "invites": len(store.invite_drafts),
             "outbounds": len(store.outbound_message_drafts), "scheduled_tasks": len(store.scheduled_tasks)},
             "board_items": [project_board_item(item) for item in board.items] if board else []}
+
+
+def _classification_transport_failure(exc: Exception, counting: CountingClient | None) -> dict[str, Any] | None:
+    """仅接受首个分类调用的传输失败；已有模型响应或本地业务异常应继续阻断。"""
+    budget = current_budget()
+    if budget is None or counting is None or len(counting.calls) != 1 or counting.calls[0]["status"] != "error":
+        return None
+    failure = budget.last_failure if isinstance(exc, ExternalCallBudgetExhausted) else eval_transport_failure(exc)
+    if failure and failure.get("retryable") is True:
+        return {**failure, "stage": "agent"}
+    return None
 
 
 @dataclass(slots=True)
@@ -326,12 +342,15 @@ class RealGroupChatFlowEvaluator:
         started = time.perf_counter()
         reports = []
         for index, record in enumerate(records, start=1):
-            case_dir = None
+            case_dir = self.evidence_dir / f"case_{index:04d}" if self.evidence_dir is not None else None
             try:
-                if self.evidence_dir is not None:
-                    case_dir = self.evidence_dir / f"case_{index:04d}"
-                    case_dir.mkdir(exist_ok=False)
-                item = self.evaluate_case(record, evidence_dir=case_dir)
+                if self.llm_client is not None and case_dir is not None:
+                    item = checkpointed_case(record["id"], lambda directory: self._evaluate_archived_case(record, directory),
+                                             case_dir=case_dir)
+                elif case_dir is not None:
+                    item = self._evaluate_archived_case(record, case_dir)
+                else:
+                    item = self.evaluate_case(record)
             except Exception as exc:
                 # 包括用例包装或留证失败也必须失败，不能用其余断言成功掩盖异常。
                 item = {"case_id": record.get("id"), "case_type": record.get("case_type"), "status": "failed",
@@ -339,6 +358,8 @@ class RealGroupChatFlowEvaluator:
             reports.append(item)
             if self.evidence_dir is not None:
                 _write_evidence(self.evidence_dir / "progress.json", {"status": "running", "cases": reports}, _configured_credentials(self.llm_client))
+            if is_inconclusive(item.get("eval_inconclusive")):
+                break
         executed = [item for item in reports if item["status"] != "skipped"]
         passed = [item for item in executed if item["status"] == "passed"]
         return {
@@ -359,6 +380,11 @@ class RealGroupChatFlowEvaluator:
             "cases": reports,
         }
 
+    def _evaluate_archived_case(self, record: dict[str, Any], directory: Path) -> dict[str, Any]:
+        """每次独占新目录，保存同一来源的独立执行证据。"""
+        directory.mkdir(exist_ok=False)
+        return self.evaluate_case(record, evidence_dir=directory)
+
     def evaluate_case(self, case: dict[str, Any], *, evidence_dir: Path | None = None) -> dict[str, Any]:
         """先归档原用例，再捕获本例全部异常与已有状态；不执行任何异常后的补偿业务动作。"""
         store = InMemoryAgentStore()
@@ -373,6 +399,8 @@ class RealGroupChatFlowEvaluator:
                       "expected": case.get("expected"), "errors": [f"{type(exc).__name__}: {exc}"],
                       "actual": {"partial_state": _partial_state(store, (case.get("source") or {}).get("room_alias"))},
                       "model_calls": list(counting.calls) if counting is not None else []}
+            if failure := _classification_transport_failure(exc, counting):
+                result.update(status="blocked", eval_inconclusive=failure)
         result = _safe_evidence(result, credentials)
         if evidence_dir is not None:
             result["evidence_dir"] = str(evidence_dir)
@@ -463,12 +491,18 @@ class RealGroupChatFlowEvaluator:
             before_snapshots=before_snapshots,
             pipeline=pipeline,
         )
-        if actual.get("main_agent", {}) and actual["main_agent"].get("error"):
-            errors.append("main Agent raised an exception: " + actual["main_agent"]["error"])
-        elif actual.get("main_agent", {}) and actual["main_agent"].get("status") not in {"completed", "waiting_user"}:
+        main = actual["main_agent"] or {}
+        failure = main.get("eval_inconclusive")
+        if is_inconclusive(failure) and self._check_case(case, expected={**expected, "required_tool_calls": []},
+                                                         actual=actual, before_snapshots=before_snapshots, pipeline=pipeline):
+            # 缺少后续工具只说明失败轮未完成；已判定的分类和权限失败仍按原断言阻断。
+            failure = None
+        if main.get("error"):
+            errors.append("main Agent raised an exception: " + main["error"])
+        elif main and main.get("status") not in {"completed", "waiting_user"}:
             # Runtime可能已安全吞下提供方异常并返回技术终态；这仍不是该评测用例通过。
-            errors.append("main Agent did not complete a valid evaluation turn: " + str(actual["main_agent"].get("status")))
-        return {
+            errors.append("main Agent did not complete a valid evaluation turn: " + str(main.get("status")))
+        report = {
             "case_id": case["id"],
             "case_type": case["case_type"],
             "status": "passed" if not errors else "failed",
@@ -478,6 +512,9 @@ class RealGroupChatFlowEvaluator:
             "model_calls": list(counting.calls) if counting is not None else [],
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
         }
+        if failure:
+            report.update(status="blocked", eval_inconclusive=failure)
+        return report
 
     def _pipeline(self, store, llm, case) -> GroupSessionPipeline:
         owners = {
@@ -575,6 +612,8 @@ class RealGroupChatFlowEvaluator:
         trace = (_EvidenceTraceRecorder(evidence_dir / "main_trace.jsonl", credentials)
                  if evidence_dir is not None else InMemoryTraceRecorder())
         messenger = _LocalGroupMessenger()
+        room_id = case["source"]["room_alias"]
+        state_before = _partial_state(store, room_id)
         capture, result, error = None, None, None
         try:
             if not _is_legacy_public_query(outcome):
@@ -625,8 +664,17 @@ class RealGroupChatFlowEvaluator:
             "trace_steps": [item.step for item in events],
             "trace_events": [item.to_dict() for item in events],
             "group_messages": messenger.messages,
-            "partial_state": _partial_state(store, case["source"]["room_alias"]),
+            "partial_state": _partial_state(store, room_id),
         }
+        # 唯一允许的交付是本地模拟端从失败终态收到的原样回复，全部去向都可核验。
+        if (current_budget() is not None and report["status"] == "needs_human"
+                and report["partial_state"] == state_before and not tool_results
+                and "action_contract_error" not in report["trace_steps"]
+                and len(messenger.messages) <= 1
+                and all(message["room_id"] == room_id and message["text"] == report["final_reply"]
+                        for message in messenger.messages)):
+            if failure := latest_agent_transport_failure(events):
+                report["eval_inconclusive"] = failure
         if evidence_dir is not None:
             report["raw_trace_path"] = str(evidence_dir / "main_trace.jsonl")
             _write_evidence(evidence_dir / "main_agent.json", report, credentials)
@@ -790,6 +838,9 @@ def main() -> int:
     _write_evidence(run_dir / "summary.json", report, _configured_credentials(llm))
     _write_evidence(report_path, report, _configured_credentials(llm))
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    failures = [item for item in report["cases"] if item["status"] == "failed"]
+    if failures and all(is_inconclusive(item.get("eval_inconclusive")) for item in failures):
+        return BLOCKED_EXIT_CODE
     return 1 if args.strict and report["summary"]["failed"] else 0
 
 

@@ -279,6 +279,7 @@ def build_runtime(
         llm_client=llm_client,
         store=store,
         tool_gateway=tool_gateway if tool_gateway is not None else ToolGateway(store),
+        # 真模型回放与门禁共用时限配置；未配置时才使用对应模型的默认时限。
         llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", default_timeout)) if mode == "real" else 45.0,
         # 真模型试验必须保存完整本地证据，不能随短生命周期Runtime释放而丢掉异常来源。
         # 原始日志留在受控运行目录；面板仍仅展示 simulation_execution_observation 的安全投影。

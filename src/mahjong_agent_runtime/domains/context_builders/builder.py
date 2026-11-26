@@ -38,6 +38,43 @@ from .task_facts import project_explicit_task_facts
 
 
 DEFAULT_PROMPT_PATH = Path(__file__).resolve().parents[2].joinpath("prompts", "agent_runtime_system.md")
+_MODEL_CONTRACT_FIELDS = ("output_contract", "planning_contract", "available_tools")
+_MODEL_CONTRACT_HEADER = (
+    "\n\n【主 Agent 请求合同】\n"
+    "以下 JSON 定义输出、规划与本轮可用工具；后续消息提供当轮约束及动态上下文。\n"
+)
+
+
+def main_agent_user_message(payload: dict[str, Any]) -> dict[str, str]:
+    """序列化本轮动态上下文，结构化合同只在模型请求的首条系统消息中发送。"""
+    # 相邻呈现当前原话、同任务对话与候选事实，方便核对补充和修订的来源。
+    turn_fields = ("current_message", "recent_conversation", "explicit_task_facts")
+    remaining = sorted(payload.keys() - {*_MODEL_CONTRACT_FIELDS, *turn_fields})
+    fields = [key for key in (*turn_fields, *remaining) if key in payload]
+    content = ", ".join(
+        f"{json.dumps(key)}: {json.dumps(payload[key], ensure_ascii=False, sort_keys=True)}"
+        for key in fields
+    )
+    return {"role": "user", "content": "{" + content + "}"}
+
+
+def read_main_agent_system_contract(message: Any) -> dict[str, Any]:
+    """从真实发送的首条系统消息恢复结构化合同，供离线审计验证动态证据引用。
+
+    历史 trace 的系统消息没有合同区块；新区块存在但损坏时拒绝使用该请求作为证据。
+    """
+    if not isinstance(message, dict) or message.get("role") != "system":
+        return {}
+    content = message.get("content")
+    if not isinstance(content, str):
+        return {}
+    _, header, encoded = content.rpartition(_MODEL_CONTRACT_HEADER)
+    if not header:
+        return {}
+    contract = json.loads(encoded)
+    if not isinstance(contract, dict) or tuple(contract) != _MODEL_CONTRACT_FIELDS:
+        raise ValueError("invalid main agent system contract")
+    return contract
 
 
 @dataclass(slots=True)
@@ -263,7 +300,9 @@ class AgentContextBuilder:
             "sender_active_game_memberships": games.sender_memberships,
             "active_parties": games.active_parties,
             "outbound_message_drafts": customer.outbound_message_drafts,
-            "available_tools": self.tool_gateway.tool_specs_for_prompt(),
+            "available_tools": self.tool_gateway.tool_specs_for_prompt(
+                message_reference_contract=message_reference_contract,
+            ),
             "previous_tool_results": [
                 tool_result_for_context(item)
                 for item in latest_tool_results
@@ -287,9 +326,17 @@ class AgentContextBuilder:
             "planning_contract": planning,
             "output_contract": output_contract(),
         }
-        # 稳定行为准则放 system；每轮动态状态放 user JSON。群聊临时约束使用额外的
-        # system 消息，但其值仍由后端可信信封产生，用户无法自行注入。
-        messages = [{"role": "system", "content": prompt}]
+        # 共用合同排在已按本轮引用权限过滤的工具清单之前。即使可见工具集变化，
+        # 更早的系统正文与共用合同仍相同；每个工具集沿用注册表的声明顺序。
+        contract_fields = ",\n".join(
+            f'"{key}": {json.dumps(payload[key], ensure_ascii=False, sort_keys=True)}'
+            for key in _MODEL_CONTRACT_FIELDS
+        )
+        messages = [{
+            "role": "system",
+            "content": prompt + _MODEL_CONTRACT_HEADER + "{\n" + contract_fields + "\n}",
+        }]
+        # 群聊临时约束保留独立的 system 消息，值只能来自后端可信信封。
         if reply_constraints is not None:
             privacy = "且不得提及任何其他客户的身份、关系或私聊信息" if reply_constraints["no_private_info"] else ""
             messages.append(
@@ -301,7 +348,7 @@ class AgentContextBuilder:
                     ),
                 }
             )
-        messages.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)})
+        messages.append(main_agent_user_message(payload))
         return BuiltContext(
             messages=messages,
             payload=payload,
