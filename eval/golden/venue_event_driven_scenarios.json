@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "provenance": "维护者在 2026-11-27 提供的实际营业可能发生情况。角色、时钟和事件链为可重放测试设定。",
+  "clock": {
+    "timezone": "Asia/Shanghai",
+    "base_opening": "19:00",
+    "alternative_opening": "19:30",
+    "additional_delay_opening": "20:00",
+    "typical_play_hours": 4
+  },
+  "scenarios": [
+    {
+      "id": "overtime_late_30_or_60",
+      "initial": "19:00 原局有 A、B、C、D 四个已确认席位。牌局群已建。",
+      "trigger": {"kind": "overtime_assigned", "at": "18:20", "visible_to": ["A"]},
+      "actor_branches": ["A 提议 19:30 或 20:00", "B 按原时间或拒绝等", "C 接受晚一点", "D 暂无回复"],
+      "expected_chain": ["私人日程变化", "A 模型提出实际消息", "小群收件", "店家及同桌分别收到", "原时段和晚档分别寻找候选", "本人确认选项"],
+      "assertions": ["加班不自动改席", "每个方案保留时间版本", "共享席位不可重复确认", "只在入群受众内传播"]
+    },
+    {
+      "id": "overtime_cancellation",
+      "initial": "临近开场的现有牌局，A 已确认并可联系。",
+      "trigger": {"kind": "overtime_assigned", "at": "18:35", "visible_to": ["A"]},
+      "actor_branches": ["A 发出本人退出", "A 代表同行明确二人都退出", "A 表达不确定而需要澄清"],
+      "expected_chain": ["私人日程变化", "A 小群发消息", "店家核对退出人和席位", "更新原局及看板", "私聊或公开补位"],
+      "assertions": ["仅释放有权限的席位", "退出不抹去原聊天", "旁观者看不到原因", "同句重试不重复释放"]
+    },
+    {
+      "id": "create_table_group",
+      "initial": "牌局四席已确认。分别覆盖四人均已知，以及 A 带一位匿名同行。",
+      "trigger": {"kind": "game_ready", "at": "18:05", "visible_to": ["shop"]},
+      "actor_branches": ["已知参加者加入", "A 分享本队匿名席的邀请码", "同行接受、拒绝或暂不操作"],
+      "expected_chain": ["创建关联牌局的小群", "向已知参与者发邀请", "按权限入群", "同行本人接受后补全匿名席身份", "向实际群成员投递"],
+      "assertions": ["老板加四名已接纳顾客", "已知席与匿名席之和四", "不虚构同行 ID 或私聊地址", "大群旁观者无权收发或引发模型反应"]
+    },
+    {
+      "id": "silent_confirmation_and_standby",
+      "initial": "小群已建，开场协商后的最新提议待 D 确认。E 仅为潜在备选。",
+      "trigger": {"kind": "confirmation_deadline", "at": "18:48", "visible_to": ["shop"]},
+      "actor_branches": ["E 接受候补", "D 到期前确认", "D 到期后回复", "D 一直无回复"],
+      "expected_chain": ["保留原回执并登记新版本等待状态", "向 E 发真实备选邀约", "根据原席状态处理", "出现空位后等 E 对当前条件确认"],
+      "assertions": ["备选邀请不占第五席", "没有明确同意和有效席位时不报已确认", "倒序与并发处理结果可重开复核"]
+    },
+    {
+      "id": "candidate_matching",
+      "initial": "有烟、无烟和允许电子烟分别作为待约条件。另设已披露的避桌、软硬性别需求、熟练程度要求与来源未知的对照。",
+      "trigger": {"kind": "candidate_search_requested", "at": "18:50", "visible_to": ["shop"]},
+      "candidate_states": ["确认可同桌", "确认冲突", "资料未知", "明确自报且允许为本次转述"],
+      "expected_chain": ["读取适用的候选条件", "只向兼容人发邀请或适当核实未知项", "记录候选回复", "最终条件复核"],
+      "assertions": ["按有依据的软硬条件处理", "电子烟和新手不由昵称或旧字段猜出", "避桌冲突不透给另一方", "候补符合当前版本后才确认"]
+    },
+    {
+      "id": "changed_table_play_and_release",
+      "initial": "一个确认方案已有四席，包间可用。并行另一时点未成或已停止。",
+      "trigger": {"kind": "scheduled_start_due", "at": "19:30", "visible_to": ["shop", "table_members"]},
+      "actor_branches": ["四人到齐按时打", "有人未到而不启动", "第四人晚离场导致继续占房"],
+      "expected_chain": ["四个已识别角色真实签到", "业务开打", "虚拟时钟推进至少四小时", "按实际离场累计", "正式结束", "释放和同房复订"],
+      "assertions": ["未实际开打不能计为完赛", "未离场不能提前释放", "不接受同房重叠预订", "段落日志与 SQLite 可互相核对"]
+    }
+  ]
+}
