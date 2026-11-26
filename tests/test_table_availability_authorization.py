@@ -1142,6 +1142,62 @@ def test_rolling_evening_scope_preserves_unique_hard_departure_and_real_conflict
     store._connection.close()
 
 
+@pytest.mark.parametrize(("ending", "model_collapses_window", "selected_start", "authorized", "explicit_point"), [
+    ("七点半到九点能开就好", False, "19:30", False, False),
+    ("七点半到九点能开就好", True, "19:30", False, False),
+    ("七点半至九点这段时间都能打", False, "19:30", False, False),
+    ("七点半到九点能开就好，老板不要帮我定具体开场", False, "19:30", False, False),
+    ("七点半到九点都行，你帮我选个开场", False, "20:00", True, False),
+    ("七点半到九点都行，还是七点半开吧", True, "19:30", True, True),
+])
+def test_opening_interval_preserves_read_and_requires_separate_authority_for_fixed_create(
+    ending, model_collapses_window, selected_start, authorized, explicit_point, tmp_path,
+):
+    """引用区间端点不能写死开场，本人明确选时或委托选时仍可实际建局。"""
+    sent = datetime.fromisoformat("2026-11-25T19:02:00+08:00")
+    message = _incoming(f"对 帮我组一桌 四川麻将 无烟的 0.5到1块底都行 {ending}", sent=sent)
+    store = SQLiteAgentStore(tmp_path / "fixed-opening-range.sqlite3")
+    bounds = {"start_at": "2026-11-25T19:30:00+08:00", "end_at": "2026-11-25T21:00:00+08:00"}
+    point = f"2026-11-25T{selected_start}:00+08:00"
+    fixed_window = {"start_at": point, "end_at": point}
+    model_window = fixed_window if model_collapses_window else bounds
+    stakes = {"min": 0.5, "max": 1}
+    clock_roles = ["opening", "opening"] + (["opening"] if explicit_point else [])
+    verification = _multi_decision(*clock_roles, opening_customer_ref=1, has_fixed_opening_authority=True)
+    review = ReviewClient([verification | {"opening_window": model_window, "accepted_stake_range": stakes}])
+    creation = ReviewClient([{"scope": "create", "customer_ref": 1, "shop_offer_ref": None}])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "sichuan_mahjong", "smoke_preference": "no_smoking", "stake_range": stakes}
+
+    with using_clock(lambda: sent):
+        _activate(store, started=sent)
+        _persist(store, message)
+        reading_window = fixed_window if explicit_point else bounds
+        lookup = _execute_scope_search(service, message, terms | {"start_time_range": reading_window}, step=1)
+        assert lookup.called and lookup.allowed and lookup.result["requirement"]["start_time_range"] == reading_window
+        call = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+            "requirement": terms | {"planned_start_at": point, "start_time_kind": "scheduled"}})
+        created = service.execute_tool_calls(
+            AgentAction(goal="组织同一桌", objective_status="needs_tool", reasoning_summary="核对开场并组局", tool_calls=[call]),
+            message=message, trace_id=message.message_id, previous_step_tool_results=[lookup], step_index=2,
+            run_id="verify-range-fixed-opening", run_version=store.conversation_version("dm"),
+        ).tool_results[0]
+
+    if authorized:
+        assert created.called and created.allowed and len(creation.calls) == 1
+        game, = store.games.values()
+        assert game.planned_start_at.isoformat() == point
+    else:
+        assert not created.called and not created.allowed and not creation.calls and not store.games
+        evidence = created.result["table_availability_evidence"]
+        assert evidence["has_fixed_opening_authority"] is False and evidence["opening_customer_ref"] is None
+        assert evidence["opening_window"] == bounds and "还没选定" in created.error
+    assert len(review.calls) == 1
+    store._connection.close()
+
+
 @pytest.mark.parametrize("write_authorized", [True, False])
 def test_same_game_opening_confirmation_carries_prior_flexible_departure_into_reply_evidence(tmp_path, write_authorized):
     """跨轮保留顾客柔性离场目标，仍经真实建局守卫，不写硬限时或默认安排。"""

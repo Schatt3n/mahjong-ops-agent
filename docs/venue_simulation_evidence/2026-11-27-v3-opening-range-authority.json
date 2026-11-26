@@ -1,0 +1,65 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_code_commit": "3b12e71",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev3_20261127/2026-11-25-real-02ed5c7d2e",
+  "customer_case": "0178",
+  "trace_id": "trace_84dd27da94d44ea788044669",
+  "message": {
+    "message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+    "sent_at": "2026-11-25T19:02:00+08:00",
+    "text": "对 帮我组一桌 四川麻将 无烟的 0.5到1块底都行 七点半到九点能开就好"
+  },
+  "availability_review": {
+    "response_source": {
+      "call_id": "llm_call_64d8f02a0a6044889d398cd749821291",
+      "http_response_complete": true,
+      "raw_response_sha256": "17fe22632b675c9e660a14de668a55097f7591fc31625a88b9a276af9a915dc8",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_5a93b1e104e04a4e9731ff3d4eeb041d",
+      "trace_id": "trace_84dd27da94d44ea788044669:table-availability:1"
+    },
+    "input_sha256": "c77a7702950fb3ec17d39911ad0232021dc3aa884fc01f0acf7d543a8ced2814",
+    "clock_roles": [
+      {
+        "clock_ref": 1,
+        "role": "opening"
+      },
+      {
+        "clock_ref": 2,
+        "role": "opening"
+      }
+    ],
+    "opening_customer_ref": 5,
+    "opening_window": {
+      "end_at": "2026-11-25T21:00:00+08:00",
+      "start_at": "2026-11-25T19:30:00+08:00"
+    },
+    "has_fixed_opening_authority": true
+  },
+  "tool_and_delivery": {
+    "search_window": {
+      "end_at": "2026-11-25T21:00:00+08:00",
+      "start_at": "2026-11-25T19:30:00+08:00"
+    },
+    "search_match_count": 0,
+    "first_create_rejected": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; flexible game can start before the searched opening window starting at 2026-11-25T19:30:00+08:00; it has no enforceable earliest start",
+    "actual_written_game": {
+      "game_id": "game_bb03047ea463",
+      "status": "forming",
+      "planned_start_at": "2026-11-25T19:30:00+08:00",
+      "planned_end_at": "2026-11-25T23:30:00+08:00"
+    },
+    "delivered_reply": "七点半这桌给你记上了，川麻无烟0.5到1块，现在还差三个人。"
+  },
+  "analysis": "本人明确请帮组桌，七点半至九点均可开。查局范围正确，两个端点不能证明顾客已选定某个固定开场或委托店家替他选。在人齐开不支持该未来最早时间后，旧核验让主模型把起点直接写成开场，形成实际固定时点。",
+  "change": "核对独立模型的开场区间后，另核实本人确实委托店家选一个时点。仅说范围可接受时保留范围并撤销固定权限。模型把同句已核实的唯一范围压成端点时恢复区间；另有本人独立确认的同一钟点继续有效。建局授权和其它既有校验仍独立。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_opening_interval_preserves_read_and_requires_separate_authority_for_fixed_create",
+    "control": "原话与压缩区间的模型响应都保留19:30至21:00的真实查询，拟19:30开场无法写入。本人明确授权选时可写20:00，亲自选定19:30可写该点。",
+    "focused_tests_passed": 596,
+    "live_replay": "pending"
+  }
+}

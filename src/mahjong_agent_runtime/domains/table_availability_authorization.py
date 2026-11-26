@@ -32,7 +32,7 @@ opening_dayparts 单独记录本人明确接受的开场时段，以时段开始
 同一来话把「晚上六点半后有空，想打川麻，有桌吗」或「我今晚七点半能到，想打杭麻，有合适的吗」连成一次个人查局时，个人场次确在晚间，保留本人的 evening 时段，也独立返回钟点的到店用途。若只说「我七点半能到」、单纯问候「晚上好」、只问原桌，或另查明确指定了别的时段，不能据此填 evening。
 accepted_stake_range 是本人可以接受的档位范围。像「红中2块3块的」如果原话表达可接受两个底注档位而无其他含义，记录 min=2,max=3。不要因同时出现两个数就猜第二个是封顶。known_cap_score 仅在本人另外明确给出封顶时填写正数；区间和明确封顶可以同时存在。描述「看板那桌写二到三块」后另问「还有别的无烟局吗」，另查仅要求无烟，accepted_stake_range 用 null。只有另查分句或同任务的其他本人原话明确提出同样的档位要求时才继承，例如「另外也只找二到三块的无烟局」。描述原桌、问原桌档位或想报名原桌本身不能作为另一查局目标的档位条件。不确定用 null。
 max_duration_hours 只记录本人明确的最长可打时长，统一换算为正数小时；严格最多或只能打的小时数是上限。「打四个小时左右」「大概玩四小时」是时长偏好，不是硬上限或约定时长。agreed_duration_hours 只记录本人明确选定的确切时长，不能用到店与离开钟点相减推得。仅到店钟点、最晚离开钟点、普通期望、桌本身时长、缺失或不确定时均填 null。
-has_fixed_opening_authority 只在本人已定一个具体开场，或本人明确授权店家在给定的开场范围内选一个固定开场时才为 true。答应店家帮找人、本人有空、接受某个宽时间区间、或者报到店与离开钟点不足以选定新局固定开场。多钟点时，true 必须用 opening_customer_ref 指出实际明确选定或委托选定开场的本人记录；若本轮明确约定一个开场，opening_window 两端应为该 opening 候选的同一时点。其他情况为 false，opening_customer_ref 用 null。这里只核对固定开场权限，不授予建局、占席或联系权限。
+has_fixed_opening_authority 只在本人已定一个具体开场，或本人明确授权店家在给定的开场范围内选一个固定开场时才为 true。答应店家帮找人、本人有空、接受某个宽时间区间、或者报到店与离开钟点不足以选定新局固定开场。多钟点时，true 必须用 opening_customer_ref 指出实际明确选定或委托选定开场的本人记录；若本轮明确约定一个开场，opening_window 两端应为该 opening 候选的同一时点。其他情况为 false，opening_customer_ref 用 null。「七点半到九点能开就好」「这段时间都能打」只证明可接受的区间；选择某一点须本人另行选定，或确实请店家选时。这里只核对固定开场权限，不授予建局、占席或联系权限。
 当前只确认开场时，仍要核对同一组局目的较早的可打到几点。若它仍适用且是柔性时点，在 prior_play_until 里引用它：{"customer_ref":较早本人编号,"clock_ref":该条 clock_candidates 的编号}。不能跨桌、跨次组局或跨日继承。顾客只补开场不是撤销原条件；如果顾客换了目标、撤回、给出新的离场或时长、或者旧来话实际是硬限制，不填该柔性引用。此引用不证明结束时刻已约定，不赋予组局或开场权限。
 仅输出 JSON 对象，键为 clock_role、clock_roles、lookup_scope、opening_window、opening_dayparts、accepted_stake_range、known_cap_score、max_duration_hours、agreed_duration_hours、has_fixed_opening_authority、opening_customer_ref、current_ref、supporting_customer_refs，以及上文允许时的 also_requests_personal_options、prior_play_until。opening_window 为 null 或 {"start_at":"带时区ISO","end_at":"带时区ISO"}；opening_dayparts 为 null 或 {"date":"YYYY-MM-DD","parts":["morning","afternoon"],"source_ref":1}，parts 填本人同一日期实际接受的开场时段，枚举 morning、afternoon、evening，每种最多一次，source_ref 必须也列在 supporting_customer_refs。accepted_stake_range 为 null 或 {"min":2,"max":3}，known_cap_score、max_duration_hours、agreed_duration_hours 各为 null 或正数，has_fixed_opening_authority 为布尔值。current_ref 必须是 current=true 的本人记录编号，supporting_customer_refs 列出支持判断的一个或多个本人记录编号，可包括本轮。不能引用店家编号冒充本人；无足够明确事实时保留 null，不补猜。"""
 
@@ -69,8 +69,16 @@ _PLAY_UNTIL_CLOCK_PREFIX = re.compile(
     r"[打玩](?:到|至)(?:\s*(?:约|大概|大约|差不多|今晚上?|今天|早上|上午|中午|下午|傍晚|晚上|晚间|凌晨))*\s*$"
 )
 _NONFLEXIBLE_PLAY_END = re.compile(r"最晚|最迟|至迟|必须|只能|只可以|最多|至多|顶多|不能|不得|不超过|没法|不想|得走|要走|得离开")
+_CLOCK_RANGE_CONNECTOR = re.compile(r"\s*(?:到|至|~|—|–|-)(?:\s*(?:晚上|下午|上午|早上|中午|凌晨))?\s*")
+_EXPLICIT_OPENING_SELECTION = re.compile(
+    r"(?:你(?:来|看着)?|(?:帮|给|替)我)\s*(?:选定?|挑|定)\s*"
+    r"(?:\s*(?:一下|下|一个|个|具体的?|合适的?))*\s*(?:开场|开打|开局|时间|钟点|几点|点儿?)"
+    r"|(?:开场|开打|开局|时间|钟点|几点开)(?:时间)?\s*(?:由|让|交给)?(?:你|老板)(?:来)?\s*(?:定|选|挑)"
+    r"|你(?:来|看着|随便|帮我)?(?:定|选|挑)(?:吧|就好|就行)\s*$"
+)
+_DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 3
+_DECISION_NORMALIZATION_VERSION = 4
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -363,6 +371,53 @@ def _verify_multi_clock_opening_source(
         raise ValueError("the cited opening is not supported by its clock references")
 
 
+def _restore_opening_interval(
+    point: datetime, text: str, local_at: datetime, bound: list[tuple[dict[str, Any], str]],
+) -> tuple[datetime, datetime] | None:
+    """同一个钟点若只是唯一开场区间的端点，恢复区间；另有独立开场钟点时仍按本人选定。"""
+    lexical = _source_clock_text(text)
+    clocks = observe_clock_candidates(lexical, anchor=local_at, include_source_spans=True)
+    opening_times = {
+        item["clock_ref"]: _supported_role_time(item, text, local_at)
+        for item, role in bound if role == "opening" and "clock_ref" in item
+    }
+    ranges = []
+    for left, right in zip(clocks, clocks[1:]):
+        left_ref, right_ref = left["clock_ref"], right["clock_ref"]
+        start, end = opening_times.get(left_ref), opening_times.get(right_ref)
+        between = lexical[left["source_span"][1]:right["source_span"][0]]
+        if start is not None and end is not None and start < end and _CLOCK_RANGE_CONNECTOR.fullmatch(between):
+            ranges.append((start, end, left_ref, right_ref))
+    if len(ranges) != 1:
+        return None
+    start, end, left_ref, right_ref = ranges[0]
+    if point in (start, end) and not any(
+        clock_at == point and ref not in (left_ref, right_ref) for ref, clock_at in opening_times.items()
+    ):
+        return start, end
+    return None
+
+
+def _constrain_fixed_opening_authority(
+    decision: dict[str, Any], window: tuple[datetime, datetime], *, current: int, customer_rows: dict[int, str],
+    current_text: str, local_at: datetime, bound: list[tuple[dict[str, Any], str]],
+) -> tuple[datetime, datetime]:
+    """保留客户给出的开场区间，只有本人明确委托选时才有权将区间写成固定开场。"""
+    source_ref = decision.get("opening_customer_ref")
+    if window[0] == window[1] and source_ref == current:
+        window = _restore_opening_interval(window[0], current_text, local_at, bound) or window
+    if window[0] < window[1]:
+        source_texts = (customer_rows.get(source_ref, ""),) if source_ref is not None else customer_rows.values()
+        authorized = any(
+            _EXPLICIT_OPENING_SELECTION.search(clause) and not _DECLINED_OPENING_SELECTION.search(clause)
+            for text in source_texts for clause in _CLAUSE_SEPARATOR.split(unicodedata.normalize("NFKC", text))
+        )
+        if not authorized:
+            decision["has_fixed_opening_authority"] = False
+            decision["opening_customer_ref"] = None
+    return window
+
+
 def _carry_prior_play_until(
     decision: dict[str, Any], citation: Any, *, customer_rows: dict[int, str],
     sources: dict[int, tuple[datetime, str]], window: tuple[datetime, datetime] | None,
@@ -455,6 +510,9 @@ def _parse_decision(
     if multi:
         _verify_multi_clock_opening_source(decision, window, current=current, bound=bound, customer_rows=customer_rows,
                                           source_dates=source_dates, local_at=local_at)
+    if fixed and window is not None:
+        window = _constrain_fixed_opening_authority(decision, window, current=current, customer_rows=customer_rows,
+                                                   current_text=current_text, local_at=local_at, bound=bound)
     decision["opening_window"] = {"start_at": window[0].isoformat(), "end_at": window[1].isoformat()} if window else None
     stake = decision["accepted_stake_range"]
     if stake is not None:
