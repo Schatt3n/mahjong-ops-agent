@@ -1,5 +1,6 @@
 """验证独立开场核对只能引用同一任务本人来话，且不会重复消耗或放大权限。"""
 
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
 import json
@@ -11,7 +12,7 @@ from mahjong_agent_runtime import (
     UserMessage,
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
-from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
+from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload, compact_tool_result_dict
 from mahjong_agent_runtime.domains.delivered_game_offer import (
     game_offer_for_review, seat_facts_for_private_reply, table_duration_facts_for_private_reply,
 )
@@ -2991,6 +2992,109 @@ def test_failed_transport_or_duplicate_fields_never_grant_or_cache_authority():
         "table_availability_authorization_prompt", "table_availability_authorization_invalid",
         "table_availability_authorization_prompt", "table_availability_authorization_result",
     ]
+
+
+def test_v7_0103_certified_empty_pool_is_not_evidence_of_an_unexecuted_deadline_filter(tmp_path):
+    """回放独立核验失败后的真实空池查询，审查分别收到空局凭据和实际过滤字段。"""
+    at = datetime.fromisoformat("2026-11-25T19:02:00+08:00")
+    deadline = "2026-11-25T23:00:00+08:00"
+    text = "老板好，不是仨缺一，是我自己想搭一桌，无烟、底注2或3，能搭一桌吗，七点半这桌我最多打到晚上十一点"
+    message = _incoming(text, sent=at)
+    store = SQLiteAgentStore(tmp_path / "v7-0103-search.sqlite3")
+    trace = InMemoryTraceRecorder()
+    client = ReviewClient([
+        TimeoutError("no complete transport response"), TimeoutError("incomplete response"),
+        _decision(3, clock_role="other",
+                  clock_roles=[{"clock_ref": 1, "role": "other"}, {"clock_ref": 2, "role": "departure_deadline"}],
+                  opening_window=None, lookup_scope="personal"),
+    ])
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=client)
+    terms = {"start_time_kind": "scheduled", "start_time": "19:30",
+             "planned_start_at": "2026-11-25T19:30:00+08:00", "smoke_preference": "no_smoking",
+             "stake_range": {"min": 2, "max": 3}, "requesting_party": {"seat_count": 1}}
+
+    def query(call_id, requirements, step):
+        proposed = AgentAction(goal="核对本人可搭的现成桌", objective_status="needs_tool", reasoning_summary="",
+            tool_calls=[ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": requirements},
+                                 call_id=call_id)])
+        result, = service.execute_tool_calls(proposed, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="original",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        return compact_tool_result_dict(result.to_dict())
+
+    def review(draft, tools):
+        action = AgentAction(goal="答复可搭的现成桌和缺失玩法", objective_status="waiting_user", reasoning_summary="",
+                             reply_to_user=draft)
+        return build_reply_self_review_payload(message=message, action=action, review_scope="reply_to_user",
+            context_payload={"turn_tool_evidence": tools}, review_items=[
+                {"item_id": "reply_to_user", "recipient_id": message.sender_id, "text": draft},
+            ])["semantic_fidelity_contract"]
+
+    with using_clock(lambda: at):
+        prior_at = at - timedelta(minutes=2)
+        _activate(store, started=prior_at)
+        _persist(store, _incoming("老板好，371七点半那桌是无烟吗，能搭一桌吗", sent=prior_at, message_id="prior"))
+        store.append_assistant_turn("dm",
+            "七点半 371 的桌现在看板上没有诶。你是说你们仨七点半到、缺一位想凑个无烟的？要是这样我帮你问问有没有人。",
+            "prior", metadata={"delivery_status": "delivered"})
+        _persist(store, message)
+        denied = query("search", {**terms, "must_end_by": deadline}, 1)
+        partial = query("search2", {**terms, "max_duration_hours": 3.5}, 2)
+        verified = query("search3", {**terms, "must_end_by": deadline}, 3)
+
+    assert denied["called"] is False and denied["allowed"] is False and "must_end_by" in denied["error"]
+    assert partial["called"] is True and partial["allowed"] is True and partial["result"]["matches"] == []
+    assert verified["called"] is True and verified["allowed"] is True and verified["result"]["matches"] == []
+    clock_steps = [event.step for event in trace.get_trace(message.message_id)
+                   if event.step.startswith("table_availability_authorization_") and not event.step.endswith("_prompt")]
+    assert clock_steps == ["table_availability_authorization_unavailable", "table_availability_authorization_unavailable",
+                           "table_availability_authorization_result"]
+    assert not store.games and not store.scheduled_tasks
+
+    actually_delivered = "七点半按无烟、底注2或3、最多打到十一点查了，现在没有能搭的现成桌。你想打哪种麻将？"
+    accurate = "七点半现在没有能搭的现成桌。你最多打到十一点，想打哪种麻将？"
+    limited = review(actually_delivered, [denied, partial])
+    assert limited == review(accurate, [denied, partial])
+    latest = limited["game_availability_evidence"]["searches_by_scope"]["personal"]
+    assert latest == {"status": "completed", "matched_count": 0, "call_id": "search2", "certified_empty_pool": {
+        "scope": "same_requester_and_conversation",
+        "executed_filters": {"max_duration_hours": 3.5, "smoke_preference": "no_smoking",
+                             "stake_range": {"min": 2.0, "max": 3.0}, "start_time_kind": "scheduled"},
+    }}
+    assert any("executed_filters" in rule and "未执行、被拒或未提交" in rule and "unsupported_conclusion" in rule
+               for rule in limited["rules"])
+    successful = review(actually_delivered, [denied, partial, verified])
+    executed = successful["game_availability_evidence"]["latest_search"]["certified_empty_pool"]["executed_filters"]
+    assert executed["must_end_by"] == deadline and "max_duration_hours" not in executed
+
+    for field, invalid in (("unfiltered_available_pool_empty", False), ("available_pool_scope", "other_conversation")):
+        wrong_scope = deepcopy(partial)
+        wrong_scope["result"]["customer_reply_contract"]["evidence_scope"][field] = invalid
+        assert "certified_empty_pool" not in review(accurate, [denied, wrong_scope])[
+            "game_availability_evidence"]["latest_search"]
+    truncated = deepcopy(partial)
+    truncated["result"]["selection_truncated"] = True
+    assert "certified_empty_pool" not in review(accurate, [denied, truncated])[
+        "game_availability_evidence"]["latest_search"]
+
+    with using_clock(lambda: at):
+        late_table, _ = store.create_game(conversation_id="other", organizer_id="host", organizer_name="牌友",
+            requirement={"planned_start_at": "2026-11-25T21:00:00+08:00", "start_time_kind": "scheduled",
+                         "smoke_preference": "no_smoking", "stake": 2, "duration_hours": 3},
+            known_players=[], trace_id="late-table")
+        fallback_read = ToolGateway(store).execute(ToolCall("search_current_games", {
+            "lookup_scope": "personal", "requirement": {**terms, "max_duration_hours": 3.5},
+        }), trace_id="late-table", conversation_id=message.conversation_id, sender_id=message.sender_id,
+            sender_name=message.sender_name, step_index=1)
+        exact_read = ToolGateway(store).execute(ToolCall("search_current_games", {
+            "lookup_scope": "personal", "requirement": {**terms, "must_end_by": deadline},
+        }), trace_id="late-table", conversation_id=message.conversation_id, sender_id=message.sender_id,
+            sender_name=message.sender_name, step_index=2)
+        deadline_read = compact_tool_result_dict(exact_read.to_dict())
+    assert fallback_read.result["matches"][0]["game"]["game_id"] == late_table.game_id
+    assert deadline_read["result"]["matches"] == []
+    assert "certified_empty_pool" not in review(accurate, [deadline_read])["game_availability_evidence"]["latest_search"]
+    store._connection.close()
 
 
 def test_current_prompt_cannot_be_cited_after_new_receipt_or_be_fabricated():

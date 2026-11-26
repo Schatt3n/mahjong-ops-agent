@@ -1,0 +1,195 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_code_commit": "a87e461",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev7_20261127/2026-11-25-real-f43d9234b8",
+  "customer_case": "0103",
+  "trace_id": "trace_014e5312ce394975f6152e81",
+  "ledger": [
+    {
+      "sequence": 3,
+      "kind": "private",
+      "direction": "inbound",
+      "message_id": "customer:role-event:2c7524023311d952147ad206ec3cabc8986ed30869887acb6b0f04daebb25ee0",
+      "source_message_id": null,
+      "quoted_message_id": null,
+      "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "text": "老板好，371七点半那桌是无烟吗，能搭一桌吗"
+    },
+    {
+      "sequence": 4,
+      "kind": "private",
+      "direction": "outbound",
+      "message_id": "outbound:trace_4d5107d9f86c1c0b1ec2dca7:1",
+      "source_message_id": "customer:role-event:2c7524023311d952147ad206ec3cabc8986ed30869887acb6b0f04daebb25ee0",
+      "quoted_message_id": null,
+      "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "text": "七点半 371 的桌现在看板上没有诶。你是说你们仨七点半到、缺一位想凑个无烟的？要是这样我帮你问问有没有人。"
+    },
+    {
+      "sequence": 29,
+      "kind": "private",
+      "direction": "inbound",
+      "message_id": "customer:role-event:38d4eea1b4b253bbbcad06b6cbbd80c60f5abae80517348fe875261a698e8215",
+      "source_message_id": null,
+      "quoted_message_id": null,
+      "trace_id": "trace_014e5312ce394975f6152e81",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "text": "老板好，不是仨缺一，是我自己想搭一桌，无烟、底注2或3，能搭一桌吗，七点半这桌我最多打到晚上十一点"
+    },
+    {
+      "sequence": 30,
+      "kind": "private",
+      "direction": "outbound",
+      "message_id": "outbound:trace_014e5312ce394975f6152e81:1",
+      "source_message_id": "customer:role-event:38d4eea1b4b253bbbcad06b6cbbd80c60f5abae80517348fe875261a698e8215",
+      "quoted_message_id": null,
+      "trace_id": "trace_014e5312ce394975f6152e81",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "text": "七点半按无烟、底注2或3、最多打到十一点查了，现在没有能搭的现成桌。你想打哪种麻将？"
+    }
+  ],
+  "timing_verification": {
+    "input_sha256": "5ef823e5f82d6b1531cb4b1179fad82b64425d41bb65a33d049a261cf9b20d3c",
+    "clock_observation": {
+      "candidates": [
+        {
+          "clock_ref": 1,
+          "clock_text": "七点半",
+          "local_candidate_at": "2026-11-25T19:30:00+08:00",
+          "qualifier": null,
+          "resolution": "nearest_non_past_same_day"
+        },
+        {
+          "clock_ref": 2,
+          "clock_text": "十一点",
+          "local_candidate_at": "2026-11-25T23:00:00+08:00",
+          "qualifier": null,
+          "resolution": "explicit_daypart"
+        }
+      ],
+      "clock_count": 2
+    },
+    "failed_independent_checks": [
+      {
+        "step_index": 1,
+        "call_id": "llm_call_e8eb5b7980d34d78bf42a1d4f0212d94",
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_4713a5af5d69409c8661d6c1e033a69b",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "timeout_seconds": 9.999826812418178
+          },
+          {
+            "attempt_id": "llm_attempt_89c905d98184469a8ac7a629fec4385d",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "timeout_seconds": 8.885647125076503
+          }
+        ]
+      },
+      {
+        "step_index": 2,
+        "call_id": "llm_call_f98bc3c60fe4469da48012c0d289a765",
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_1a1782695083440896d688ffcf43505a",
+            "http_status": 200,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "timeout_seconds": 9.999915687483735
+          },
+          {
+            "attempt_id": "llm_attempt_83a72b64ab374db4b75b66cea52f120f",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "timeout_seconds": 9.246377790928818
+          }
+        ]
+      }
+    ],
+    "bound_deadline_evidence": null
+  },
+  "denied_lookup": {
+    "call_id": "search",
+    "called": false,
+    "allowed": false,
+    "proposed_lookup": {
+      "lookup_scope": "personal",
+      "requirement": {
+        "must_end_by": "2026-11-25T23:00:00+08:00",
+        "planned_start_at": "2026-11-25T19:30:00+08:00",
+        "requesting_party": {
+          "seat_count": 1,
+          "source": "self"
+        },
+        "smoke_preference": "no_smoking",
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        },
+        "start_time": "19:30",
+        "start_time_kind": "scheduled"
+      }
+    },
+    "error": "缺少本次顾客硬离店时间的核实依据，不能按 must_end_by 过滤。"
+  },
+  "executed_lookup": {
+    "call_id": "search2",
+    "called": true,
+    "allowed": true,
+    "lookup_scope": "personal",
+    "requirement": {
+      "max_duration_hours": 3.5,
+      "planned_start_at": "2026-11-25T19:30:00+08:00",
+      "requesting_party": {
+        "seat_count": 1
+      },
+      "smoke_preference": "no_smoking",
+      "stake_label": "2～3元",
+      "stake_range": {
+        "max": 3.0,
+        "min": 2.0
+      },
+      "start_time": "19:30",
+      "start_time_kind": "scheduled"
+    },
+    "matches": [],
+    "alternatives": [],
+    "evidence_scope": {
+      "available_pool_scope": "same_requester_and_conversation",
+      "applied_filter_fields": [
+        "max_duration_hours",
+        "smoke_preference",
+        "stake_range",
+        "start_time_kind"
+      ],
+      "unfiltered_available_pool_empty": true,
+      "supports_narrower_empty_claim": true
+    }
+  },
+  "delivered_reply_review": {
+    "approved": true,
+    "raw_approved": true,
+    "reasoning_summary": "按已提交条件如实报告空结果，并向客户询问真正未知的玩法；未泄露内部信息、未声称未发生的动作，且 waiting_user 与待答问题一致。",
+    "runtime_status": "waiting_user"
+  },
+  "analysis": [
+    "顾客明确纠正是自己找桌，并给出无烟、底注和最晚十一点可玩到的条件。最多打到晚上十一点是钟点上限。独立核验两次都未拿到完整响应，未作出语义判断，无法把这次失败归因于顾客措辞。",
+    "首次逐桌的 must_end_by=23:00 被发前工具守卫拒绝。实际下一次查的是最多可打三小时半，没有硬离店时点和严格的开场区间过滤。原始输入包含七点半，后端回执实际只记录开场方式作为评分项，并没有执行 start_time_range。",
+    "同请求者、同会话的未过滤可用登记局池经后端证明为空，支持没有合适现成桌的结论。空集不证明按最晚十一点执行过查局。发前审查放行了带这项查法的答复。",
+    "本轮确有实质答复送达且运行等待顾客，独立时间核验的四次 HTTP 尝试仍分别超时。第 2 轮第 1 次尝试已有 HTTP 200 响应头，正文未读完；其他三次没有已记录的完整 HTTP 状态和正文。"
+  ],
+  "grounded_reply": "七点半现在没有能搭的现成桌。你最多打到十一点，想打哪种麻将？",
+  "change": "发前审查分别取得可用登记局池为空的证据和成功查询实际使用的过滤字段。原话中的条件仍可承接，查法的说法要有本轮实际回执。保持原时间授权、执行判断和调用预算。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v7_0103_certified_empty_pool_is_not_evidence_of_an_unexecuted_deadline_filter",
+    "scope": "真实 SQLite 和工具服务重放两次独立核验失败、首次查法拒绝、次次查局成功而空，以及独立核验成功后真实执行最晚结束过滤的对照。另核对截断和不属于该会话的假空池凭据不会通过证据投影。加入真实的 21:00 开打三小时的桌后，时长筛选可以返回该桌，23:00 的绝对结束筛选将其排除。",
+    "live_replay": "pending"
+  }
+}

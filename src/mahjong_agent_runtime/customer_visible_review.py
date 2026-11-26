@@ -691,16 +691,16 @@ def _review_search_outcome(query: dict[str, Any]) -> dict[str, Any]:
         if isinstance(option, dict) and option.get("requires_timing_confirmation") is True
         and isinstance(option.get("game"), dict)
     ]
-    empty_search_filters = _review_empty_personal_search_filters(result) if not matches else {}
+    empty_search_evidence = _review_empty_personal_search_evidence(result) if not matches else {}
     return {"status": "completed", "matched_count": len(matches),
-            **({"submitted_filters_without_results": empty_search_filters} if empty_search_filters else {}),
+            **empty_search_evidence,
             **({"table_reference_evidence": result["table_reference_evidence"]}
                if result.get("lookup_scope") == "specific_table" and result.get("table_reference_evidence") else {}),
             **({"options_requiring_timing_confirmation": timing_options} if timing_options else {})}
 
 
-def _review_empty_personal_search_filters(result: dict[str, Any]) -> dict[str, Any]:
-    """只整理完整个人查局为空的实查过滤值，避免把缺数据、备选或截断当成空。"""
+def _review_empty_personal_search_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    """分别投影个人空查询实际用过的过滤值和后端的未过滤空池证明。"""
     if (result.get("lookup_scope") != "personal" or result.get("selection_truncated")
             or any(result.get(key) not in (None, []) for key in ("alternatives", "nearby_options"))
             or result.get("match_count", 0) != 0):
@@ -710,12 +710,19 @@ def _review_empty_personal_search_filters(result: dict[str, Any]) -> dict[str, A
         return {}
     scope, semantics = contract.get("evidence_scope"), contract.get("search_result_semantics")
     if (not isinstance(scope, dict) or not isinstance(semantics, dict)
-            or scope.get("kind") != "submitted_filters_only"
-            or scope.get("supports_narrower_empty_claim") is not False
-            or semantics.get("status") != "no_actionable_match"
             or semantics.get("backend_retrieval_policy_applied") is not True
             or any(type(semantics.get(key)) is not int or semantics[key] != 0
                    for key in ("returned_game_count", "actionable_match_count", "alternative_count"))):
+        return {}
+    submitted_only = scope.get("kind") == "submitted_filters_only" and semantics.get("status") == "no_actionable_match"
+    certified_empty = (
+        scope.get("supports_narrower_empty_claim") is True
+        and scope.get("unfiltered_available_pool_empty") is True
+        and scope.get("available_pool_scope") == "same_requester_and_conversation"
+        and (submitted_only or (scope.get("kind") == "unfiltered_inventory"
+                                and semantics.get("status") == "unfiltered_pool_empty"))
+    )
+    if not certified_empty and (not submitted_only or scope.get("supports_narrower_empty_claim") is not False):
         return {}
     requirement = result.get("requirement")
     applied = scope.get("applied_filter_fields")
@@ -728,7 +735,10 @@ def _review_empty_personal_search_filters(result: dict[str, Any]) -> dict[str, A
               if isinstance(party, dict) else requirement)
     if any(values.get(field) is None for field in applied):
         return {}
-    return {field: deepcopy(values[field]) for field in applied}
+    executed_filters = {field: deepcopy(values[field]) for field in applied}
+    if certified_empty:
+        return {"certified_empty_pool": {"scope": scope["available_pool_scope"], "executed_filters": executed_filters}}
+    return {"submitted_filters_without_results": executed_filters} if executed_filters else {}
 
 
 def _blocked_seat_registration(
@@ -785,11 +795,10 @@ def build_reply_self_review_payload(
     game_availability_evidence = (
         _review_game_availability_evidence(turn_tool_evidence, seat_count_evidence) if current_customer_reply else {}
     )
-    has_submitted_empty_search = any(
-        search.get("submitted_filters_without_results")
-        for search in (game_availability_evidence.get("latest_search", {}),
-                       *game_availability_evidence.get("searches_by_scope", {}).values())
-    )
+    reviewed_searches = (game_availability_evidence.get("latest_search", {}),
+                         *game_availability_evidence.get("searches_by_scope", {}).values())
+    has_submitted_empty_search = any(search.get("submitted_filters_without_results") for search in reviewed_searches)
+    has_certified_empty_pool = any(search.get("certified_empty_pool") for search in reviewed_searches)
     private_customer_reply = (
         current_customer_reply and bool(review_items) and not any(item.get("channel") == "group" for item in review_items)
         and metadata.get("source") != "group" and metadata.get("is_room") is not True and not metadata.get("room_id")
@@ -973,6 +982,12 @@ def build_reply_self_review_payload(
                    "这份凭据不补足未知玩法，也不授予建局、邀约或预约权限。"
                    "包间是否可用及其时段另核对查房回执；空的查局回执不支持包间可用、已有预约或可以保证开打。",)
                   if has_submitted_empty_search else ()),
+                *(("certified_empty_pool 证明同请求者、会话内的未过滤可用登记局池为空。可以直接说顾客所问范围当前没有能搭的桌，"
+                   "也可自然承接顾客的最晚离店时间等条件。若正文说按某个条件查过，核对本轮适用的成功查询及 executed_filters；"
+                   "未执行、被拒或未提交的条件不能算已查。按最多三小时半查询和逐桌核对是否最晚十一点结束是不同筛选。"
+                   "同轮如有另一份适用的成功查询实际覆盖该条件，可以如实说查过。无执行证据的查法声明以 unsupported_conclusion 拒绝，"
+                   "改为自然报当前局况和真实待确认事项。",)
+                  if has_certified_empty_pool else ()),
                 "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
                 "只有真实查询的 customer_reply_contract.evidence_scope.supports_narrower_empty_claim=true，且本次成功查询确为空时，才可依据后端已证实的未过滤可用局池为空推断更窄"
                 + ("检索范围为空。该权限只覆盖没有查到可供选择的局，不覆盖已指明具体桌的席位或存在情况。"
