@@ -20,13 +20,22 @@
 
 启用桌群的 12 人复验 `2026-11-25-real-02ed5c7d2e` 固定在 `3b12e71`。OpenCode、种子 42、两路并发，运行上限为 8 个执行步骤和 12 次模型调用，超时为 120 秒。两天 12 位角色均有真实决定，累计 72 次和 139 条消息，16 项程序检查通过。独立评审有 3 份通过、8 份失败、1 份未决，两个店家事件最终只送达等待提示。顾客收过群消息，但实际发出的 64 条均是私聊，也未自然出现一个可观察的满席桌群。扩容门槛 5/8，50 人真模型未启动。 [原验收、两条失败和修复索引](venue_simulation_evidence/2026-11-27-rolling-12-gate-rev3.json)
 
-第四轮 `2026-11-25-real-270ac8a1b6` 固定在 `bf3428d` 正在运行。沿用两路 OpenCode、种子 42、12 位评审及桌群选项。增加公开话题可直接在原群接话的场景提示，仍由角色自行决定，并纳入未来时段、固定开场授权、到店估计和实际占席界限的修订。 [真实硬截止原话及占席回归](venue_simulation_evidence/2026-11-27-v3-0103-participation-deadline.json) [桌群真模型通过证据](venue_simulation_evidence/2026-11-27-rolling-table-opening-real.json)
+第四轮 `2026-11-25-real-270ac8a1b6` 固定在 `bf3428d`，沿用两路 OpenCode、种子 42、12 位评审及桌群选项。80 个调度事件完成，两天均覆盖 12 位真模型顾客，70 次角色决定有效，125 条聊天入账。顾客实际发了 7 条群消息和 50 条私聊，出现 10 次群转私聊续答。16 项程序检查全部通过，没有自然满席桌。独立评审 5 份通过、5 份失败、2 份未决，四轮店家只送达等待提示。保持 6/8 的扩容结果，50 人真模型档暂未启动。 [第四轮结果和逐案来源](venue_simulation_evidence/2026-11-27-rolling-12-gate-rev4.json) [独立桌群真模型通过证据](venue_simulation_evidence/2026-11-27-rolling-table-opening-real.json)
 
 第四轮启动时的合并代码通过了 1,176 项仿真与相关专项，包含模型动作结构、牌桌库存、可用时段、参与授权及直接回复合同。范围仅覆盖这次涉及的组件。
 
+第四轮分案复放已加入以下回归。真模型跑次仍按启动版本归档，修订各自推送。
+
+- 「八点以后」和「九点前后」分别保留开场下界和近似范围。真实库存查询允许列出需另确认的邻近桌，不能把备选当作已获准占席或固定开场。 [开场下界](venue_simulation_evidence/2026-11-27-v4-0038-numbered-opening-bound.json) [近似范围](venue_simulation_evidence/2026-11-27-v4-approximate-opening-search.json)
+- 完整模型响应连续缺少工具字段时，在原重试和授权内补足合同。晚到征询补齐原桌读取后，只对已证实未执行的首次拒绝重新核对，成功登记之后仍去重。 [动作结构](venue_simulation_evidence/2026-11-27-v4-0038-partial-action-envelope.json) [晚到征询](venue_simulation_evidence/2026-11-27-v4-0022-late-arrival-retry.json)
+- 私聊发前复核已查同桌是否实际开打，也核对承诺相容的时长是否已经约定。群里单独承诺晚点去问也要有对应安排，另有同档实际登记复查后才确认的私聊作对照。 [原定时间与实际开打](venue_simulation_evidence/2026-11-27-v4-0402-actual-opening.json) [时长未约定的回执](venue_simulation_evidence/2026-11-27-v4-0151-unverified-duration-fit.json) [公开询问与持久复查](venue_simulation_evidence/2026-11-27-v4-public-question-follow-up.json)
+- 当已核实顾客有硬散场界限，拦截未能表达该界限的新建人齐开桌。原跑次只到招募，隔离回放另证明确实可能在允许招募期间定出过晚散场。已有局和实际延时开场尚缺持久的逐席截止边界。 [原来话、查局与建局控制](venue_simulation_evidence/2026-11-27-v4-asap-hard-end-0038.json)
+
+更新后的桌群容量场已加进可复跑回归。以 `b5a07dc` 启动的仿真与相关专项共 1,245 项通过，后续发前开打核对及新建局散场边界另外通过 579 项和 344 项定向检查。 [可重复容量场与建群流程](venue_event_driven_simulation.md)
+
 当前从 `codex/venue-customer-quality` 接续，早期营业仿真记录来自 `codex/venue-simulation`。架构、最终能力和分阶段验收见 [实施路径与验收](venue_simulation.md)。每个阶段先跑专项验收，再提交和推送。主 Agent 在沙盒中使用独立实例、业务库、档案和模型客户端。优先在副本中复现时间问题，先改场景时间或仿真时钟，再判断是否有可独立复现的领域缺陷。
 
-**当前没有需要你拍板的事项。** 两日 12 人 OpenCode 档已跑完，仍需修正店家查局恢复和角色续话质量，通过后再扩容。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。
+**当前没有需要你拍板的事项。** 两日 12 人 OpenCode 第四轮已归档。下一步按实际交付和后端回执复放剩余案例，修订后沿原门槛复验。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。
 
 ## 阶段进度
 
