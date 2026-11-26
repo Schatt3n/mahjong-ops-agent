@@ -555,7 +555,11 @@ class VenueRollingRoles:
         elif event.kind == "peer_receipt" and peer_id is not None:
             private["case_intent"] = "这是实际收到的搭子私信，可自行决定是否通过私聊回复本人。"
         elif event.kind == _TABLE_RECEIPT_WAKE:
-            private["case_intent"] = "这是同桌小群真正收到的消息。按自己日程和小群内容提出可行时间、回应别人或先等。"
+            private["case_intent"] = (
+                "这是同桌小群真正收到的消息。按自己日程和小群内容提出可行时间、回应别人或先等。"
+                "已经明确答复过当前提议时，其他人只报自己的意见，你可以等店家定下来。"
+                "有新时间、条件变化或别人真在问你，再回需要补充的那件事。"
+            )
         private_cue = overtime or event.kind in PLAY_ROLE_KINDS
         groups = (self.channel.room_id,) if event.actor_id in self.group_members else ()
         table_room = event.details.get("table_room_id") if event.kind == _TABLE_RECEIPT_WAKE else None
