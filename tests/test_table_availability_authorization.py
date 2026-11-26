@@ -653,6 +653,86 @@ def test_explicit_opening_and_departure_can_still_define_a_fixed_game():
         )
 
 
+def test_rolling_0146_verified_clocks_replace_only_unsupported_earlier_read_duration(tmp_path):
+    """回放两次独立核验和真实查写，修订旧查局时长并保留玩法、离店和建局授权守卫。"""
+    at = datetime.fromisoformat("2026-11-25T19:05:00+08:00")
+    open_at, depart_at = "2026-11-25T20:00:00+08:00", "2026-11-25T23:00:00+08:00"
+    store = SQLiteAgentStore(tmp_path / "rolling-0146.sqlite3")
+    _activate(store, started=at - timedelta(minutes=5))
+    history = [
+        ("晚上有合适的红中桌吗 我最多能打到十一点", "今晚到十一点前现在没有能搭的红中桌诶，要不我帮你组一桌？"),
+        ("行 红中两块底 帮我组一桌 我最多打到十一点",
+         "红中两块底这桌我给你组，不过你23点要走，人齐开没法保证那个点前能散。你看定个几点开场？比如20点或20点半，我好按这个时间凑人。"),
+    ]
+    for index, (customer_text, shop_text) in enumerate(history):
+        prior_at = at - timedelta(minutes=4 - index * 2)
+        prior = _incoming(customer_text, sent=prior_at, message_id=f"prior-{index}")
+        with using_clock(lambda: prior_at):
+            _persist(store, prior)
+            store.append_assistant_turn("dm", shop_text, "shop", metadata={"delivery_status": "delivered"})
+    message = _incoming("八点开行 两小时五十分钟到十一点 能凑到人吗", sent=at)
+    decision = _multi_decision("opening", "departure_deadline") | {
+        "accepted_stake_range": {"min": 2, "max": 2}, "opening_window": {"start_at": open_at, "end_at": open_at},
+        "has_fixed_opening_authority": True, "opening_customer_ref": 5, "current_ref": 5,
+        "supporting_customer_refs": [1, 3, 5],
+    }
+    review = ReviewClient([TimeoutError("first independent check unavailable"), decision])
+    authorization = ReviewClient([{"scope": "create", "customer_ref": 3, "shop_offer_ref": None}])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review,
+                                   creation_authorization_client=authorization)
+    terms = {"game_type": "red_center_mahjong", "stake": 2, "start_time_kind": "scheduled",
+             "start_time": "20:00", "planned_start_at": open_at}
+    results = []
+    with using_clock(lambda: at):
+        _persist(store, message)
+
+        def submit(call):
+            action = AgentAction(goal="按已核实的开场组一桌", objective_status="needs_tool", reasoning_summary="核对条款",
+                                 tool_calls=[call])
+            result, = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+                previous_step_tool_results=results, step_index=len(results) + 1, run_id="rolling-0146",
+                run_version=store.conversation_version(message.conversation_id)).tool_results
+            results.append(result)
+            return result
+
+        def create(patch, call_id):
+            return submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                                   "requirement": terms | patch}, call_id=call_id))
+
+        stale_read = submit(ToolCall("search_current_games", {"lookup_scope": "personal",
+            "requirement": terms | {"duration_hours": 2.8333}}, call_id="c1"))
+        assert stale_read.called and stale_read.allowed and stale_read.result["matches"] == []
+
+        wrong_exact_duration = create({"duration_hours": 2.8333}, "bad-duration")
+        assert wrong_exact_duration.result["validation_error"]["code"] == "verified_table_availability_conflict"
+        assert "max_duration_hours=3.0" in wrong_exact_duration.error
+        rejected_archived_proposal = create({"max_duration_hours": 3, "must_end_by": depart_at}, "bad-read-field")
+        assert not rejected_archived_proposal.called
+        changed_game = create({"max_duration_hours": 3, "game_type": "hangzhou_mahjong"}, "bad-game")
+        assert changed_game.result["validation_error"]["code"] == "tool_requirement_consistency_rejected"
+        assert "game_type" in changed_game.error and "duration_hours" not in changed_game.error
+        assert not store.games and not authorization.calls
+
+        corrected = create({"max_duration_hours": 3}, "corrected")
+        assert corrected.called and corrected.allowed and not corrected.error
+        game, = store.games.values()
+        assert game.planned_start_at.isoformat() == open_at and game.planned_end_at.isoformat() == depart_at
+        assert game.requirement["max_duration_hours"] == 3 and "duration_hours" not in game.requirement
+
+    assert len(review.calls) == 2 and len(authorization.calls) == 1
+    assert stale_read.result["requirement"]["duration_hours"] == 2.8333
+    event, = [item.content for item in trace.get_trace(message.message_id) if item.step == "tool_read_duration_superseded"]
+    assert event == {
+        "field": "duration_hours", "previous_duration_hours": 2.8333,
+        "source_tool": "search_current_games", "source_call_id": "c1", "source_evidence_index": 0,
+        "opening_customer_ref": 5, "supporting_customer_refs": [1, 3, 5], "planned_start_at": open_at,
+        "must_end_by": depart_at, "max_duration_hours": 3, "source_message_id": message.message_id,
+        "run_version": store.conversation_version(message.conversation_id), "step_index": 5, "create_call_id": "corrected",
+    }
+    store._connection.close()
+
+
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
 def test_explicit_archived_control_retries_with_verified_cap_and_persists_same_start(backend, tmp_path):
     """已核实开场的建局遇到默认时长过长，回灌可执行上限后按同一开场实际落库。"""

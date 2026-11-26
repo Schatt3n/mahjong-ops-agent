@@ -211,7 +211,60 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     return None
 
 
-def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolResult]) -> str | None:
+def superseded_read_duration_evidence(
+    call: ToolCall, previous_tool_results: list[ToolResult], verified: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """记录同次来话内已核实的开场与硬离店如何替换旧个人查局的未约定时长。"""
+    if (call.name != "create_game" or not verified or verified.get("lookup_scope") != "personal"
+            or verified.get("has_fixed_opening_authority") is not True
+            or verified.get("agreed_duration_hours") is not None or verified.get("max_duration_hours") is not None):
+        return None
+    current_ref = verified.get("current_ref")
+    roles = {item["role"] for item in verified.get("clock_roles") or ()}
+    if (type(current_ref) is not int or verified.get("opening_customer_ref") != current_ref
+            or current_ref not in (verified.get("supporting_customer_refs") or ())
+            or not {"opening", "departure_deadline"} <= roles):
+        return None
+    window = verified.get("opening_window") or {}
+    opening, departure = _aware_datetime(window.get("start_at")), _aware_datetime(verified.get("must_end_by"))
+    if (opening is None or departure is None or opening >= departure
+            or opening != _aware_datetime(window.get("end_at")) or departure != _aware_datetime(verified.get("play_until_at"))):
+        return None
+    proposed = call.arguments.get("requirement")
+    if (not isinstance(proposed, dict) or _aware_datetime(proposed.get("planned_start_at")) != opening
+            or validate_table_availability(call, verified) is not None):
+        return None
+    reference = _latest_read_requirement_reference(previous_tool_results, tool_name="search_current_games")
+    receipt = _latest_read_requirement_reference(
+        previous_tool_results, tool_name="search_current_games", successful_only=True,
+    )
+    if reference is None or receipt is None or reference["requirement"] != receipt["requirement"]:
+        return None
+    read = previous_tool_results[receipt["source_evidence_index"]]
+    old = receipt["requirement"]
+    hours = parse_number(old.get("duration_hours"))
+    # 若这次真实查局已核实同一硬离店，现成局守卫必要求 must_end_by；保留已查过的库存范围。
+    if (read.result.get("lookup_scope") != "personal" or read.deduplicated or not read.idempotency_key
+            or "must_end_by" in old or _aware_datetime(old.get("planned_start_at")) != opening
+            or hours is None or not 0 < hours < (departure - opening).total_seconds() / 3600):
+        return None
+    return {
+        "field": "duration_hours",
+        "previous_duration_hours": old["duration_hours"],
+        "source_tool": read.name,
+        "source_call_id": read.call_id,
+        "source_evidence_index": receipt["source_evidence_index"],
+        "opening_customer_ref": current_ref,
+        "supporting_customer_refs": verified["supporting_customer_refs"],
+        "planned_start_at": opening.isoformat(),
+        "must_end_by": departure.isoformat(),
+        "max_duration_hours": proposed["max_duration_hours"],
+    }
+
+
+def validate_tool_call_consistency(
+    call: Any, previous_tool_results: list[ToolResult], *, read_duration_superseded: bool = False,
+) -> str | None:
     """校验当前写工具是否和上一轮读工具条件一致。
 
     当前只约束 create_game 与最近一次 search_current_games 中作用域相同的客户条件。
@@ -239,6 +292,8 @@ def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolRe
         return f"tool argument consistency violation: invalid previous search_current_games requirement reference; {exc}"
     mismatches: list[str] = []
     for field, value in _requirement_fields_to_preserve(reference_requirement).items():
+        if field == "duration_hours" and read_duration_superseded:
+            continue
         if field in {"stake", "stake_range"} and _stake_representations_equivalent(current_requirement, reference_requirement):
             continue
         expected = normalized_requirement_value(value)
@@ -553,15 +608,19 @@ def _explicit_party_count_mismatches(
     return mismatches
 
 
-def _latest_read_requirement_reference(previous_tool_results: list[ToolResult], *, tool_name: str) -> dict[str, Any] | None:
+def _latest_read_requirement_reference(
+    previous_tool_results: list[ToolResult], *, tool_name: str, successful_only: bool = False,
+) -> dict[str, Any] | None:
     """统一选择守卫与上下文使用的真实读参数或运行时拒绝反馈，不读取模型计划。
 
     反馈携带的reference_requirement沿用既有参考，失败重查不能清除它；新的成功读
     可以替换旧参考。反馈自己的call_id属于被拒绝的写提案，不能冒充原查询身份。
+    核实旧参考的确切出处时用 successful_only 只选择成功读回执。
     """
     for index in range(len(previous_tool_results) - 1, -1, -1):
         result = previous_tool_results[index]
-        if result.result.get("reference_tool_name") == tool_name and isinstance(result.result.get("reference_requirement"), dict):
+        if (not successful_only and result.result.get("reference_tool_name") == tool_name
+                and isinstance(result.result.get("reference_requirement"), dict)):
             return {"requirement": result.result["reference_requirement"], "source_tool": tool_name,
                     "source_call_id": None, "source_evidence_index": index, "source_kind": "runtime_reference_feedback"}
         if result.name != tool_name or not result.called or not result.allowed or result.error:

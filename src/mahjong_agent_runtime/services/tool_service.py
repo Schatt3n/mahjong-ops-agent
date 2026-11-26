@@ -23,6 +23,7 @@ from ..tool_consistency import (
     EXPLICIT_PARTY_FACT_FIELDS,
     explicit_fact_sources_for_call,
     latest_read_requirement,
+    superseded_read_duration_evidence,
     validate_explicit_task_fact_consistency,
     validate_model_create_game_stake,
     validate_table_availability,
@@ -270,7 +271,12 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
             return SingleToolExecution(result=result, blocked_by_consistency=True)
 
-        consistency_error = validate_tool_call_consistency(call, observed_results) or validate_model_create_game_stake(call)
+        superseded_duration = superseded_read_duration_evidence(
+            call, observed_results, (context_payload or {}).get("verified_table_availability"),
+        )
+        consistency_error = validate_tool_call_consistency(
+            call, observed_results, read_duration_superseded=superseded_duration is not None,
+        ) or validate_model_create_game_stake(call)
         if consistency_error:
             result = ToolResult(
                 name=call.name,
@@ -415,6 +421,14 @@ class ToolExecutionService:
                 execution_scope=tool_execution_scope(self.tool_gateway.store, message),
             )
         result.call_id = call_id
+        if superseded_duration is not None and result.called and result.allowed and not result.error:
+            self.trace_recorder.record(trace_id, "tool_read_duration_superseded", {
+                **superseded_duration,
+                "source_message_id": message.message_id,
+                "run_version": run_version,
+                "step_index": step_index,
+                "create_call_id": call_id,
+            })
         resolve_replaced_follow_up(self.store, result, observed_results, message, trace_id)
         self.trace_recorder.record(trace_id, "tool_result", result.to_dict())
         self._emit(

@@ -1,0 +1,58 @@
+{
+  "case": "rolling customer 0146",
+  "source_run": "2026-11-25-real-755ef592c6",
+  "trace_id": "trace_6da7622410d9c70ba980b3de",
+  "provider": "opencode_go",
+  "model": "deepseek-v4.1-flash",
+  "customer_conversation_version": 3,
+  "conversation": [
+    {"ref": 1, "speaker": "customer", "text": "晚上有合适的红中桌吗 我最多能打到十一点"},
+    {"ref": 2, "speaker": "shop", "text": "今晚到十一点前现在没有能搭的红中桌诶，要不我帮你组一桌？"},
+    {"ref": 3, "speaker": "customer", "text": "行 红中两块底 帮我组一桌 我最多打到十一点"},
+    {"ref": 4, "speaker": "shop", "text": "红中两块底这桌我给你组，不过你23点要走，人齐开没法保证那个点前能散。你看定个几点开场？比如20点或20点半，我好按这个时间凑人。"},
+    {"ref": 5, "speaker": "customer", "text": "八点开行 两小时五十分钟到十一点 能凑到人吗"}
+  ],
+  "observed": {
+    "first_independent_review_error": "the cited opening is not supported by its clock references",
+    "early_read": {
+      "call_id": "c1",
+      "step": 1,
+      "scope": "personal",
+      "planned_start_at": "2026-11-25T20:00:00+08:00",
+      "duration_hours": 2.8333,
+      "must_end_by": null,
+      "matches": 0,
+      "supports_narrower_empty_claim": false
+    },
+    "later_independent_review": {
+      "step": 2,
+      "opening_customer_ref": 5,
+      "supporting_customer_refs": [1, 3, 5],
+      "fixed_opening": "2026-11-25T20:00:00+08:00",
+      "hard_departure": "2026-11-25T23:00:00+08:00",
+      "agreed_duration_hours": null
+    },
+    "step_3": {
+      "rejected_on": "duration_hours expected 2.8333 from previous search_current_games",
+      "also_invalid": "The write included must_end_by, a lookup-only argument."
+    },
+    "later_tool_calls": [
+      {"step": 6, "tool": "search_current_games", "call_id": "q2", "matches": 0, "supports_narrower_empty_claim": false},
+      {"step": 7, "tool": "create_game", "max_duration_hours": 3},
+      {"step": 8, "tool": "search_customers"}
+    ],
+    "final_runtime_reason": "max_steps_exceeded",
+    "customer_received": "稍等一下"
+  },
+  "offline_regression": {
+    "test": "tests/test_table_availability_authorization.py::test_rolling_0146_verified_clocks_replace_only_unsupported_earlier_read_duration",
+    "setup": "Archive conversation, unavailable first review and successful later structured review, actual SQLite tool execution, separate creation authorization.",
+    "assertions": [
+      "Reject carrying over 2.8333 as a fixed duration, including writing any lookup-only deadline.",
+      "Keep enforcing other fields from the same successful read, including game type.",
+      "A corrected authorized create writes a single game at 20:00 with a 3-hour upper limit and no agreed duration.",
+      "Keep the read receipt and its submitted filters auditable. Record the source message, version, read receipt, opening, cutoff and replacement cap in tool_read_duration_superseded."
+    ],
+    "real_provider_rerun": false
+  }
+}
