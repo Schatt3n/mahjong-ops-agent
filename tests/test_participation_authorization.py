@@ -9,9 +9,10 @@ import pytest
 
 from mahjong_agent_runtime import AgentRuntime, InMemoryAgentStore, SQLiteAgentStore, StaticAgentClient, UserMessage
 from mahjong_agent_runtime.domains.delivered_game_offer import DELIVERED_GAME_OFFER, _offer_terms
+from mahjong_agent_runtime.domains.participation_authorization import customer_participation_deadline
 from mahjong_agent_runtime.domains.table_availability_authorization import explicit_customer_play_deadline
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient
-from mahjong_agent_runtime.models import InviteStatus, QuotedMessageRef, using_clock
+from mahjong_agent_runtime.models import ConversationRole, ConversationTurn, InviteStatus, QuotedMessageRef, using_clock
 from mahjong_agent_runtime.task_context import TaskContextManager
 
 from tests.test_agent_runtime import action_json
@@ -284,3 +285,25 @@ def test_unresolved_hard_departure_does_not_turn_into_unconditional_participatio
     assert explicit_customer_play_deadline("22点左右必须走", sent_at=AT) == {
         "must_end_by": None, "clock_text": "22点",
     }
+
+
+def test_legacy_customer_deadline_uses_original_trace_without_inventing_a_message_id():
+    """旧会话缺少平台消息编号时，仍可凭原始轮次来源保留顾客条件。"""
+    store = InMemoryAgentStore()
+    with using_clock(lambda: AT):
+        game, _ = store.create_game(conversation_id="host-thread", organizer_id="host", organizer_name="店家",
+            requirement={"game_type": "sichuan_mahjong", "planned_start_at": "2026-11-25T20:45:00+08:00"},
+            known_players=[], trace_id="seed")
+        store.append_turn("guest-thread", ConversationTurn(
+            ConversationRole.USER, "我最多打到22点", "legacy-trace", sender_id="guest",
+        ))
+        store.append_assistant_turn("guest-thread", "散场还没定，要报吗？", "table-offer", metadata={
+            "delivery_status": "delivered", DELIVERED_GAME_OFFER: {
+                "game_id": game.game_id, "recipient_id": "guest", "terms": _offer_terms(game.to_dict()),
+            },
+        })
+        reply = UserMessage("guest-thread", "guest", "顾客", "好，给我报一下。")
+        assert customer_participation_deadline(store, reply, game) == {
+            "must_end_by": "2026-11-25T22:00:00+08:00", "clock_text": "22点",
+            "source_message_id": None, "source_trace_id": "legacy-trace",
+        }

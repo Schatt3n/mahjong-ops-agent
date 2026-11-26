@@ -69,7 +69,7 @@ def customer_authorization_evidence(
         if speaker == "shop" and same_table_offer is not None:
             row["verified_same_table_offer"] = same_table_offer(turn)
         elif speaker == "customer" and include_customer_source:
-            row.update(source_message_id=metadata.get("source_message_id") or turn.turn_id,
+            row.update(source_message_id=metadata.get("source_message_id") or None, source_trace_id=turn.trace_id,
                        sent_at=turn.occurred_at.isoformat())
         rows.append(row)
     if quoted_table_offer:

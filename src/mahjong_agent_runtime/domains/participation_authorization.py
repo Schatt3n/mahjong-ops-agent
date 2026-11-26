@@ -53,7 +53,9 @@ def customer_participation_deadline(store: AgentStore, message: UserMessage, gam
     if not customer:
         return None
     deadline = explicit_customer_play_deadline(customer["text"], sent_at=datetime.fromisoformat(customer["sent_at"]))
-    return {**deadline, "source_message_id": customer["source_message_id"]} if deadline is not None else None
+    if deadline is None:
+        return None
+    return {**deadline, "source_message_id": customer["source_message_id"], "source_trace_id": customer["source_trace_id"]}
 
 
 def check_unknown_duration_participation(
