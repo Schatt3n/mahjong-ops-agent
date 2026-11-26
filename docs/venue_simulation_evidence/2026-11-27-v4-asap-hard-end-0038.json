@@ -1,0 +1,31 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "trace_id": "trace_5295fa21fef851c9899f654c",
+  "customer_message_id": "customer:role-event:c766ac8a2390a8bcdad079e4faabc137b8abb536d79d2252d271d40d3c94b678",
+  "actual_reply_id": "outbound:trace_5295fa21fef851c9899f654c:1",
+  "customer": "老板 那就帮我组一桌杭州麻将一点底 我现在能到 下午四点前都有空",
+  "actual_reply": "好，杭麻一点底这桌给你记上了，现在一个，还差三个人，凑齐就开。",
+  "verified_availability": {
+    "clock_role": "departure_deadline",
+    "must_end_by": "2026-11-26T16:00:00+08:00",
+    "opening_window": null,
+    "has_fixed_opening_authority": false
+  },
+  "original_game_at_audit": {
+    "game_id": "game_b828f129230d",
+    "status": "inviting",
+    "created_at": "2026-11-26T09:37:00+08:00",
+    "recruitment_expires_at": "2026-11-26T13:37:00+08:00",
+    "remaining_seats": 3,
+    "planned_start_at": null,
+    "actual_started_at": null
+  },
+  "isolated_offline_table_counterfactual": {
+    "summary": "同样没有落盘结束界限的沙盒牌局，在 13:37 前收到四份开场回复后可写入 12:15 开场。这里验证的是机制，原跑次没有发生这次开场。",
+    "votes": ["waiting", "waiting", "waiting", "committed"],
+    "planned_end_at": "2026-11-26T16:15:00+08:00",
+    "actual_start_at": "2026-11-26T12:18:00+08:00",
+    "expected_play_end_at": "2026-11-26T16:18:00+08:00"
+  },
+  "guard_and_scope": "核实离店界限且未定开场时，禁止新建无法落实该界限的人齐开局。保留委托，可以查能在 16:00 前结束的现成桌，或请本人确认具体开场。通过了建局排期的硬界限目前仍没有个人席位的长期绑定，实际开场延误和既有牌局需要独立评估。"
+}

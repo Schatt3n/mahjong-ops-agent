@@ -898,6 +898,74 @@ def test_explicit_opening_and_departure_can_still_define_a_fixed_game():
         )
 
 
+@pytest.mark.parametrize("hard_end", [True, False])
+def test_v4_0038_asap_recruitment_expiry_does_not_bind_the_end_of_play(tmp_path, hard_end):
+    """保留本人截止的只读查询。人齐开没有对应散场机制时不能写已托付的新局。"""
+    at = datetime.fromisoformat("2026-11-26T09:37:00+08:00")
+    cutoff = "2026-11-26T16:00:00+08:00"
+    store = SQLiteAgentStore(tmp_path / "rolling-0038.sqlite3")
+    prior = _incoming("老板 上午有杭州麻将一点底的桌吗 现在就能到 还有位吗", sent=at - timedelta(minutes=2),
+                      message_id="first-lookup")
+    text = "老板 那就帮我组一桌杭州麻将一点底 我现在能到"
+    message = _incoming(text + (" 下午四点前都有空" if hard_end else " 人齐开"), sent=at)
+    reviewer = ReviewClient([_decision(3, clock_role="departure_deadline", opening_window=None,
+        accepted_stake_range={"min": 1, "max": 1}, supporting_customer_refs=[1, 3])])
+    creation = ReviewClient([{"scope": "create", "customer_ref": 3, "shop_offer_ref": None}])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=reviewer,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1}
+
+    def run_tool(name, arguments, step):
+        action = AgentAction(goal="按本人委托处理杭麻组局", objective_status="needs_tool", reasoning_summary="核实时间",
+                             tool_calls=[ToolCall(name, arguments)])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="rolling-0038",
+            run_version=store.conversation_version("dm")).tool_results[0]
+
+    def create(step, requirement):
+        return run_tool("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                        "requirement": terms | requirement}, step)
+
+    with using_clock(lambda: prior.sent_at):
+        _activate(store, started=prior.sent_at)
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "上午现在没有能搭的杭麻一块底桌诶，要不我帮你组一桌？", "offer",
+                                   metadata={"delivery_status": "delivered"})
+    with using_clock(lambda: at):
+        _persist(store, message)
+        original = create(1, {"start_time_kind": "asap_when_full"})
+        if not hard_end:
+            assert original.called and original.allowed
+            game, = store.games.values()
+            assert game.expires_at.isoformat() == "2026-11-26T13:37:00+08:00" and game.planned_end_at is None
+            assert not reviewer.calls and len(creation.calls) == 1
+        else:
+            assert not original.called and not original.allowed
+            assert "人齐开无法落实" in original.error and cutoff in original.error
+            assert original.result["table_availability_evidence"]["must_end_by"] == cutoff
+            capped = create(2, {"start_time_kind": "asap_when_full", "max_duration_hours": 2})
+            assert not capped.called and not capped.allowed and "人齐开无法落实" in capped.error
+            guessed = create(3, {"start_time_kind": "scheduled", "planned_start_at": "2026-11-26T12:00:00+08:00"})
+            assert not guessed.called and not guessed.allowed and "还没选定" in guessed.error
+            assert not store.games and not store.invite_drafts and not creation.calls
+            assert not any(event.step == "tool_called" for event in trace.get_trace(message.message_id))
+
+            games = {}
+            for minute in (0, 15):
+                host = f"existing-{minute}"
+                game, _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name=host,
+                    known_players=[{"customer_id": host}], trace_id=host,
+                    requirement=terms | {"planned_start_at": f"2026-11-26T12:{minute:02d}:00+08:00", "duration_hours": 4})
+                games[minute] = game.game_id
+            query = run_tool("search_current_games", {"lookup_scope": "personal", "requirement": terms | {"must_end_by": cutoff}}, 4)
+            assert query.called and query.allowed and query.result["requirement"]["must_end_by"] == cutoff
+            assert [item["game"]["game_id"] for item in query.result["matches"]] == [games[0]]
+            assert set(store.games) == set(games.values()) and len(reviewer.calls) == 1
+        assert not store.room_reservations
+    store._connection.close()
+
+
 def test_rolling_0146_verified_clocks_replace_only_unsupported_earlier_read_duration(tmp_path):
     """回放两次独立核验和真实查写，修订旧查局时长并保留玩法、离店和建局授权守卫。"""
     at = datetime.fromisoformat("2026-11-25T19:05:00+08:00")

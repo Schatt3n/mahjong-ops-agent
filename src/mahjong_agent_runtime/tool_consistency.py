@@ -197,6 +197,12 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
             return "拟建局的固定开场超出了核实过的可开打时段。"
     elif earliest and stamp < earliest:
         return "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
+    if hard_departure and planned is None:
+        # 人齐开的有效期约束招募，不能充当这一桌的散场时间。
+        return (
+            f"本次没有建局。顾客最晚只能打到 {hard_departure.isoformat()}，人齐开无法落实这个散场界限。"
+            "保留组局委托。可以按已核实的 must_end_by 查能按时结束的现成桌，或先问顾客能接受的具体开场。"
+        )
     if play_until:
         if evidence.get("prior_play_until") and (requested_end is not None or proposed_cap is not None):
             return "前文可打到的钟点仍是柔性条件。它不能充当硬离店或相减算出的小时上限。"
@@ -216,10 +222,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
                 )
         if unsupported_duration:
             return "不能把到店和离店时间相减当作顾客已约定的固定时长。"
-        if hard_departure and (
-            (ends_at and ends_at > hard_departure) or (planned is None and lifecycle["expires_at"] > hard_departure)
-        ):
-            return f"拟建局的安排超出顾客离店时间 {hard_departure.isoformat()}，应先核实实际开场或时长。"
+    if hard_departure and ends_at and ends_at > hard_departure:
+        return f"拟建局的安排超出顾客离店时间 {hard_departure.isoformat()}，应先核实实际开场或时长。"
     return None
 
 
