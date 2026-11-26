@@ -49,7 +49,84 @@
       "historical_games": 3,
       "model": "deepseek-v4.1-flash",
       "provider": "opencode_go"
+    },
+    "cold": {
+      "status": "passed",
+      "checks": {
+        "actually_used_open_code_actors": true,
+        "first_owner_request_has_expected_attendance_profile": true,
+        "one_fixed_opening_inside_requested_calendar_window": true,
+        "created_one_seat_with_learned_conditions": true,
+        "substantive_reply_to_requester": true,
+        "formal_board_linked_to_created_game": true,
+        "no_proactive_private_invites": true
+      },
+      "turns": [
+        {
+          "customer": "老板早，今天上午九点到十点想打一桌杭州麻将，1块底，无烟，能帮忙组一桌吗？",
+          "status": "waiting_user",
+          "trace_id": "trace_15ada85c501c5163c6e690c8",
+          "substantive_delivered": true,
+          "outputs": [
+            "上午九点到十点这个档现在没有现成的1块无烟杭麻桌，我帮你组一桌，你定个具体开场时间吧？"
+          ]
+        },
+        {
+          "customer": "那就九点半开场吧，1块底无烟杭麻，能约吗？",
+          "status": "completed",
+          "trace_id": "trace_4a2ab6a402494e7255d83de1",
+          "substantive_delivered": true,
+          "outputs": [
+            "九点半这桌给你记上了，1块底无烟杭麻，现在你一个，还差三位。九点半到一点半有包间空着，不过还没给你订房，人凑齐了再定哈。"
+          ]
+        }
+      ],
+      "board_texts": [
+        "当前缺人局：\n1、2026-11-27 09:30 杭麻 1 无烟 173"
+      ],
+      "created": [
+        {
+          "planned_start": "2026-11-27T09:30:00+08:00",
+          "terms": {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "no_smoking"
+          },
+          "claimed": 1,
+          "remaining": 3
+        }
+      ],
+      "drafts": 0,
+      "seed": 42,
+      "window": [
+        "2026-11-27T09:00:00+08:00",
+        "2026-11-27T10:00:00+08:00"
+      ],
+      "started_at": "2026-11-27T01:12:00+08:00",
+      "historical_games": 0,
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "causal_followup": {
+        "source_message_id": "booking-1",
+        "receipt_id": "outbound:trace_15ada85c501c5163c6e690c8:1",
+        "next_message_id": "booking-2",
+        "text_matches_received_message": true
+      },
+      "first_grounded_read_matches": 0,
+      "first_attempt_fixed_create_rejected": true
     }
   },
-  "scope": "运行在独立沙盒。只核对凌晨预约直至群看板发布，开场和早上的招募调度另行观测。"
+  "scope": "运行在独立沙盒。只核对凌晨预约直至群看板发布，开场和早上的招募调度另行观测。",
+  "deterministic_controls": {
+    "fixture": "tests/simulation/venue_overnight_morning.py",
+    "tests": "tests/simulation/test_venue_overnight_morning.py",
+    "new_cases": 3,
+    "targeted_initial": 48,
+    "targeted_integrated": 24,
+    "cases": [
+      "new caller requests this morning",
+      "known caller requests next calendar morning",
+      "caller withholds fixed-start choice, read succeeds and write is blocked"
+    ]
+  }
 }
