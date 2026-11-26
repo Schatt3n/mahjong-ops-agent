@@ -1,0 +1,265 @@
+{
+  "run": "2026-11-25-real-4d951e2082",
+  "sandbox_integration": "066516c",
+  "mode": "real",
+  "scenario": "private-initiation",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "failed",
+  "people": 500,
+  "targeted_users": 1,
+  "workers": 1,
+  "max_turns": 2,
+  "real_customer_actions": 2,
+  "peak_inflight_decisions": null,
+  "peak_inflight_deliveries": 1,
+  "chat_events": 4,
+  "sandbox_consent_prompt_sha256": "85846369400234df0cf4216074a4d604bdab9722650b648d132d90da2a6c2d29",
+  "elapsed_seconds": 119.537,
+  "show_verified_write_scope": true,
+  "sandbox_reply_consent_prompt_sha256": "1d345ff22b3e00381023ac3d75a79ac694219f583f6b4bcb728eb1305531cc54",
+  "checks": {
+    "all_targeted_users_have_evidence": true,
+    "overlapping_channel_delivery": true,
+    "outcomes_grounded": false,
+    "customer_decisions_from_model": true,
+    "causal_private_dialogues": true,
+    "role_truth_not_in_agent_trace": true,
+    "existing_friends_can_open_private_dialogues": true,
+    "each_friend_has_causal_private_followup": true,
+    "each_friend_created_own_new_game": false,
+    "created_games_have_distinct_private_origins": false,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true,
+    "independent_write_authorization_available": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "private_initiation": {
+    "owner_friends": 500,
+    "private_openers": 1,
+    "verified_organizers": 0,
+    "persisted_new_games": 0,
+    "forming_games": 0,
+    "recruiting_games": 0,
+    "scoped_creation_evidence_required": true
+  },
+  "profile_evidence": {
+    "source": "sqlite_store",
+    "formal_profiles": {
+      "customers_at_start": 500,
+      "customers_at_end": 500,
+      "customers_with_changed_fields": 0,
+      "customers_with_non_default_fields": 0,
+      "changed_fields": {}
+    },
+    "attendance_defaults": {
+      "customers_with_completed_play": 0,
+      "customers_with_consistent_completed_play": 0,
+      "customers_eligible_for_attendance_defaults": 0
+    },
+    "customer_relationship_records": 0,
+    "current_task_memory_records_by_status": {},
+    "long_term_candidate_records_by_status": {},
+    "visible_source_pending_candidate_check": null
+  },
+  "causal_multi_round_customers": 1,
+  "outcome_counts": {},
+  "technical_failure_counts": {
+    "model_fault": 1
+  },
+  "independent_judge": {
+    "status": "valid",
+    "verdict": "fail"
+  },
+  "write_authorization": {
+    "decisions": {
+      "authorized": 1,
+      "no_permission": 1
+    },
+    "authorized_scopes": {
+      "organize": 1
+    },
+    "blocked_writes": 0,
+    "blocked_by_tool": {},
+    "blocked_by_reason": {},
+    "audit_errors": 0
+  },
+  "write_authorization_coverage": "exercised",
+  "judge_samples": [
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 2756,
+      "elapsed_ms": 29349.221
+    }
+  ],
+  "models": {
+    "agent": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "role": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 1600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "judge": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 2600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "reply_self_review": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 16384,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "low"
+    },
+    "write_authorization": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 700,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    }
+  },
+  "model_source": "opencode-go",
+  "actor_observations": {
+    "valid_actions": {
+      "send": 2
+    },
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 1,
+    "distinct_first_message_texts": 1,
+    "real_decision_actors_with_two_calendar_days": 0
+  },
+  "delivered_turn_runtime_outcomes": [
+    "needs_help",
+    "needs_human"
+  ],
+  "timeouts_seconds": {
+    "agent": 120.0,
+    "role": 35.0,
+    "judge": 45.0,
+    "reply_self_review": 75.0,
+    "write_authorization": 35.0
+  },
+  "confirmed_declined_equivalent_stake": {
+    "verified_range": {
+      "min": 1,
+      "max": 1
+    },
+    "verified_cap": null,
+    "rejected_calls": [
+      {
+        "tool": "search_current_games",
+        "stake": 1
+      },
+      {
+        "tool": "search_current_games",
+        "stake": 1
+      }
+    ]
+  },
+  "usage": {
+    "sources": [
+      "events.jsonl",
+      "write_authorization.jsonl",
+      "report.json",
+      "agent_trace.log"
+    ],
+    "unreadable_records_by_source": {},
+    "total": {
+      "observed_attempts": 13,
+      "attempts_with_usage": 10,
+      "missing_usage_attempts": 3,
+      "input_tokens": 131564,
+      "output_tokens": 3416,
+      "cache_hit_input_tokens": 117760,
+      "cache_miss_input_tokens": 13804,
+      "unknown_cache_input_tokens": 0
+    },
+    "stages": {
+      "judge": {
+        "observed_attempts": 2,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 1,
+        "input_tokens": 2803,
+        "output_tokens": 225,
+        "cache_hit_input_tokens": 2688,
+        "cache_miss_input_tokens": 115,
+        "unknown_cache_input_tokens": 0
+      },
+      "other_runtime": {
+        "observed_attempts": 1,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 0,
+        "input_tokens": 1519,
+        "output_tokens": 161,
+        "cache_hit_input_tokens": 1280,
+        "cache_miss_input_tokens": 239,
+        "unknown_cache_input_tokens": 0
+      },
+      "role": {
+        "observed_attempts": 2,
+        "attempts_with_usage": 2,
+        "missing_usage_attempts": 0,
+        "input_tokens": 6341,
+        "output_tokens": 89,
+        "cache_hit_input_tokens": 2944,
+        "cache_miss_input_tokens": 3397,
+        "unknown_cache_input_tokens": 0
+      },
+      "shop": {
+        "observed_attempts": 5,
+        "attempts_with_usage": 3,
+        "missing_usage_attempts": 2,
+        "input_tokens": 115682,
+        "output_tokens": 2841,
+        "cache_hit_input_tokens": 106496,
+        "cache_miss_input_tokens": 9186,
+        "unknown_cache_input_tokens": 0
+      },
+      "write_guard": {
+        "observed_attempts": 3,
+        "attempts_with_usage": 3,
+        "missing_usage_attempts": 0,
+        "input_tokens": 5219,
+        "output_tokens": 100,
+        "cache_hit_input_tokens": 4352,
+        "cache_miss_input_tokens": 867,
+        "unknown_cache_input_tokens": 0
+      }
+    },
+    "deduplicated_attempt_records": 0,
+    "unidentified_attempt_records": 0,
+    "conflicting_usage_attempts": 0
+  }
+}
