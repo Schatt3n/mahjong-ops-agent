@@ -137,5 +137,17 @@
     "passed": 4,
     "all_59_role_contexts_audited": true,
     "shop_trace_does_not_contain_peer_message": true
+  },
+  "targeted_chitchat_tests": {
+    "passed": 7,
+    "covers": [
+      "group weather chitchat stays out of main business processing",
+      "returned to the same pending game after unrelated conversation",
+      "state and memory isolation"
+    ]
+  },
+  "simulation_test_suite": {
+    "passed": 598,
+    "path": "tests/simulation"
   }
 }
