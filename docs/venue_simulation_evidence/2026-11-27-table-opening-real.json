@@ -1,0 +1,73 @@
+{
+  "cases": [
+    {
+      "run": "table-opening-dpd8mtoy",
+      "scenario": "agree_after_counterproposal",
+      "status": "passed",
+      "model": "deepseek-v4.1-flash",
+      "scope": "real_customers_and_independent_table_opening_semantic_review",
+      "checks": {
+        "five_distinct_group_members_and_outsider_isolated": true,
+        "all_real_roles_completed_valid_actions": true,
+        "all_real_reviews_have_valid_votes": true,
+        "settlement_matches_fixture_expectation": true,
+        "no_ineligible_time_accepted_or_physical_side_effect": true
+      },
+      "settlement": {
+        "proposal_id": "opening-proposal:2",
+        "start_at": "2026-11-27T19:30:00+08:00",
+        "accepted_count": 4,
+        "committed": true
+      },
+      "rounds": [
+        {
+          "proposal": "19:00 开大家能到吗？都行的话就定这个时间。",
+          "customer_models": [
+            "19点我能到，打四小时没问题，就定这个点吧",
+            "老板，19点能到，我能打四小时，就定这个点吧",
+            "19点能到，四小时没问题，就这个点吧",
+            "19点赶不上，我最早19点半到。能往后挪到19点半开吗？"
+          ],
+          "classified": [
+            "accept",
+            "accept",
+            "accept",
+            "decline"
+          ],
+          "vote_results": [
+            "waiting",
+            "waiting",
+            "waiting",
+            "declined"
+          ]
+        },
+        {
+          "proposal": "19:30 开大家能到吗？都行的话就定这个时间。",
+          "customer_models": [
+            "19点半能到，四小时没问题，就这个点吧",
+            "老板，19点半能到，打四小时没问题，就定这个点吧",
+            "19点半能到，四小时没问题，就这个点吧",
+            "19点半能到，四小时没问题，就这个点吧"
+          ],
+          "classified": [
+            "accept",
+            "accept",
+            "accept",
+            "accept"
+          ],
+          "vote_results": [
+            "waiting",
+            "waiting",
+            "waiting",
+            "committed"
+          ]
+        }
+      ],
+      "confirmation": [
+        "那就 19:30 开，大家按这个时间到哈。"
+      ]
+    }
+  ],
+  "command": "PYTHONPATH=src python scripts/run_venue_table_opening.py",
+  "provider_limits": "受控首时刻，四位角色各自真模型生成，独立模型按实际送达来话分类。所有消息均在沙盒桌群内。"
+}
