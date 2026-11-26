@@ -1,0 +1,33 @@
+{
+  "run": "table_groups_50_offline_20261127/twelve-independent-table-groups",
+  "start_commit": "4558caf",
+  "mode": "controlled_offline",
+  "seed": 42,
+  "active_actors": 50,
+  "confirmed_table_actors": 48,
+  "outside_observers": 2,
+  "workers": 8,
+  "dialogue_turns": 4,
+  "scope": "从已满席的人齐开桌启动常规滚动调度，使用受控顾客和店家判词验证多桌并发、消息隔离及正式时间落库。",
+  "status": "passed",
+  "observations": {
+    "opened_rooms": 12,
+    "shop_inquiries": 12,
+    "opening_proposals": 24,
+    "opening_confirmations": 12,
+    "durable_group_messages": 192,
+    "role_receipt_events": 288,
+    "shop_receipt_events": 144,
+    "tables_with_four_matching_votes_and_persisted_1930": 12,
+    "observer_messages": 0,
+    "cross_table_deliveries": 0,
+    "rerun_extra_messages": 0,
+    "elapsed_seconds_including_rerun": 10.14
+  },
+  "raw_archive_sha256": {
+    "chat.jsonl": "36e39d9295033f9c4254dd3d6a4571cde1a6dbf514e4bd40f91bfcae31a1cbce",
+    "events.jsonl": "b6d62cb821de50805e316f6abae004bb3c1dfc6d9876990566a5b460bc8f56ce",
+    "table-shop.jsonl": "e4955e0daf911800c6f3c75047ff42086d12566bcbd958cd168e160a0e76371f"
+  },
+  "real_rolling_expansion_gate": "evaluated_separately"
+}
