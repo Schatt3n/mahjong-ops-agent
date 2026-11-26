@@ -1105,9 +1105,9 @@ def test_owner_source_contract_loads_real_catalog_and_all_golden_fragments():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     contract = module.load_owner_semantic_contract()
-    assert len(contract["scenario_ids"]) == 35
-    assert len(set(contract["scenario_ids"])) == 35
-    assert len(contract["golden_case_ids"]) == 37
+    assert len(contract["scenario_ids"]) == 36
+    assert len(set(contract["scenario_ids"])) == 36
+    assert len(contract["golden_case_ids"]) == 38
     assert "synthetic_live_casual_operational_discussion_boundary" in contract["golden_case_ids"]
     assert set(contract["expectations"]) == set(contract["scenario_ids"])
     assert all(expected["golden_sources"] and expected["required_meaning"] for expected in contract["expectations"].values())

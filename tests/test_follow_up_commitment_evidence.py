@@ -106,13 +106,22 @@ def test_open_game_only_payload_does_not_fabricate_commitment_evidence(open_game
 def test_real_follow_up_is_projected_without_claiming_delivery(open_game_with_empty_candidates):
     """真实持久复查可证明范围内的后续重评，仍不能证明已外发或无限通知。"""
     fixture = open_game_with_empty_candidates
-    store, _, _, evidence, execute = fixture
+    store, gateway, message, evidence, execute = fixture
     stamp = now()
     scheduled = execute("schedule_follow_up", {"goal": "有限复查本次组局是否有新进展", "waiting_for": "players",
         "due_at": (stamp + timedelta(minutes=5)).isoformat(), "expires_at": (stamp + timedelta(minutes=30)).isoformat(),
         "review_budget": 1}, 3)
     assert scheduled.called and scheduled.allowed and not scheduled.error
     evidence.append(scheduled)
+    context = AgentContextBuilder(store, gateway).build(
+        message, trace_id="followup-model-context", turn_tool_evidence=evidence,
+    )
+    receipt = context.payload["turn_tool_evidence"][-1]["result"]
+    assert receipt["continuation"]["can_stop"] is True
+    assert receipt["continuation"]["allowed_terminal_statuses"] == ["completed", "waiting_user"]
+    assert receipt["continuation"]["pending_capabilities"] == []
+    assert "当前无其他必要动作且无需客户答复时用 completed" in receipt["instruction"]
+    assert "只有确实需要客户回答或选择才用 waiting_user" in receipt["instruction"]
     payload = _review_payload(fixture, "我过会儿再看看，有进展跟你说。")
     task = scheduled.result["follow_up"]
     assert task["task_id"] in store.scheduled_tasks
@@ -130,6 +139,27 @@ def test_real_follow_up_is_projected_without_claiming_delivery(open_game_with_em
     assert any("覆盖该范围内有进展再反馈的承接" in rule for rule in rules)
     assert any("有限安排不证明无限跟进、一定凑齐或已经外发" in rule for rule in rules)
     assert any("招募窗口任务只支持届时开启招募，不自动支持通知发起人" in rule for rule in rules)
+
+
+def test_rejected_follow_up_cannot_end_as_completed(open_game_with_empty_candidates):
+    """复查未持久化仍保留责任，只有真实待答或转人工等终态可以结束。"""
+    store, _, _, evidence, execute = open_game_with_empty_candidates
+    stamp = now()
+    rejected = execute("schedule_follow_up", {
+        "goal": "复查当前进展",
+        "waiting_for": "players",
+        "due_at": (stamp + timedelta(seconds=30)).isoformat(),
+        "expires_at": (stamp + timedelta(minutes=30)).isoformat(),
+    }, 3)
+    assert not rejected.called and not rejected.allowed and not store.scheduled_tasks
+    continuation = rejected.result["continuation"]
+    assert continuation["can_stop"] is False
+    assert continuation["allowed_terminal_statuses"] == ["waiting_user", "needs_human", "unknown"]
+    assert continuation["pending_capabilities"] == ["persist_follow_up_or_clarify"]
+    action = AgentAction(
+        goal="复查当前进展", objective_status="completed", reasoning_summary="", reply_to_user="已经安排好了。",
+    )
+    assert blocking_continuation(action, [*evidence, rejected]) == continuation
 
 
 @pytest.mark.parametrize("change", ["cancelled", "expired", "wrong_goal", "wrong_customer"])

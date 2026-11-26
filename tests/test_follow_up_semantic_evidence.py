@@ -90,6 +90,36 @@ def project(owner, store, message, tools):
     return evidence
 
 
+@pytest.mark.parametrize("minutes,expected", [(5, True), (10, False)])
+def test_owner_callback_hard_check_reads_the_actual_bounded_task(owner, store, minutes, expected):
+    """独立评语即使通过，也不能替代同目标五分钟复查的真实读回。"""
+    scenario = next(scene for scene in owner.live_eval_scenarios()
+                    if scene.scenario_id == "issue6_authorized_finite_callback")
+    now_at = now()
+    message = replace(scenario.message, sent_at=now_at)
+    scenario = replace(scenario, message=message)
+    scenario.setup(store)
+    TaskContextManager(store).prepare(message, trace_id="prepare-callback")
+    store.append_user_turn(message, "callback-input")
+    search = execute(store, message, "search_current_games", {"requirement": {
+        "game_type": "national_standard_mahjong", "stake": "1", "smoke_preference": "no_smoke",
+    }}, 1)
+    scheduled = execute(store, message, "schedule_follow_up", {
+        "goal": "按当前条件复查是否有现成局", "waiting_for": "players", "review_budget": 1,
+        "due_at": (now_at + timedelta(minutes=minutes)).isoformat(),
+        "expires_at": (now_at + timedelta(minutes=20)).isoformat(),
+    }, 2)
+    result = SimpleNamespace(tool_results=[search, scheduled], final_reply="过会儿再帮你看下，有合适的再回你。",
+                             status="completed")
+    trace = [SimpleNamespace(step="final_output", content={}, occurred_at=now().strftime("%Y-%m-%d %H:%M:%S"))]
+    with reopened_store(store) as reader:
+        validation = owner.validate_result(result, scenario, trace, reader, semantic_assessment={"passed": True})
+    checks = {item["name"]: item["passed"] for item in validation["checks"]}
+    assert checks["finite_callback_should_persist_for_current_customer_and_goal"] is expected
+    assert checks["finite_callback_should_not_create_other_business_effects"]
+    assert validation["passed"] is expected, [item for item in validation["checks"] if not item["passed"]]
+
+
 def test_real_scheduled_follow_up_retains_scope_budget_and_observed_time(owner, store):
     message = current_message(store)
     scheduled = schedule(store, message)

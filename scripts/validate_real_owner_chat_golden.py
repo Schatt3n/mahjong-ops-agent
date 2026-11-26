@@ -28,6 +28,7 @@ from eval_product_contracts import (  # noqa: E402
 )
 
 DEFAULT_DATASET_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
+CALLBACK_DATASET_PATH = DEFAULT_DATASET_PATH.with_name("real_owner_chat_finite_callback_golden.jsonl")
 LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
 DEFAULT_TIMELINE_PATH = ROOT / "eval" / "golden" / "real_owner_chat_timeline_20260705_20260718.json"
 DEFAULT_TIMELINE_PATHS = tuple(sorted((ROOT / "eval" / "golden").glob("real_owner_chat_timeline_*.json")))
@@ -72,6 +73,7 @@ def read_default_records() -> list[dict[str, Any]]:
     """读取defaultrecords，不产生业务副作用。"""
     return [
         *read_jsonl(DEFAULT_DATASET_PATH),
+        *read_jsonl(CALLBACK_DATASET_PATH),
         *(read_json_document(path) for path in DEFAULT_TIMELINE_PATHS),
     ]
 
@@ -868,7 +870,7 @@ def main(argv: list[str] | None = None) -> int:
         "--dataset",
         type=Path,
         default=None,
-        help="Validate one JSONL dataset. By default validates the base JSONL and every multi-day timeline JSON.",
+        help="Validate one JSONL dataset. By default validates the base and callback JSONL and every multi-day timeline JSON.",
     )
     args = parser.parse_args(argv)
 
@@ -878,7 +880,7 @@ def main(argv: list[str] | None = None) -> int:
         "dataset": (
             str(args.dataset)
             if args.dataset
-            else [str(DEFAULT_DATASET_PATH), *(str(path) for path in DEFAULT_TIMELINE_PATHS)]
+            else [str(DEFAULT_DATASET_PATH), str(CALLBACK_DATASET_PATH), *(str(path) for path in DEFAULT_TIMELINE_PATHS)]
         ),
         "record_count": len(records),
         "error_count": len(errors),
