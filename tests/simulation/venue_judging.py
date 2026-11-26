@@ -28,6 +28,8 @@ DIALOGUE_PROJECTION_VERSION = 11
 ROLLING_REVIEW_INSTRUCTIONS = (
     "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
     "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
+    "先给各项独立定判。顾客说得清楚而店家漏答时，顾客项可以通过；顾客表述含糊而店家恰当处理时，店家项可以通过。"
+    "每项 reason 只解释本项的事实和影响，写入和理由一致的本项 verdict。最后再按各项结果汇总总 verdict。"
 )
 _CHECKS = (ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK)
 ROLLING_CHECK_IDS = {

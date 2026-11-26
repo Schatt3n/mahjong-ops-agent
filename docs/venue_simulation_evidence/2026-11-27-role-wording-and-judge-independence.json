@@ -1,0 +1,92 @@
+{
+  "scenario": "rolling-roles",
+  "actor_source": {
+    "run": "2026-11-25-real-f43d9234b8",
+    "code": "a87e461",
+    "related_group_history": [
+      {
+        "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "text": "371 七点半 0.5"
+      },
+      {
+        "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+        "text": "有烟还是无烟"
+      }
+    ],
+    "cases": [
+      {
+        "chat_message_id": "customer:role-event:739f03321e3f08c5799d5b3771bf43dfe2ccf4cf3c59e768d3fa2a71c514edd5",
+        "sent_at": "2026-11-25T11:00:00+00:00",
+        "delivered_text": "371那桌七点半 0.5 还有位吗 是无烟的",
+        "quote_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "actual_model_response": "{\"action\":\"send\",\"text\":\"371那桌七点半 0.5 还有位吗 是无烟的\",\"kind\":\"group\",\"recipient_id\":\"venue-group\",\"quote_message_id\":\"history:rolling:real_group_smoke_alternative_20261122_001:m01\"}",
+        "response_source": {
+          "call_id": "llm_call_9611bf9db42b423ba830791e1148fbbc",
+          "http_response_complete": true,
+          "raw_response_sha256": "cca48c2b77ee692be5f78011789e1f3ccac230dbfe91aa0bf8dc056ef660270b",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 1,
+          "terminal_attempt_id": "llm_attempt_a8e623afe4f04281a8b451d40b8b65fa",
+          "trace_id": "role:role-event:739f03321e3f08c5799d5b3771bf43dfe2ccf4cf3c59e768d3fa2a71c514edd5"
+        },
+        "shop_trace_id": "trace_f71fbd33c14fc510b711e3d5",
+        "shop_group_routing": "member_discussion"
+      },
+      {
+        "chat_message_id": "customer:role-event:88b1e020e1443ef614fb3b574dcf373e1a44cc74ee9a895a1e1686bae1375acd",
+        "sent_at": "2026-11-25T11:00:00+00:00",
+        "delivered_text": "371那桌七点半是无烟的 得看无烟才坐 我最早晚上七点五十能到 还能搭一桌吗",
+        "quote_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "actual_model_response": "{\"action\":\"send\",\"text\":\"371那桌七点半是无烟的 得看无烟才坐 我最早晚上七点五十能到 还能搭一桌吗\",\"kind\":\"group\",\"recipient_id\":\"venue-group\",\"quote_message_id\":\"history:rolling:real_group_smoke_alternative_20261122_001:m01\"}",
+        "response_source": {
+          "call_id": "llm_call_1d6034381022432e95c249d537f8720a",
+          "http_response_complete": true,
+          "raw_response_sha256": "03da2fcc987c9b9982b9e237cbeb5367ef5585fbffad91ab5ec27c6431af043f",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 3,
+          "terminal_attempt_id": "llm_attempt_b45d5b5c86bb4510b02f41de97d9a781",
+          "trace_id": "role:role-event:88b1e020e1443ef614fb3b574dcf373e1a44cc74ee9a895a1e1686bae1375acd"
+        },
+        "shop_trace_id": "trace_3584355c9c1591e7a9aa4ea6",
+        "shop_group_routing": "member_discussion"
+      }
+    ]
+  },
+  "judge_source": {
+    "run": "2026-11-25-real-f16f5ddc00",
+    "code": "0e96d31",
+    "report_sha256": "c73c7dfb0604b4a3b5226798467d42ed845250f4c08546ed2a328fae9d162c76",
+    "cases": [
+      {
+        "case_id": "dialogue:venue-sender-0038",
+        "original_overall": "fail",
+        "original_role_verdict": "fail",
+        "original_shop_verdict": "fail",
+        "role_reason_excerpt": "逐项评价对象 E03、E05、E11、E15、E19 均已覆盖，顾客行为自然、未发现违规，判 pass",
+        "raw_sha256": "3869e1bf567f5234aa4ccdce5e5388d11f1dcc259c7a9a9b95e98c37dc438865"
+      },
+      {
+        "case_id": "dialogue:venue-sender-0102",
+        "original_overall": "fail",
+        "original_role_verdict": "fail",
+        "original_shop_verdict": "fail",
+        "role_reason_excerpt": "综合顾客项可按 pass 处理，不过本输出受店家项 fail 影响总 verdict",
+        "raw_sha256": "d6a0089122f9c6dbbcb709ccc2eabe7d19c6a3ce2cf812e525611c8af3a1aad6"
+      }
+    ]
+  },
+  "findings": [
+    "群友原话列出 371、七点半和 0.5，随后只有人问烟况。0022 末尾像没说完的问句，0405 把尚未核实的烟况说得像事实，另有本人希望无烟及最早可到时间。",
+    "两条顾客原稿都实际送达，店家路由都按普通群友交流静默。给某群友追问与明确请老板另查是不同动作，不按静默本身归店家失败。",
+    "第六轮两份评审给顾客项填 fail，理由却写顾客可通过；各自店家项仍有独立失败理由。结构有效与理由相符分别核对。"
+  ],
+  "changes": [
+    "顾客生成提示要求用当时确实见到的桌况，并把未知烟况写成询问、带语气词或条件式，用自己自然的说法。群里需要店家另查时要指向店家。",
+    "逐项独立评审。顾客与店家的表现在各自判项内依据证据判，最后才汇总。禁止用另一项的结果改这项的 verdict。"
+  ],
+  "verification_scope": "归档的真实发言及原始评审保持原样。新提示仅随下一次运行生效，原扩容门槛保持八项。"
+}
