@@ -38,15 +38,17 @@ _MISSING_ACTION_FIELDS = {
     f"missing required key: {key}" for key in ("reply_to_user", "tool_calls", "needs_human", "stop_reason")
 }
 _MISSING_REQUIRED_TOOL_CALLS = frozenset({"missing required key: tool_calls", "needs_tool requires at least one tool_call"})
+_MISSING_ACTIONABLE_TOOL_CALL = frozenset({"needs_tool requires at least one tool_call"})
+_DUPLICATE_ACTION_JSON_KEY = "response is not valid JSON: duplicate JSON key: "
 _ACTION_ENVELOPE_RETRY = (
-    "【补齐主模型动作】上一次模型已返回完整正文，但缺少执行和回复所需的动作字段，整步未通过动作合同，也未执行。"
+    "【补齐主模型动作】上一次模型已返回完整正文，但整步未通过动作合同，也未执行。"
     "根据本轮真实来话、已执行的工具结果和 available_tools 重新生成一个完整 AgentAction。"
     "以下是完整根字段的类型示意，填实际值，不要照抄类型占位："
     '{"goal":"string","objective_status":"string","tool_calls":[],"reasoning_summary":"string",'
     '"reply_to_user":"string","needs_human":"boolean","stop_reason":'
     '{"can_stop":"boolean","why":"string","pending_work":["string"],"depends_on_tool_results":"boolean"},'
     '"objective_state":{},"objective_plan":[],"plan_revision_reason":"string"}'
-    "先写齐 tool_calls 等执行字段，再写简短状态和计划；objective_plan 不能替代实际提交的调用。"
+    "先写齐 tool_calls 等执行字段，再写简短状态和计划；objective_plan 不能替代实际提交的调用。每个 JSON 对象内同名键只写一次。"
     "本步需要工具时，选已授权且当下可执行的实际调用，使用 needs_tool、空回复、can_stop=false 和非空 pending_work。"
     "只回复或等待时，使用对应终态、空工具数组和 can_stop=true；静默仍按原合同声明。"
     "不把计划当成已执行事实，不因补齐结构添加未知业务事实或扩大授权。"
@@ -123,9 +125,13 @@ class ContextLifecycleManager:
                     and (previous_source := _completed_contract_source(
                         evidence, trace_id=trace_id, rejected_step=step_index - 2,
                     )) is not None), None)
-            if not _MISSING_ACTION_FIELDS.issubset(errors) and prior_source is None:
+            complete_structure_repair = (
+                _MISSING_ACTION_FIELDS.issubset(errors) or errors == _MISSING_ACTIONABLE_TOOL_CALL
+                or (len(errors) == 1 and next(iter(errors)).startswith(_DUPLICATE_ACTION_JSON_KEY))
+            )
+            if not complete_structure_repair and prior_source is None:
                 continue
-            # 只补充上一完整回执缺少的协议形状，继续用原请求和权限选择动作。
+            # 只补充上一完整回执拒绝的协议形状，继续用原请求和权限选择动作。
             built.messages.insert(len(built.messages) - 1, {"role": "system", "content": _ACTION_ENVELOPE_RETRY})
             self.trace_recorder.record(trace_id, "agent_action_envelope_retry_prompt", {
                 "step_index": step_index, "rejected_response_source": source,

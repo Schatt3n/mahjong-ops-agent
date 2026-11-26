@@ -1,0 +1,50 @@
+{
+  "run": "2026-11-25-real-f16f5ddc00",
+  "start_commit": "0e96d31",
+  "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+  "customer": {
+    "sequence": 38,
+    "message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+    "text": "老板，一底到三底都行，你帮我组一桌吧。我七点四十能到。"
+  },
+  "delivered": {
+    "sequence": 39,
+    "message_id": "outbound:trace_4b84e1633c4b01139ba1ec18:1",
+    "text": "稍等一下"
+  },
+  "rejected_model_responses": [
+    {
+      "step": 1,
+      "http_response_complete": true,
+      "call_id": "llm_call_9c76768967c542fbb82b00a9a233651d",
+      "attempt_id": "llm_attempt_60ad2893bff0419f92594dbee6c7f10f",
+      "sha256": "85d3f2e23eb1db71f67d7df31415eb27938f0cc718eb43fa9db9ffca4fb04577",
+      "error": "needs_tool requires at least one tool_call"
+    },
+    {
+      "step": 2,
+      "http_response_complete": true,
+      "call_id": "llm_call_19d8aa8c6a53477db57abbff11378ffa",
+      "attempt_id": "llm_attempt_76446c80748e4da9a554f3cb587c2c53",
+      "sha256": "55ef0fcb7efa4cf5d4ef2a3d3b3ff53a9b5ad75e6ea26821076c160bc56f2d9f",
+      "error": "response is not valid JSON: duplicate JSON key: active_game_id"
+    },
+    {
+      "step": 3,
+      "http_response_complete": true,
+      "call_id": "llm_call_136f170e35df4340893b76c0c3263488",
+      "attempt_id": "llm_attempt_5203056247134bc3995417d94c714c8f",
+      "sha256": "2404321d8236f9d860d10d4f67481990125654858cb1078c31777797b5154aa3",
+      "missing_fields": ["reply_to_user", "tool_calls", "needs_human", "stop_reason"]
+    }
+  ],
+  "original_terminal_reason": "agent_loop_no_progress",
+  "business_tool_executions": 0,
+  "replay": {
+    "type": "offline_fixture",
+    "uses_exact_inbound": true,
+    "controlled_responses": "空工具动作、重复键、正常澄清各一份。使用完整 HTTP 来源和无来源返回的成对控制。",
+    "expected": "只有当前同一 trace 的完整拒绝触发原重试提示，顾客收到正常澄清。零业务执行和写入，不增加运行步数。",
+    "targeted_passed": 366
+  }
+}

@@ -452,6 +452,48 @@ def test_action_envelope_hint_requires_complete_http_and_the_missing_execution_f
     assert not any(item["content"].startswith("【补齐主模型动作】") for item in client.messages[1])
 
 
+@pytest.mark.parametrize("complete_http", [True, False])
+def test_v6_0402_contract_hint_precedes_loop_abort_without_inventing_an_action(store, complete_http):
+    """完整正文的空调用和重复键都能在现有重试内重写，原用户权限和业务状态不变。"""
+    message = UserMessage(conversation_id="v6-action-envelope", sender_id="customer", sender_name="顾客",
+        text="老板，一底到三底都行，你帮我组一桌吧。我七点四十能到。", message_id="v6-exact-input")
+    expected = json.loads(_waiting())
+    expected["reply_to_user"] = "你想打哪种麻将？"
+    without_call = json.dumps({
+        **expected, "objective_status": "needs_tool", "reply_to_user": "",
+        "stop_reason": {"can_stop": False, "why": "还没有查局", "pending_work": ["查现成桌"],
+                        "depends_on_tool_results": True},
+    }, ensure_ascii=False)
+    terminal = json.dumps(expected, ensure_ascii=False)
+    duplicate = terminal[:-1] + ',"objective_state":{"active_game_id":null,"active_game_id":null}}'
+    responses = [without_call, duplicate]
+    if complete_http:
+        responses = [_text(raw, number=index) for index, raw in enumerate(responses, start=4)]
+    client = RecordingClient([*responses, _text(terminal, number=6)])
+    trace = InMemoryTraceRecorder()
+    result = AgentRuntime(store=store, llm_client=client, trace_recorder=trace).handle_user_message(
+        message, trace_id="source-trace",
+    )
+
+    assert result.status == "waiting_user" and result.final_reply == "你想打哪种麻将？"
+    assert len(client.messages) == 3
+    rejected = [event.content for event in trace.events if event.step == "action_contract_error"]
+    assert [row["errors"] for row in rejected] == [
+        ["needs_tool requires at least one tool_call"], ["response is not valid JSON: duplicate JSON key: active_game_id"],
+    ]
+    hints = [event.content for event in trace.events if event.step == "agent_action_envelope_retry_prompt"]
+    assert [(hint["step_index"], hint["rejected_response_source"]) for hint in hints] == (
+        [(step + 1, rejected[step - 1]["response_source"]) for step in (1, 2)] if complete_http else []
+    )
+    for request in client.messages[1:]:
+        guidance = [item["content"] for item in request if item["content"].startswith("【补齐主模型动作】")]
+        assert bool(guidance) is complete_http
+        if guidance:
+            assert "每个 JSON 对象内同名键只写一次" in guidance[0]
+    assert not store.games and not store.room_reservations and not store.invite_drafts
+    assert not any(event.step == "tool_called" for event in trace.events)
+
+
 @pytest.mark.parametrize(("mode", "hint_steps"), [
     ("actual_read", [2, 3]),
     ("denied_write", [2, 3]),
