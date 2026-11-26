@@ -590,7 +590,7 @@
         124
       ],
       "diagnosis": "顾客请求占席，同时请同桌视情况等到 20:05。独立核验未授予占席，五次写调用均未执行。审查仍反复退回如实说明未占席的草稿。",
-      "evidence": null
+      "evidence": "2026-11-27-v4-0022-conditional-seat-reply.json"
     }
   ],
   "actual_channel_ledger_counts": {
@@ -620,6 +620,7 @@
     "nearby_clock_query": "2026-11-27-v4-approximate-opening-search.json",
     "action_envelope_recovery": "2026-11-27-v4-0038-partial-action-envelope.json",
     "late_arrival_retry": "2026-11-27-v4-0022-late-arrival-retry.json",
+    "conditionally_requested_seat": "2026-11-27-v4-0022-conditional-seat-reply.json",
     "unverified_started_statement": "2026-11-27-v4-0402-actual-opening.json",
     "unverified_duration_fit": "2026-11-27-v4-0151-unverified-duration-fit.json",
     "future_public_question": "2026-11-27-v4-public-question-follow-up.json",
