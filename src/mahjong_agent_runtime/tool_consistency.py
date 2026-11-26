@@ -100,6 +100,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         if (call.name == "search_current_games" and scope == "specific_table"
                 and _uses_personal_clock_to_locate_table(requirement, evidence)):
             return "定位顾客问的原桌时，不能把本人到店、离店或等候的钟点当作该桌开场。请按原桌特征查余位。"
+        if call.name == "create_game" and evidence.get("named_future_opening"):
+            return "请先核实顾客提到的未来开场时段，再创建新局。不能直接按现在人齐开登记。"
         if call.name == "create_game" and evidence.get("clock_roles"):
             return "本次来话未核实为本人组织新局及开场的条件，不能用到店或离店的时间直接登记。"
         return None

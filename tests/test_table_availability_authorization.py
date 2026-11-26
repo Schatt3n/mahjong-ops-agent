@@ -11,7 +11,9 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
-from mahjong_agent_runtime.domains.table_availability_authorization import check_table_availability, qualified_table_clock
+from mahjong_agent_runtime.domains.table_availability_authorization import (
+    check_table_availability, qualified_table_clock, requires_table_clock_review,
+)
 from mahjong_agent_runtime.group_chat.parsing import parse_explicit_need
 from mahjong_agent_runtime.models import using_clock
 from mahjong_agent_runtime.runtime import message_idempotency_key
@@ -1197,6 +1199,144 @@ def test_opening_interval_preserves_read_and_requires_separate_authority_for_fix
         assert evidence["opening_window"] == bounds and "还没选定" in created.error
     assert len(review.calls) == 1
     store._connection.close()
+
+
+@pytest.mark.parametrize(("text", "hour", "needs_review"), [
+    ("帮我组一桌杭麻，今晚都行", 11, True),
+    ("帮我组个下午都能开的川麻", 11, True),
+    ("明晚有桌吗", 22, True),
+    ("老板晚上好，杭麻打无烟的", 11, False),
+    ("今晚可不可以通知我一下", 11, False),
+    ("晚上好，今天都行", 11, False),
+    ("昨天晚上都行", 11, False),
+    ("次日晚上都行", 11, False),
+    ("今晚都行", 23, False),
+    ("川麻人齐开就好", 11, False),
+])
+def test_named_opening_review_only_activates_for_explicit_future_scope_without_a_clock(text, hour, needs_review):
+    """只有明确未来开场时段才补走时间核对，普通问候和当前人齐开的默认路径照常。"""
+    message = _incoming(text, sent=SENT.replace(hour=hour))
+    assert qualified_table_clock(message) is None
+    assert requires_table_clock_review(message) is needs_review
+
+
+@pytest.mark.parametrize(("wording", "selected_time", "delegated", "model_invents_point"), [
+    ("今晚都行", None, False, False),
+    ("今晚都行", None, False, True),
+    ("今晚都行，你帮我选个开场", "20:00", True, False),
+    ("今晚八点开吧", "20:00", False, False),
+])
+def test_rolling_0437_keeps_future_named_opening_and_uses_real_write_permission(
+    wording, selected_time, delegated, model_invents_point, tmp_path,
+):
+    """白天来话说今晚，允许查当晚的桌，不能安排在晚上前已过期的人齐开。"""
+    sent = datetime.fromisoformat("2026-11-26T11:07:00+08:00")
+    message = _incoming(f"老板好 那就帮我组一桌吧 杭麻 底注1到3 无烟 {wording}", sent=sent)
+    store = SQLiteAgentStore(tmp_path / "named-evening.sqlite3")
+    evening = {"start_at": "2026-11-26T18:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"}
+    point = "2026-11-26T20:00:00+08:00"
+    point_window = {"start_at": point, "end_at": point}
+    explicit = selected_time is not None and not delegated
+    stakes = {"min": 1, "max": 3}
+    decision = _decision(clock_role="opening" if explicit else "other",
+        opening_window=point_window if explicit or model_invents_point else None,
+        opening_dayparts=None, accepted_stake_range=stakes,
+        has_fixed_opening_authority=selected_time is not None or model_invents_point,
+        opening_customer_ref=1 if selected_time is not None or model_invents_point else None,
+    )
+    review = ReviewClient([decision])
+    creation = ReviewClient([{"scope": "create", "customer_ref": 1, "shop_offer_ref": None}])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "hangzhou_mahjong", "smoke_preference": "no_smoking", "stake_range": stakes}
+    with using_clock(lambda: sent):
+        _activate(store, started=sent)
+        _persist(store, message)
+
+        def create(step, schedule):
+            call = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                            "requirement": {**terms, **schedule}})
+            return service.execute_tool_calls(
+                AgentAction(goal="组桌", objective_status="needs_tool", reasoning_summary="核对开场", tool_calls=[call]),
+                message=message, trace_id=message.message_id, previous_step_tool_results=[], step_index=step,
+                run_id="named-opening-private", run_version=store.conversation_version("dm"),
+            ).tool_results[0]
+
+        if not explicit:
+            premature = create(1, {"start_time_kind": "asap_when_full"})
+            assert not premature.called and not premature.allowed and not creation.calls and not store.games
+            timing = premature.result["table_availability_evidence"]
+            assert timing["opening_window"] == evening
+            assert timing["has_fixed_opening_authority"] is delegated
+            assert "最早开场" in premature.error
+        read_window = point_window if explicit else evening
+        lookup = _execute_scope_search(service, message, terms | {"start_time_range": read_window}, step=2)
+        assert lookup.called and lookup.allowed and lookup.result["requirement"]["start_time_range"] == read_window
+        fixed = create(3, {"start_time_kind": "scheduled", "planned_start_at": point})
+
+    if selected_time is not None:
+        assert fixed.called and fixed.allowed and len(creation.calls) == 1
+        game, = store.games.values()
+        assert game.planned_start_at.isoformat() == point
+        assert game.expires_at > sent.replace(hour=18)
+    else:
+        assert not fixed.called and not fixed.allowed and not creation.calls and not store.games
+    assert len(review.calls) == 1 and not store.room_reservations
+    observed = json.loads(review.calls[0][0][1]["content"])["current_clock_observation"]
+    assert observed["clock_count"] == (1 if explicit else 0)
+    if not explicit:
+        assert observed["named_future_opening"] == {"date": "2026-11-26", "parts": ["evening"]}
+    store._connection.close()
+
+
+@pytest.mark.parametrize("review_outcome", ["ordinary_asap", "unavailable", "wrong_scope"])
+def test_named_future_opening_unverified_cannot_use_quiet_asap_default(review_outcome):
+    """无时间偏好的人齐开照常，明确未来时段缺失语义核对时不写成现在。"""
+    sent = datetime.fromisoformat("2026-11-26T11:07:00+08:00")
+    store = InMemoryAgentStore()
+    ordinary = review_outcome == "ordinary_asap"
+    text = ("老板晚上好，帮我组一桌杭麻，1到3块无烟，人齐开"
+            if ordinary else "老板好，帮我组一桌杭麻，1到3块无烟，今晚都行")
+    message = _incoming(text, sent=sent)
+    response = TimeoutError("review unavailable") if review_outcome == "unavailable" else _decision(
+        clock_role="other", lookup_scope="other", opening_window=None,
+    )
+    review = ReviewClient([] if ordinary else [response])
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(), table_availability_client=review)
+    call = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+        "requirement": {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3},
+                        "smoke_preference": "no_smoking", "start_time_kind": "asap_when_full"}})
+    with using_clock(lambda: sent):
+        _activate(store, started=sent)
+        _persist(store, message)
+        result = service.execute_tool_calls(
+            AgentAction(goal="组桌", objective_status="needs_tool", reasoning_summary="按原话核对", tool_calls=[call]),
+            message=message, trace_id=message.message_id, previous_step_tool_results=[], step_index=1,
+            run_id="named-opening-without-verification", run_version=store.conversation_version("dm"),
+        ).tool_results[0]
+
+    if ordinary:
+        assert result.called and result.allowed and not review.calls
+        game, = store.games.values()
+        assert game.expires_at.isoformat() == "2026-11-26T15:07:00+08:00"
+    else:
+        assert not result.called and not result.allowed and not store.games and len(review.calls) == 1
+
+
+def test_named_future_opening_keeps_late_same_origin_date_anchor():
+    """晚上过了才给的「明晚」仍用明确次日晚间，不套当天已过的开场。"""
+    sent = SENT.replace(hour=23)
+    message = _incoming("明晚都行", sent=sent)
+    store = InMemoryAgentStore()
+    _activate(store, started=sent)
+    _persist(store, message)
+    review = ReviewClient([_decision(clock_role="other", opening_window=None, opening_dayparts=None)])
+    checked = _check(store, review, message)
+
+    assert checked["opening_window"] == {"start_at": "2026-11-27T18:00:00+08:00",
+                                         "end_at": "2026-11-28T06:00:00+08:00"}
+    assert checked["has_fixed_opening_authority"] is False
 
 
 @pytest.mark.parametrize(("text", "observed"), [

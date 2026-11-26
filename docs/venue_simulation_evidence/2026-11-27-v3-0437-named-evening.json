@@ -1,0 +1,54 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_code_commit": "3b12e71",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev3_20261127/2026-11-25-real-02ed5c7d2e",
+  "customer_case": "0437",
+  "trace_id": "trace_37c191b34a42768cfcc13106",
+  "message": {
+    "message_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+    "sent_at": "2026-11-26T11:07:00+08:00",
+    "conversation_id": "im:dm:venue-group:venue-sender-0437",
+    "text": "老板好 那就帮我组一桌吧 杭麻 底注1到3 无烟 今晚都行"
+  },
+  "observed_trace": {
+    "table_availability_authorization_prompt_present": false,
+    "creation_authorization": {
+      "scope": "create",
+      "trace_id": "trace_37c191b34a42768cfcc13106:creation:101:1",
+      "call_id": "llm_call_ed709096e05f41db85b609333a894b4f",
+      "http_response_complete": true,
+      "raw_response_sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75"
+    },
+    "write": {
+      "tool_step": 1,
+      "tool": "create_game",
+      "game_id": "game_d978d98695a8",
+      "created_at": "2026-11-26T11:07:00+08:00",
+      "start_time_kind": "asap_when_full",
+      "planned_start_at": null,
+      "expires_at": "2026-11-26T15:07:00+08:00",
+      "remaining_seats": 2
+    },
+    "recruitment_tool": {
+      "tool_step": 3,
+      "tool": "search_customers",
+      "latest_start_at": "2026-11-26T15:07:00+08:00",
+      "lifecycle_expires_at": "2026-11-26T15:07:00+08:00",
+      "lifecycle_ttl_hours": 4.0
+    },
+    "delivery": {
+      "message_id": "outbound:trace_37c191b34a42768cfcc13106:1",
+      "text": "好嘞，给你记上了，杭麻1到3块无烟，还差两个，有合适的我再帮你留意。",
+      "objective_status": "completed"
+    }
+  },
+  "analysis": "明确的「今晚都行」在白天说出，但没有数字钟点，所以此前没有触发时段核对。独立创建核验只证明顾客委托组局。普通人齐开使用四小时有效期，创建与后续找人均以15:07为截止，早于顾客要求的晚上。",
+  "change": "明确的未来开场时段进入原有时段核对，以来话的本地日期计算范围。允许在范围内查桌。固定建局仍需要顾客明确选时或另外授权老板选时。只有清楚的开场、询桌或可打表述触发这一检查，含时间的问候和没有未来范围的人齐开保留原路径。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_rolling_0437_keeps_future_named_opening_and_uses_real_write_permission",
+    "sqlite_scheduler_control": "原话可查11月26日18:00到27日06:00。人齐开提前失效和模型自行提出20:00均无写入。顾客另外授权老板选时或明确选定20:00时，实际建局工具写入20:00，未提前到18:00前失效。",
+    "other_controls": "无未来约束的人齐开仍可走普通四小时有效期。时段核验无结果或者错误判成其他范围时拒绝提前建局。23:00说明确的明晚，以次日当地日期核验。",
+    "live_replay": "pending",
+    "focused_tests_passed": 623
+  }
+}
