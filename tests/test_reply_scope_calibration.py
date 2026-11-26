@@ -7,7 +7,8 @@ import sqlite3
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
-from tests.semantic_http_stub import semantic_http_completion
+from tests.semantic_http_stub import raise_semantic_http_timeout, semantic_http_completion
+from tests.test_semantic_judge_reasoned_config import JudgeRetryBudget
 
 import pytest
 from mahjong_agent_runtime import AgentLLMConfig
@@ -21,9 +22,12 @@ import run_real_owner_chat_live_eval as owner
 import reply_money_eval as money
 
 
-def build_scope_stub(work_dir, *, general_misses_money=False, money_scope='existing_option_fact', money_role='stake'):
+def build_scope_stub(work_dir, *, general_misses_money=False, money_scope='existing_option_fact', money_role='stake',
+                     absolute_clock_timeouts=0):
     """受控标签只产生模型替身响应，不把离线结果声明为真实语义通过。"""
     cases=calibration.load_cases();calls=[]
+    scenarios = calibration.original_scenarios()
+    timeouts = []
     class Judge:
         """只替换模型输出，实际证据与解析仍由生产评测组件构建。"""
         def __init__(self,config):
@@ -31,11 +35,18 @@ def build_scope_stub(work_dir, *, general_misses_money=False, money_scope='exist
             assert config.temperature==0 and config.thinking_mode=='enabled'
             assert config.reasoning_effort=='low' and config.max_tokens==16384
         def complete(self,messages,**kwargs):
-            request=json.loads(messages[-1]['content']);case=cases[len(calls)];calls.append(request)
+            request=json.loads(messages[-1]['content']);case=cases[len(calls)]
+            if case['case_id'] == 'time_commitment_absolute_clock_20261103':
+                if len(timeouts) < absolute_clock_timeouts:
+                    timeouts.append(deepcopy(request))
+                    raise_semantic_http_timeout(messages, config=self.config, **kwargs)
+                assert all(request == timeout for timeout in timeouts)
+            calls.append(request)
+            criterion_ids = inquiry._semantic_criteria_ids(owner.reply_semantic_expectation(scenarios[case['scenario_id']]))
             raw=json.dumps({'reason':'固定输出仅验收连线','criteria':[
-                {'id':item['id'],"verdict":("violated" if item['id'] in case['required_violation_ids'] and not (
-                    general_misses_money and item['id'] in calibration.MONEY_CRITERION_ROLES) else "clear"),'reason':'受控标签非真实语义结论'}
-                for item in request['expectation']['checks']]},ensure_ascii=False)
+                {'id':item['id'],"verdict":("violated" if canonical_id in case['required_violation_ids'] and not (
+                    general_misses_money and canonical_id in calibration.MONEY_CRITERION_ROLES) else "clear"),'reason':'受控标签非真实语义结论'}
+                for item, canonical_id in zip(request['expectation']['checks'], criterion_ids, strict=True)]},ensure_ascii=False)
             return semantic_http_completion(raw,config=self.config,trace_id=kwargs['trace_id'])
     class MoneyJudge:
         """只提供作用域，真实2块原字面及候选1块均由后端保留。"""
@@ -52,6 +63,18 @@ def build_scope_stub(work_dir, *, general_misses_money=False, money_scope='exist
     with patch.object(inquiry,'OpenAICompatibleAgentClient',Judge),patch.object(money,'OpenAICompatibleAgentClient',MoneyJudge):
         result=calibration.run_calibration(client,SimpleNamespace(timeout_seconds=1),work_dir)
     return result,calls
+
+
+def test_scope_accepts_verified_negative_verdict_after_two_header_timeouts(monkeypatch, tmp_path):
+    """两次超时后按原判决拒绝虚构时刻，受控负例应通过其原黄金期望。"""
+    budget = JudgeRetryBudget(3, capped=float('inf'))
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: budget)
+    payload, _ = build_scope_stub(tmp_path / 'scope', absolute_clock_timeouts=2)
+    item = next(item for item in payload['reports'] if item['case_id'] == 'time_commitment_absolute_clock_20261103')
+    assert item['status'] == 'passed' and item['semantic_assessment']['passed'] is False
+    assert len(item['semantic_assessment']['transport_failures']) == len(budget.retries) == 2
+    assert item['semantic_assessment']['attempts'][0]['trace_id'] == item['trace_id'] + ':judge:transport_retry_2'
+    assert calibration.validate_report(payload, tmp_path / 'report.json')['passed'] == 10
 
 
 @pytest.fixture
@@ -150,8 +173,10 @@ def test_scope_gate_rejects_incomplete_or_self_certified_sources(scope,tmp_path,
         elif fault=='extra_privacy_failure':
             next(criterion for criterion in criteria if criterion['id']=='privacy')['passed']=False
         assessment['passed']=all(criterion['passed'] for criterion in criteria)
+        local_numbers = {criterion: index for index, criterion in enumerate(inquiry._semantic_criteria_ids(assessment['expectation']), 1)}
         assessment['raw_response']=json.dumps({'reason':assessment['reason'],'criteria':[
-            {'id':criterion['id'],"verdict":("violated" if not criterion['passed'] else "clear"),'reason':criterion['reason']} for criterion in criteria]})
+            {'id':local_numbers[criterion['id']],"verdict":("violated" if not criterion['passed'] else "clear"),
+             'reason':criterion['reason']} for criterion in criteria]})
         assessment['attempts'][-1].update(raw_response=assessment['raw_response'],passed=assessment['passed'])
     raw['semantic_assessment']=deepcopy(assessment)
     for event in raw['events']:

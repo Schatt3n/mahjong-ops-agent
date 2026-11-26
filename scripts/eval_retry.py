@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 import hashlib
@@ -219,8 +219,8 @@ def _save_final(folder: Path, result: dict, attempt_dir: Path) -> dict:
     return final
 
 
-def checkpointed_case(key: str, run, *, case_dir: Path, resume_judge=None) -> dict:
-    """在本轮验证内复用已定论用例，按失败阶段补试；每次执行写到新目录。"""
+def checkpointed_case(key: str, run, *, case_dir: Path, resume_judge=None, defer_initial_retry: bool = False) -> dict:
+    """复用已定论用例，按失败阶段补试；并发首轮可把追加预算留给协调线程。"""
     scope = scope_directory()
     if scope is None:
         return run(case_dir)
@@ -231,9 +231,16 @@ def checkpointed_case(key: str, run, *, case_dir: Path, resume_judge=None) -> di
         return json.loads((folder / 'final.json').read_text(encoding='utf-8'))
     blocked_path = folder / 'blocked.json'
     prior = json.loads(blocked_path.read_text(encoding='utf-8')) if blocked_path.exists() else None
-    if prior and (prior['window'] >= window or (prior['result']['eval_inconclusive']['stage'] == 'judge' and not resume_judge)):
-        write_json(scope / 'blocked.json', {**prior['result']['eval_inconclusive'], 'key': key, 'window': window})
+    deferred_here = prior and prior['window'] == window and prior.get('deferred_initial') is True
+    if prior and (defer_initial_retry or (prior['window'] >= window and not deferred_here)
+                  or (prior['result']['eval_inconclusive']['stage'] == 'judge' and not resume_judge)):
+        if not defer_initial_retry:
+            write_json(scope / 'blocked.json', {**prior['result']['eval_inconclusive'], 'key': key, 'window': window})
         return prior['result']
+    if deferred_here:
+        # 协调线程只能领取本窗口尚未花过补试预算的首轮延期。领取后即使中断，
+        # 同窗口也不会重开一份预算；原始尝试在独立目录继续留存。
+        write_json(blocked_path, {'window': window, 'result': prior['result']})
     budget = CaseBudget(folder, window)
     token = _budget.set(budget)
     deadline_token = external_call_deadline.set(None)
@@ -248,7 +255,9 @@ def checkpointed_case(key: str, run, *, case_dir: Path, resume_judge=None) -> di
             if judge_resume and (not resume_judge or budget.retries >= MAX_RETRIES or budget.remaining_seconds() <= 0):
                 break
             attempt_dir = Path(tempfile.mkdtemp(prefix=f'window_{window:03d}_attempt_', dir=folder)) / 'case'
-            result = resume_judge(latest, attempt_dir) if judge_resume else run(attempt_dir)
+            retry_mode = defer_case_retries() if defer_initial_retry else nullcontext()
+            with retry_mode:
+                result = resume_judge(latest, attempt_dir) if judge_resume else run(attempt_dir)
             result = {**result, 'attempt_dir': str(attempt_dir)}
             attempt_dir.mkdir(parents=True, exist_ok=True)
             write_json(attempt_dir / 'eval_result.json', result)
@@ -257,6 +266,9 @@ def checkpointed_case(key: str, run, *, case_dir: Path, resume_judge=None) -> di
             if result.get('status') != 'blocked':
                 return _save_final(folder, result, attempt_dir)
             latest = result
+            if defer_initial_retry:
+                write_json(blocked_path, {'window': window, 'result': latest, 'deferred_initial': True})
+                return latest
             # 共享判定器在调用过程中已经按照本窗口耗尽条件处理；下个窗口才能补判。
             if result['eval_inconclusive']['stage'] == 'judge':
                 break

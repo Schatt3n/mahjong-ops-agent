@@ -17,13 +17,16 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import run_real_owner_chat_live_eval as owner
 import run_inquiry_grounding_eval as inquiry
 from mahjong_agent_runtime import AgentLLMConfig, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall
-from tests.semantic_http_stub import semantic_http_completion
+from tests.semantic_http_stub import raise_semantic_http_timeout, semantic_http_completion
+from tests.test_semantic_judge_reasoned_config import JudgeRetryBudget
 
 
-def build_calibration_stub(work_dir):
+def build_calibration_stub(work_dir, *, first_header_timeout=False):
     """只替换独立模型边界；夹具准备、网关、SQLite和判决解析均使用真实代码。"""
     cases = owner.load_reply_semantic_calibration_cases()
+    criterion_ids = inquiry._semantic_criteria_ids(owner.reply_semantic_calibration_expectation())
     calls = []
+    timeouts = []
 
     class FixedJudge:
         """固定输出仅验证证据接线，不能宣称这些离线结果是真实模型语义通过。"""
@@ -36,11 +39,17 @@ def build_calibration_stub(work_dir):
             assert kwargs["timeout_seconds"] == self.config.attempt_timeout_seconds
             request = json.loads(messages[-1]["content"])
             case = cases[len(calls)]
+            if first_header_timeout and not calls:
+                if not timeouts:
+                    timeouts.append(deepcopy(request))
+                    raise_semantic_http_timeout(messages, config=self.config, **kwargs)
+                assert timeouts == [request]
             calls.append(request)
             assert request["evidence"]["reply"] == case["reply"]
             raw = json.dumps({"reason": "离线替身按固定标签检查校准连线，不作语义结论", "criteria": [
-                {"id": criterion["id"], "verdict": ("violated" if criterion["id"] in case["expected_violation_ids"] else "clear"),
-                 "reason": "仅模拟独立模型的逐项判定输出"} for criterion in request["expectation"]["checks"]]}, ensure_ascii=False)
+                {"id": criterion["id"], "verdict": ("violated" if canonical_id in case["expected_violation_ids"] else "clear"),
+                 "reason": "仅模拟独立模型的逐项判定输出"}
+                for criterion, canonical_id in zip(request["expectation"]["checks"], criterion_ids, strict=True)]}, ensure_ascii=False)
             return semantic_http_completion(raw, config=self.config, trace_id=kwargs["trace_id"])
 
     def forbidden_main_call(*args, **kwargs):
@@ -52,6 +61,17 @@ def build_calibration_stub(work_dir):
     with patch.object(inquiry, "OpenAICompatibleAgentClient", FixedJudge):
         payload = owner.run_reply_semantic_calibration(client, SimpleNamespace(timeout_seconds=1), work_dir)
     return payload, calls
+
+
+def test_semantic_calibration_gate_verifies_frozen_transport_retry(monkeypatch, tmp_path):
+    """另一个独立校准门禁沿用同一补试证据链，保留原固定文本的判决。"""
+    budget = JudgeRetryBudget(3, capped=float('inf'))
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: budget)
+    payload, _ = build_calibration_stub(tmp_path / 'calibration', first_header_timeout=True)
+    assessment = payload['reports'][0]['semantic_assessment']
+    assert len(assessment['transport_failures']) == len(budget.retries) == 1
+    assert assessment['attempts'][0]['trace_id'] == assessment['trace_id'] + ':transport_retry_1'
+    assert owner.validate_reply_semantic_calibration(payload, tmp_path / 'report.json')['passed'] == 10
 
 
 @pytest.fixture

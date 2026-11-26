@@ -158,7 +158,8 @@ def test_actual_rejection_feedback_legal_execution_and_final_store_are_all_requi
 
 
 @pytest.mark.parametrize('evidence_form', ['actual', 'current_reference', 'old_reference', 'unresolved_reference',
-                                          'out_of_order', 'missing_occurrence', 'extra_occurrence'])
+                                          'out_of_order', 'missing_occurrence', 'extra_occurrence',
+                                          'missing_query_anchor', 'changed_query_anchor'])
 def test_repeated_equal_feedback_is_bound_to_its_actual_trace_order(store, evidence_form):
     """不同失败提案可压缩成同一反馈，引用须绑定本步追加值并保留其余历史的顺序。"""
     result, events, _, snapshots = run_case(store, repeated_rejection=True)
@@ -180,6 +181,17 @@ def test_repeated_equal_feedback_is_bound_to_its_actual_trace_order(store, evide
         projected, _ = reference_shared_query_contracts({**context, 'previous_tool_results': referenced})
         mutate_prompt(events, 4, lambda payload: payload.update(
             turn_tool_evidence=projected['turn_tool_evidence'], previous_tool_results=projected['previous_tool_results']))
+    elif evidence_form in {'missing_query_anchor', 'changed_query_anchor'}:
+        system = prompt.content['messages'][0]
+        prefix, marker, section = system['content'].partition('\n\n【主 Agent 请求合同】\n')
+        assert marker
+        if evidence_form == 'missing_query_anchor':
+            system['content'] = prefix
+        else:
+            introduction, encoded = section.split('\n', 1)
+            contract = json.loads(encoded)
+            contract['planning_contract']['game_query_strategy_contract']['query_result_reporting'] = '其他版本合同'
+            system['content'] = prefix + marker + introduction + '\n' + json.dumps(contract, ensure_ascii=False)
     elif evidence_form != 'actual':
         history = list(context['turn_tool_evidence'])
         if evidence_form == 'out_of_order':

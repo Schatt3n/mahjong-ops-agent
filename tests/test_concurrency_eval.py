@@ -340,9 +340,9 @@ def test_live_review_contract_failure_blocks_whole_suite_without_hiding_existing
     assert [item["name"] for item in report["checks"] if not item["passed"]] == ["customer_visible_review_contract_passed"]
 
 
-@pytest.mark.parametrize("fault", ["agent", "judge", "business"])
-def test_managed_concurrency_recovers_only_independent_wave_or_frozen_judge(tmp_path, monkeypatch, fault):
-    """验证真实重叠、线程共享时限、失败尝试保留和有效不合格不重试。"""
+@pytest.mark.parametrize("fault", ["agent", "judge", "business", "mixed"])
+def test_managed_concurrency_retries_only_the_timed_out_case_or_its_frozen_judge(tmp_path, monkeypatch, fault):
+    """只在首轮证明真重叠，补试隔离单例并保留旁边已结论的结果。"""
     import eval_retry
     import run_real_owner_chat_live_eval as owner_eval
     from mahjong_agent_runtime.llm import external_call_deadline
@@ -359,9 +359,11 @@ def test_managed_concurrency_recovers_only_independent_wave_or_frozen_judge(tmp_
             self.config = config
 
         def complete(self, _messages, *, trace_id, timeout_seconds):
-            runtime_calls.append((trace_id, external_call_deadline.get()))
-            barrier.wait(timeout=3)
-            if trace_id == "second-a" and not first_error["used"] and fault == "agent":
+            deadline = external_call_deadline.get()
+            runtime_calls.append((trace_id, deadline))
+            if deadline is None:
+                barrier.wait(timeout=3)
+            if trace_id == "second-a" and not first_error["used"] and fault in {"agent", "mixed"}:
                 first_error["used"] = True
                 raise TimeoutError("offline simulated timeout")
             return "offline"
@@ -371,7 +373,7 @@ def test_managed_concurrency_recovers_only_independent_wave_or_frozen_judge(tmp_
         directory = owner_eval.scenario_db_path(args.db_path, case_id).parent
         directory.mkdir(parents=True, exist_ok=False)
         paths.append(directory)
-        failure = {"stage": fault, "category": "unattributed_timeout", "retryable": True, "reason": "read_timeout"}
+        failure = {"stage": "agent" if fault == "mixed" else fault, "category": "unattributed_timeout", "retryable": True, "reason": "read_timeout"}
         result = {"scenario_id": case_id, "iteration": iteration, "status": "passed",
                   "recovery_metrics": owner_eval.assess_action_contract_recovery([], runtime_status="waiting_user",
                       final_reply="测试回复", business_checks_passed=True, semantic_passed=True)}
@@ -383,7 +385,7 @@ def test_managed_concurrency_recovers_only_independent_wave_or_frozen_judge(tmp_
             assert eval_retry.current_budget() is not None
             assert eval_retry.current_budget().begin_retry(failure, stage="judge") is False
             result.update(status="blocked", eval_inconclusive=failure)
-        if case_id == "second-a" and fault == "business":
+        if (case_id == "second-a" and fault == "business") or (case_id == "second-b" and fault == "mixed"):
             result.update(status="failed")
         return result
 
@@ -404,16 +406,23 @@ def test_managed_concurrency_recovers_only_independent_wave_or_frozen_judge(tmp_
     monkeypatch.setattr(module, "run_live_customer_visible_review_contract", lambda *args: {"status": "passed"})
     result = module.run_live_suite(tmp_path / "live", workers=2, repeats=1, timeout_seconds=1, max_steps=3,
         max_calls_per_turn=3, max_tokens_per_call=1000, skip_review=False, skip_text_generation=False)
-    assert result["status"] == ("failed" if fault == "business" else "passed")
-    for scenario_id in ("first-a", "first-b"):
-        assert runtime_calls.count((scenario_id, None)) == 1
+    assert result["status"] == ("failed" if fault in {"business", "mixed"} else "passed")
+    for scenario in scenarios:
+        assert runtime_calls.count((scenario.scenario_id, None)) == 1
     assert len(paths) == len(set(paths))
     assert judge_calls == (["second-a"] if fault == "judge" else [])
     if fault == "agent":
+        assert len(runtime_calls) == 5
+        assert [scenario for scenario, deadline in runtime_calls if deadline is not None] == ["second-a"]
+        assert result["metrics"]["call_count"] == 4
         assert result["metrics"]["failed_calls"] == 0
-        assert len([deadline for scenario, deadline in runtime_calls if scenario.startswith("second") and deadline]) == 2
+        observed = result["metrics"]["observed_owner_attempts"]
+        assert observed["call_count"] == 5
+        assert observed["failed_calls"] == observed["confirmed_recovered_failed_calls"] == 1
         attempts = [json.loads(path.read_text()) for path in (tmp_path / "ledger").rglob("eval_result.json")]
-        assert sum(item.get("runtime_metrics", {}).get("failed_calls", 0) for item in attempts) == 1
+        original_timeout = [item for item in attempts if item.get("status") == "blocked"
+                            and item.get("scenario_id") == "second-a"]
+        assert len(original_timeout) == 1
     else:
         assert len(runtime_calls) == 4
     assert result["metrics"]["owner_wave_max_concurrent_client_calls"] == 2
@@ -498,8 +507,8 @@ def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_s
         assessment = {"error": None, "passed": True, "criteria": criteria, "reason": reason,
                 "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
                 "raw_response": json.dumps({"reason": reason, "criteria": [
-                    {"id": item["id"], "verdict": "clear", "reason": item["reason"]}
-                    for item in criteria]}, ensure_ascii=False)}
+                    {"id": index, "verdict": "clear", "reason": item["reason"]}
+                    for index, item in enumerate(criteria, 1)]}, ensure_ascii=False)}
         if coherence == "judge_timeout":
             assessment.update(error="offline timeout", passed=False, raw_response=None, eval_inconclusive=marker)
         return assessment

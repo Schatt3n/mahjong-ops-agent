@@ -38,8 +38,8 @@ def assessment_output(*, passed=True):
     return {
         "reason": "实际回复在征求客户是否接受帮助。" if passed else "实际回复并未提出有效服务选项。",
         "criteria": [
-            {"id": "offer", "verdict": ("violated" if not passed else "clear"), "reason": "按完整语义判断是否提供找人帮助。"},
-            {"id": "false_contact", "verdict": "clear", "reason": "没有声称已经联系人。"},
+            {"id": 1, "verdict": ("violated" if not passed else "clear"), "reason": "按完整语义判断是否提供找人帮助。"},
+            {"id": 2, "verdict": "clear", "reason": "没有声称已经联系人。"},
         ],
     }
 
@@ -99,11 +99,12 @@ def test_semantic_judge_accepts_equivalent_chinese_from_independent_verdict_and_
     assert judged["evidence"] == EVIDENCE
     assert judged["expectation"] == result["judge_expectation"]
     assert "required_meaning" not in judged["expectation"] and "forbidden_meaning" not in judged["expectation"]
-    assert {item["id"] for item in judged["expectation"]["checks"]} == {"offer", "false_contact"}
-    forbidden_check = next(item for item in judged["expectation"]["checks"] if item["id"] == "false_contact")
+    assert [item["id"] for item in judged["expectation"]["checks"]] == [1, 2]
+    assert [item["id"] for item in result["criteria"]] == ["offer", "false_contact"]
+    forbidden_check = judged["expectation"]["checks"][1]
     assert forbidden_check["kind"] == "forbidden"
     assert forbidden_check["description"] == EXPECTATION["forbidden_meaning"][0]["description"]
-    required_check = next(item for item in judged["expectation"]["checks"] if item["id"] == "offer")
+    required_check = judged["expectation"]["checks"][0]
     assert required_check["kind"] == "required"
     assert required_check["description"] == EXPECTATION["required_meaning"][0]["description"]
     assert result["evidence"] == EVIDENCE
@@ -144,7 +145,7 @@ def test_semantic_judge_does_not_inherit_main_thinking_and_records_only_safe_con
         "max_tokens": 16384, "response_format":'json_object', "thinking_mode": "enabled", "reasoning_effort": 'low',
         "attempt_timeout_seconds": 180.0, "retry_attempts": 3,
     }
-    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='responsibility_scope_v9_20261124'
+    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='responsibility_scope_v10_20261126'
     assert judge_module.semantic_judge_config_matches(result)
     encoded = json.dumps(result, ensure_ascii=False)
     assert "test-api-key" not in encoded and "https://example.invalid" not in encoded
@@ -168,6 +169,24 @@ def test_semantic_result_is_derived_only_from_validated_criteria_not_overall_rea
     assert [item["passed"] for item in result["criteria"]] == [passed, True]
     assert [item["reason"] for item in result["criteria"]] == [item["reason"] for item in output["criteria"]]
     assert len(calls) == 1 and result["contract_repair_count"] == 0
+
+
+def test_semantic_judge_maps_reordered_wire_ids_to_the_same_rules(judge_module, monkeypatch):
+    """按判定返回的编号还原条目，数组顺序不可改变原规则的结论。"""
+    output = assessment_output(passed=False)
+    output["criteria"].reverse()
+    raw = json.dumps(output, ensure_ascii=False)
+    calls = install_fake_judge(monkeypatch, judge_module, raw)
+
+    result = judge_module.assess_reply_semantics(
+        configured_client(), evidence=EVIDENCE, expectation=EXPECTATION, trace_id="semantic-reordered-wire-ids",
+    )
+
+    assert result["passed"] is False and result["error"] is None
+    criteria = {item["id"]: item for item in result["criteria"]}
+    assert criteria["offer"]["passed"] is False
+    assert criteria["false_contact"]["passed"] is True
+    assert result["raw_response"] == raw and len(calls) == 1
 
 
 def test_full4_legacy_aggregate_contradiction_shape_is_rejected_as_extra_field(judge_module, monkeypatch):
@@ -208,8 +227,8 @@ def test_full4_no_false_follow_up_claim_is_detected_as_no_violation(judge_module
                     "public_search_results": [{"matches": []}]}
     ids = judge_module._semantic_criteria_ids(expected)
     output = {"reason": "原回复没有冒充已执行的后续找人。", "criteria": [
-        {"id": criterion_id, "verdict": "clear", "reason": "符合该条规则，没有发现所述违例。"}
-        for criterion_id in ids
+        {"id": index, "verdict": "clear", "reason": "符合该条规则，没有发现所述违例。"}
+        for index in range(1, len(ids) + 1)
     ]}
     calls = install_fake_judge(monkeypatch, judge_module, json.dumps(output, ensure_ascii=False))
     result = judge_module.assess_reply_semantics(
@@ -219,16 +238,20 @@ def test_full4_no_false_follow_up_claim_is_detected_as_no_violation(judge_module
     assert len(calls) == 1 and all(item["passed"] is True for item in result["criteria"])
     assert result["expectation"] == expected
     checks = result["judge_expectation"]["checks"]
-    for group, kind in (("required_meaning", "required"), ("forbidden_meaning", "forbidden")):
-        for item in expected.get(group, []):
-            assert {"id": item["id"], "kind": kind, "description": item["description"]} in checks
+    human_checks = [(kind, item) for group, kind in (
+        ("required_meaning", "required"), ("forbidden_meaning", "forbidden")) for item in expected.get(group, [])]
+    assert checks == [
+        {"id": index, "kind": kind, "description": item["description"]}
+        for index, (kind, item) in enumerate(human_checks, start=1)
+    ]
+    assert [item["id"] for item in result["criteria"]] == ids
 
 
 @pytest.mark.parametrize("violation_detected", [False, True])
 def test_violation_bit_is_not_reversed_using_the_free_text_reason(judge_module, monkeypatch, violation_detected):
     expected = {"forbidden_meaning": [{"id": "unverified_follow_up", "description": "不得无依据声称已经持续找人或跟进。"}]}
     output = {"reason": "逐项检测结果。", "criteria": [{
-        "id": "unverified_follow_up", "verdict": ("violated" if violation_detected else "clear"),
+        "id": 1, "verdict": ("violated" if violation_detected else "clear"),
         "reason": "回复未表达已持续找人或跟进，符合该规则。",
     }]}
     calls = install_fake_judge(monkeypatch, judge_module, json.dumps(output, ensure_ascii=False))
@@ -243,7 +266,7 @@ def test_violation_bit_is_not_reversed_using_the_free_text_reason(judge_module, 
 @pytest.mark.parametrize("group", ["required_meaning", "forbidden_meaning"])
 def test_semantic_judge_supports_a_nonempty_required_or_forbidden_group_by_itself(judge_module, monkeypatch, group):
     expected = {group: [{"id": "single", "description": "唯一一项人工语义期望。"}]}
-    output = {"reason": "唯一条目满足。", "criteria": [{"id": "single", "verdict": "clear", "reason": "逐项判断满足。"}]}
+    output = {"reason": "唯一条目满足。", "criteria": [{"id": 1, "verdict": "clear", "reason": "逐项判断满足。"}]}
     install_fake_judge(monkeypatch, judge_module, json.dumps(output, ensure_ascii=False))
     result = judge_module.assess_reply_semantics(
         configured_client(), evidence=EVIDENCE, expectation=expected, trace_id="semantic-single-group",
@@ -263,10 +286,15 @@ def malformed_outputs():
         "non-list-criteria": {**valid, "criteria": {}},
         "missing-id": {**valid, "criteria": valid["criteria"][:1]},
         "duplicate-id": {**valid, "criteria": [valid["criteria"][0], valid["criteria"][0]]},
-        "extra-id": {**valid, "criteria": [*valid["criteria"], {"id": "extra", "verdict": "clear", "reason": "ok"}]},
+        "extra-id": {**valid, "criteria": [*valid["criteria"], {"id": 3, "verdict": "clear", "reason": "ok"}]},
+        "unknown-id": {**valid, "criteria": [{**valid["criteria"][0], "id": 0}, valid["criteria"][1]]},
+        "boolean-id": {**valid, "criteria": [{**valid["criteria"][0], "id": True}, valid["criteria"][1]]},
+        "string-id": {**valid, "criteria": [{**valid["criteria"][0], "id": "1"}, valid["criteria"][1]]},
+        "float-id": {**valid, "criteria": [{**valid["criteria"][0], "id": 1.0}, valid["criteria"][1]]},
+        "legacy-canonical-id": {**valid, "criteria": [{**valid["criteria"][0], "id": "offer"}, valid["criteria"][1]]},
         "string-item-violation": {**valid, "criteria": [{**valid["criteria"][0], "verdict": "false"}, valid["criteria"][1]]},
         "number-item-violation": {**valid, "criteria": [{**valid["criteria"][0], "verdict": 0}, valid["criteria"][1]]},
-        "legacy-item-passed": {**valid, "criteria": [{"id": "offer", "passed": False, "reason": "原回复没有违规。"}, valid["criteria"][1]]},
+        "legacy-item-passed": {**valid, "criteria": [{"id": 1, "passed": False, "reason": "原回复没有违规。"}, valid["criteria"][1]]},
         "empty-item-reason": {**valid, "criteria": [{**valid["criteria"][0], "reason": ""}, valid["criteria"][1]]},
         "extra-item-field": {**valid, "criteria": [{**valid["criteria"][0], "score": 1}, valid["criteria"][1]]},
         "extra-top-field": {**valid, "score": 1},
@@ -392,7 +420,7 @@ def test_known_condition_consistency_rubric_keeps_actual_profile_and_clarificati
         "reasoning_summary": "我已经理解且通过了，不必独立判断。",
         "objective_state": {"requested_game": known_game}}
     raw = json.dumps({"reason": "按一致性约束独立判定。", "criteria": [{
-        "id": "retain_known_game", "verdict": "clear", "reason": "只问未知底注，未重问或替换已知玩法。"}]}, ensure_ascii=False)
+        "id": 1, "verdict": "clear", "reason": "只问未知底注，未重问或替换已知玩法。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence,
         expectation=expected, trace_id="known-conditions-clarification")
@@ -419,7 +447,7 @@ def test_known_condition_consistency_rubric_keeps_actual_profile_and_clarificati
 def test_clarification_rubric_does_not_override_valid_consistency_or_execution_failure(judge_module, monkeypatch, criterion, description, reply):
     """省略已知条件的解释不得变成重问和未执行的豁免，也不以文字理由翻转布尔结果。"""
     expected = {"required_meaning": [{"id": criterion, "description": description}]}
-    raw = json.dumps({"reason": "总体回复短而自然。", "criteria": [{"id": criterion,
+    raw = json.dumps({"reason": "总体回复短而自然。", "criteria": [{"id": 1,
         "verdict": "violated", "reason": "该条独立判定不通过，简短回复不代表满足规则。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence={"request": "帮我看看局",
@@ -447,7 +475,7 @@ def test_state_and_current_action_requirements_keep_authoritative_post_state_and
         "tool_results": [], "objective_state": {"claimed_write_completed": True},
         "reasoning_summary": "主模型自述已经写入，不能当作执行证据。"}
     raw = json.dumps({"reason": "仅按逐项布尔结论汇总，不能据总体文字推断成功。", "criteria": [{
-        "id": "profile_requirement", "verdict": ("violated" if violation else "clear"), "reason": "根据输入中的权威后态与实际工具判断该条。"}]}, ensure_ascii=False)
+        "id": 1, "verdict": ("violated" if violation else "clear"), "reason": "根据输入中的权威后态与实际工具判断该条。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence,
         expectation=expected, trace_id="post-state-vs-current-action")
@@ -476,8 +504,8 @@ def test_criterion_evidence_contract_is_uniform_and_does_not_rewrite_original_ru
     original = deepcopy(expected)
     projected = judge_module._project_judge_expectation(expected)
     assert projected["checks"] == [
-        {"id": "arbitrary-rule", "kind": "required", "description": original["required_meaning"][0]["description"]},
-        {"id": "another-rule", "kind": "forbidden", "description": original["forbidden_meaning"][0]["description"]},
+        {"id": 1, "kind": "required", "description": original["required_meaning"][0]["description"]},
+        {"id": 2, "kind": "forbidden", "description": original["forbidden_meaning"][0]["description"]},
     ]
     contract = projected["criterion_evidence_contract"]
     assert contract == judge_module.CRITERION_EVIDENCE_CONTRACT
@@ -519,13 +547,15 @@ def test_profile_effective_revision_is_sent_to_judge_with_real_empty_query_and_p
     criterion_id='synthetic_live_profile_range_empty_inquiry.'+(violation_suffix or 'answer_current_inquiry')
     ids=judge_module._semantic_criteria_ids(expectation)
     raw=json.dumps({'reason':'受控结果仅验证新增标准和证据的接线。','criteria':[{
-        'id':key,"verdict":("violated" if bool(violation_suffix) and key==criterion_id else "clear"),'reason':'按给定正反结果验证门禁。'}
-        for key in ids]},ensure_ascii=False)
+        'id':index,"verdict":("violated" if bool(violation_suffix) and key==criterion_id else "clear"),'reason':'按给定正反结果验证门禁。'}
+        for index, key in enumerate(ids, start=1)]},ensure_ascii=False)
     calls=install_fake_judge(monkeypatch,judge_module,raw)
     actual=judge_module.assess_reply_semantics(configured_client(),evidence=evidence,expectation=expectation,
         trace_id='profile-effective-contract')
     payload=json.loads(calls[0]['messages'][1]['content'])
-    changed=next(item for item in payload['expectation']['checks'] if item['id'].endswith('.answer_current_inquiry'))
+    revised_id = 'synthetic_live_profile_range_empty_inquiry.answer_current_inquiry'
+    changed = payload['expectation']['checks'][ids.index(revised_id)]
+    assert changed['id'] == ids.index(revised_id) + 1
     assert '不强制显式复述空结果' in changed['description'] and '省略会误导' in changed['description']
     assert payload['evidence']==judge_module.project_semantic_judge_evidence(evidence) and actual['expectation']==expectation
     assert expectation['product_contract_revision_ids']==[
@@ -572,14 +602,14 @@ def test_execution_and_communication_evidence_are_wired_for_single_and_compound_
     evidence = {"request": request, "reply": reply, "known_profile": {"preferred_stakes": ["1", "2"],
         "profile_facts": ["历史一直使用底注-封顶表达档位。"]}, "tool_results": [tool.to_dict()],
         "persisted_state": {"games": [game.to_dict() for game in store.games.values()]}}
-    raw = json.dumps({"reason": "固定结果仅检查证据归属接线。", "criteria": [{"id": "same-rule-id",
+    raw = json.dumps({"reason": "固定结果仅检查证据归属接线。", "criteria": [{"id": 1,
         "verdict": ("violated" if violation else "clear"), "reason": "按实际义务分别检查执行与对客表达。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence, expectation=expected,
         trace_id="criterion-evidence-contract")
     payload = json.loads(calls[0]["messages"][1]["content"])
     assert payload["evidence"] == judge_module.project_semantic_judge_evidence(evidence)
-    assert payload["expectation"]["checks"] == [{"id": "same-rule-id", "kind": "required", "description": description}]
+    assert payload["expectation"]["checks"] == [{"id": 1, "kind": "required", "description": description}]
     assert payload["expectation"]["criterion_evidence_contract"] == judge_module.CRITERION_EVIDENCE_CONTRACT
     assert "单项或复合要求都不能一律转成回复必须复述的内容" in calls[0]["messages"][0]["content"]
     assert result["passed"] is not violation and result["error"] is None
@@ -606,8 +636,8 @@ def test_casual_business_question_boundary_is_sent_to_independent_judge_and_cont
     criteria = [item for field in ('required_meaning', 'forbidden_meaning') for item in expected[field]]
     assert any(item['id'] == directed_id for item in criteria)
     raw = json.dumps({'reason': '按既有闲聊合同给出受控判定。', 'criteria': [
-        {'id': item['id'], "verdict": ("violated" if violation and item['id'] == directed_id else "clear"), 'reason': '受控标准接入验证。'}
-        for item in criteria
+        {'id': index, "verdict": ("violated" if violation and item['id'] == directed_id else "clear"), 'reason': '受控标准接入验证。'}
+        for index, item in enumerate(criteria, start=1)
     ]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     evidence = {'request': scene.message.text, 'reply': reply, 'tool_results': [],
@@ -616,7 +646,9 @@ def test_casual_business_question_boundary_is_sent_to_independent_judge_and_cont
     assert verdict['passed'] is not violation and verdict['error'] is None
     assert len(calls) == 1
     payload = json.loads(calls[0]['messages'][-1]['content'])
-    rule = next(item for item in payload['expectation']['checks'] if item['id'] == directed_id)
+    directed_index = [item['id'] for item in criteria].index(directed_id)
+    rule = payload['expectation']['checks'][directed_index]
+    assert rule['id'] == directed_index + 1
     assert rule['kind'] == 'forbidden'
     assert '完整语义和指向' in rule['description'] and '泛论' in rule['description']
     assert payload['evidence'] == judge_module.project_semantic_judge_evidence(evidence)
@@ -665,7 +697,8 @@ def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdi
     expectation=judge_module.inquiry_reply_expectation(True,case_id='unknown_pool')
     criteria=[item for field in ('required_meaning','forbidden_meaning') for item in expectation[field]]
     raw=json.dumps({'reason':'受控接线判定，不冒充真实模型理解。','criteria':[{
-        'id':item['id'],"verdict":("violated" if item['id']==violation_id else "clear"),'reason':'固定正反例判定输入。'} for item in criteria]},ensure_ascii=False)
+        'id':index,"verdict":("violated" if item['id']==violation_id else "clear"),
+        'reason':'固定正反例判定输入。'} for index, item in enumerate(criteria, start=1)]},ensure_ascii=False)
     calls=install_fake_judge(monkeypatch,judge_module,raw)
     actual=judge_module.assess_reply_semantics(configured_client(),evidence=evidence,expectation=expectation,trace_id='strategy-contract-case')
     assert actual['passed'] is (violation_id is None) and actual['error'] is None
@@ -673,7 +706,8 @@ def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdi
     payload=json.loads(calls[0]['messages'][-1]['content'])
     assert payload['expectation']['game_query_strategy_contract']==game_query_strategy_contract()
     assert payload['evidence']==judge_module.project_semantic_judge_evidence(evidence)
-    assert 'clarify_unknown_need' not in {item['id'] for item in payload['expectation']['checks']}
+    assert [item['id'] for item in payload['expectation']['checks']] == list(range(1, len(criteria) + 1))
+    assert 'clarify_unknown_need' not in {item['id'] for item in actual['criteria']}
     assert 'product_contract_revision_ids' in actual['expectation']
     assert '不限定唯一内容或语义路径' in actual['rubric']
 
@@ -689,6 +723,6 @@ def test_judge_rubric_requires_reason_and_explicit_verdict_to_agree(judge_module
 
 @pytest.mark.parametrize('invalid',[True,False,0,1,'false','passed','violated|clear',None])
 def test_judge_verdict_rejects_ambiguous_or_legacy_boolean_values(judge_module,invalid):
-    payload={'reason':'受控合同反例','criteria':[{'id':'rule','reason':'不能猜测枚举含义','verdict':invalid}]}
+    payload={'reason':'受控合同反例','criteria':[{'id':1,'reason':'不能猜测枚举含义','verdict':invalid}]}
     with pytest.raises(ValueError,match='verdict must be violated or clear'):
         judge_module._parse_semantic_assessment(json.dumps(payload,ensure_ascii=False),['rule'])

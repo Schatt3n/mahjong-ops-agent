@@ -94,6 +94,7 @@ def test_budget_summary_rebuild_keeps_previous_decision_as_the_same_low_trust_pr
     rebuilt, transition = lifecycle.summarize_and_rebuild_context_if_needed(message, built=built,
         budget=TokenBudget(max_tokens_per_call=1), **args)
     assert transition is not None and rebuilt is not built
+    assert rebuilt.messages[0] == built.messages[0]
     assert rebuilt.payload["previous_decision"] == built.payload["previous_decision"] == _projection(action)
     assert json.loads(rebuilt.messages[-1]["content"])["previous_decision"] == _projection(action)
 

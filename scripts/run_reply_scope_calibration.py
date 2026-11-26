@@ -202,15 +202,15 @@ def assessment_matches(case: dict[str, Any], assessment: Any, *, expectation: di
     if (not inquiry.semantic_judge_config_matches(assessment,require_http=True)
             or not isinstance(attempts,list) or len(attempts) not in (1,2) or any(not isinstance(a,dict) for a in attempts)
             or type(assessment.get('contract_repair_count')) is not int or assessment['contract_repair_count']!=len(attempts)-1
-            or attempts[0].get('trace_id')!=trace_id or attempts[-1].get('error') is not None
-            or attempts[-1].get('raw_response')!=assessment.get('raw_response')):
+            or attempts[-1].get('error') is not None or attempts[-1].get('raw_response')!=assessment.get('raw_response')
+            or not inquiry.semantic_judge_attempt_chain_matches(assessment, trace_id=trace_id)):
         return False
     try:
         ids = inquiry._semantic_criteria_ids(expectation)
         if not set(case['allowed_violation_ids']) <= set(ids):
             return False
         if len(attempts)==2:
-            if not isinstance(attempts[0].get('error'),str) or not attempts[0]['error'].strip() or attempts[1].get('trace_id')!=trace_id+':contract_repair_1':
+            if not isinstance(attempts[0].get('error'),str) or not attempts[0]['error'].strip():
                 return False
             try:
                 inquiry._parse_semantic_assessment(attempts[0].get('raw_response',''),ids)

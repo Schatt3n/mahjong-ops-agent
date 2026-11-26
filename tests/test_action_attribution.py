@@ -74,6 +74,31 @@ def test_actual_customer_work_sentence_passes_unchanged_without_delivery_or_seco
     assert approved(items, payload, review)[0]
 
 
+def test_verbatim_customer_first_person_reply_requires_agent_execution_evidence():
+    """同一串文字分别由客户和 Agent 说出时，核验各自的动作主体。"""
+    message, action, items, _, review = setup_case(text=SOURCE)
+    items[0].update(source="reply_to_user", source_text=SOURCE, action_evidence=None)
+    review["item_reviews"][0].pop("external_action_attributions")
+    reviewer = StaticAgentClient([json.dumps(review, ensure_ascii=False)])
+    processor = CustomerVisibleProcessor(llm_client=reviewer, trace_recorder=InMemoryTraceRecorder(),
+                                         timeout_seconds=90, review_enabled=True)
+
+    result = processor.run_content_review(message=message, action=action, trace_id="copied_first_person",
+        review_items=items, context_payload={}, turn_budget=TokenBudget(), review_scope="reply_to_user")
+
+    assert len(reviewer.calls) == 1
+    system, candidate = reviewer.calls[0]["messages"]
+    assert "分别判断 `current_message.text` 和 `review_items[].text` 的说话者" in system["content"]
+    assert "即使回复逐字照抄客户原话，仍按回复的说话者核对" in system["content"]
+    payload = json.loads(candidate["content"])
+    assert payload["current_message"]["text"] == payload["review_items"][0]["text"] == SOURCE
+    assert payload["review_items"][0]["action_evidence"] is None
+    assert result.result["raw_approved"] is True and result.result["approved"] is False
+    item = result.result["item_reviews"][0]
+    assert item["approved"] is False and item["external_action_attributions"] == []
+    assert "customer_visible_contract:unverified_external_action:发了" in item["violations"]
+
+
 @pytest.mark.parametrize("fault", [
     "agent_actor", "third_party", "unknown_source", "other_author", "changed_source", "changed_text",
     "changed_predicate", "partial_claim", "bool_span", "out_of_bounds", "actor_tail", "source_actor_tail",
@@ -296,7 +321,7 @@ def test_runtime_attribution_contract_rejection_feeds_back_then_natural_reply_ha
     assert reviews[0]["raw_approved"] is True and reviews[0]["approved"] is False
     assert reviews[1]["approved"] is True
     assert "customer_visible_contract:unverified_external_action_attribution" in reviews[0]["item_reviews"][0]["violations"]
-    retry_payload = json.loads(main.calls[1]["messages"][1]["content"])
+    retry_payload = json.loads(main.calls[1]["messages"][-1]["content"])
     feedback = retry_payload["previous_tool_results"][0]
     reference = feedback["result_reference"]
     assert reference["source"] == "turn_tool_evidence"

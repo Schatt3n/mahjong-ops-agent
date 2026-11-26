@@ -44,6 +44,39 @@ def test_case_retries_at_most_three_times_and_keeps_attempts(bound, tmp_path, mo
     assert eval_retry.checkpointed_case('case', lambda _: pytest.fail('replayed a passed case'), case_dir=tmp_path)['status'] == 'passed'
 
 
+@pytest.mark.parametrize("stage", ["agent", "judge"])
+def test_parallel_initial_case_defers_retries_to_coordinator_in_same_window(bound, tmp_path, stage):
+    failure = {**FAILURE, "stage": stage}
+    calls = []
+
+    def initial(path):
+        calls.append(path)
+        assert not eval_retry.current_budget().begin_retry(failure, stage=stage)
+        return {"status": "blocked", "eval_inconclusive": failure, "source_reply": "原话"}
+
+    launched = eval_retry.checkpointed_case("case", initial, case_dir=tmp_path, defer_initial_retry=True)
+    assert launched["status"] == "blocked" and len(calls) == 1
+    assert not (bound / "blocked.json").exists()
+    assert not list(bound.rglob("window_*_retry_*.json"))
+
+    def retry(path):
+        calls.append(path)
+        assert eval_retry.current_budget().retries == 1
+        return {"status": "passed"}
+
+    def resume(prior, path):
+        assert prior == launched
+        assert eval_retry.current_budget().begin_retry(failure, stage="judge")
+        return retry(path)
+
+    run = retry if stage == "agent" else lambda _: pytest.fail("replayed a case with frozen judgment evidence")
+    result = eval_retry.checkpointed_case("case", run, case_dir=tmp_path, resume_judge=resume)
+    assert result["status"] == "passed" and len(set(calls)) == 2
+    assert (calls[0] / "eval_result.json").is_file()
+    assert len(list(bound.rglob("window_*_retry_*.json"))) == 1
+    assert eval_retry.checkpointed_case("case", run, case_dir=tmp_path) == result
+
+
 def test_budget_uses_one_deadline_for_judge_and_agent(bound, monkeypatch):
     clock = [50.0]
     monkeypatch.setattr(eval_retry, 'monotonic', lambda: clock[0])

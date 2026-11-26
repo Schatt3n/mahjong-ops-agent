@@ -1366,25 +1366,69 @@ def run_live_customer_visible_review_contract(
     return payload
 
 
-def _run_concurrent_owner_batch(observed, base_args, tasks, live_dir, workers, owner_eval) -> dict[str, Any]:
-    """每次都用新的数据库并同时运行本批；续跑不能捡选散落的成功回合证明重叠。"""
+def _owner_execution_id(scenario, iteration: int) -> str:
+    """标识同一评测中一个场景的一次初始执行及后续补试。"""
+    return f"{scenario.scenario_id}_run_{iteration}"
+
+
+def _owner_case_checkpoint_key(scenario, iteration: int) -> str:
+    """生成逐例补试账本键，与波次指标及其他校准阶段隔离。"""
+    return f"concurrent_owner_case:{scenario.scenario_id}:{iteration}"
+
+
+def _run_concurrent_owner_case(client, base_args, scenario, iteration, folder, owner_eval) -> dict[str, Any]:
+    """用独立 SQLite 执行一个场景，并记录本次尝试专属的主模型计量。"""
+    case_client = ObservedLLMClient(client)
+    scenario_args = SimpleNamespace(**{**vars(base_args), "db_path": folder / "owner_live.sqlite3"})
+    started = time.perf_counter()
+    report = owner_eval.run_scenario(case_client, scenario_args, scenario, iteration=iteration)
+    metrics = case_client.metrics()
+    failure = report.get("eval_inconclusive")
+    if report["status"] == "blocked" and (not is_inconclusive(failure)
+            or metrics["failed_calls"] != int(failure["stage"] == "agent")):
+        # 主执行阶段的单个失败必须与用例已核实的暂态归因一致；判定器故障不计入主执行。
+        report.update(status="failed", unverified_retry_disposition=report.pop("eval_inconclusive", None))
+    return {**report, "execution_id": _owner_execution_id(scenario, iteration),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000), "owner_runtime_attempt": True,
+            "runtime_metrics": metrics, "model_call_latencies_ms": case_client.latencies_ms}
+
+
+def _checkpoint_owner_case(client, base_args, scenario, iteration, case_dir, owner_eval, *,
+                           defer_initial_retry: bool = False) -> dict[str, Any]:
+    """为同一场景保留所有尝试；判定器补试继续使用该场景已经冻结的业务证据。"""
+    def run(folder):
+        """主执行暂态故障仅在新沙盒重放同一场景。"""
+        # 各次重放单独计量供应商并发与 HTTP 尝试，避免复用客户端的累计快照重计。
+        runtime_client = client if defer_initial_retry else OpenAICompatibleAgentClient.from_env()
+        if runtime_client is None:
+            raise RuntimeError("owner retry model configuration is unavailable")
+        return _run_concurrent_owner_case(runtime_client, base_args, scenario, iteration, folder, owner_eval)
+
+    def resume(prior, _folder):
+        """只补判，沿用原主执行的用量与数据库，但本尝试不重复记主执行用量。"""
+        return {**owner_eval.resume_owner_judge(client, prior), "owner_runtime_attempt": False}
+
+    return checkpointed_case(_owner_case_checkpoint_key(scenario, iteration), run, case_dir=case_dir,
+                             resume_judge=resume, defer_initial_retry=defer_initial_retry)
+
+
+def _run_concurrent_owner_batch(observed, base_args, tasks, live_dir, workers, owner_eval, *,
+                                managed: bool = False) -> dict[str, Any]:
+    """共享客户端只观测原始并发波次；每个用例的补试预算由协调线程另行扣减。"""
     live_dir.mkdir(parents=True, exist_ok=False)
 
     def evaluate(scenario, iteration):
         """真实场景共享客户端，隔离数据库路径与来源身份。"""
-        scenario_started = time.perf_counter()
-        scenario_args = SimpleNamespace(**{**vars(base_args),
-            "db_path": live_dir / f"run_{iteration:02d}" / scenario.scenario_id / "owner_live.sqlite3"})
-        with defer_case_retries():
-            report = owner_eval.run_scenario(observed, scenario_args, scenario, iteration=iteration)
-        report["execution_id"] = f"{scenario.scenario_id}_run_{iteration}"
-        report["elapsed_ms"] = int((time.perf_counter() - scenario_started) * 1000)
-        return report
+        folder = live_dir / f"run_{iteration:02d}" / scenario.scenario_id
+        if managed:
+            return _checkpoint_owner_case(observed, base_args, scenario, iteration, folder, owner_eval,
+                                          defer_initial_retry=True)
+        return _run_concurrent_owner_case(observed, base_args, scenario, iteration, folder, owner_eval)
 
     reports, errors = [], []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(copy_context().run, evaluate, scenario, iteration):
-                   f"{scenario.scenario_id}_run_{iteration}" for scenario, iteration in tasks}
+                   _owner_execution_id(scenario, iteration) for scenario, iteration in tasks}
         for future in as_completed(futures):
             try:
                 reports.append(future.result())
@@ -1393,55 +1437,53 @@ def _run_concurrent_owner_batch(observed, base_args, tasks, live_dir, workers, o
                 error = f"{futures[future]}: {type(exc).__name__}: {exc}"
                 errors.append(error.replace(key, "[redacted]") if key else error)
     reports.sort(key=lambda item: (item.get("scenario_id", ""), item.get("iteration", 0)))
+    if managed and observed.call_count != sum(report["runtime_metrics"]["call_count"] for report in reports):
+        # 波次文件提交之前若进程中断，不能用重启之后的局部峰值冒充原波次的并发证据。
+        errors.append("initial owner wave metrics do not cover all original calls")
     return {"reports": reports, "errors": errors, "scenario_count": len(tasks),
+            "execution_ids": [_owner_execution_id(scenario, iteration) for scenario, iteration in tasks],
             "runtime_metrics": observed.metrics(), "model_call_latencies_ms": observed.latencies_ms}
 
 
-def _resolve_concurrent_owner_batch(batch: dict, client, owner_eval) -> dict:
-    """只有完整同批证据且无已知失败时才补试；冻结判定不会重新运行这一批。"""
-    batch.pop("eval_inconclusive", None)
-    batch["status"] = "failed"
-    reports = batch["reports"]
-    inconclusive = [item for item in reports if item.get("status") == "blocked" and is_inconclusive(item.get("eval_inconclusive"))]
-    if (batch["errors"] or len(reports) != batch["scenario_count"]
-            or any(item.get("status") != "passed" and item not in inconclusive for item in reports)):
-        return batch
-    agent_failures = [item for item in inconclusive if item["eval_inconclusive"]["stage"] == "agent"]
-    if batch["runtime_metrics"]["failed_calls"] != len(agent_failures):
-        return batch
-    if agent_failures:
-        # 主 Agent 必须重放整个最小并发波次来重新证明重叠，旧波次证据单独保留。
-        batch.update(status="blocked", eval_inconclusive=agent_failures[0]["eval_inconclusive"])
-        return batch
-    for index, item in enumerate(reports):
-        if item.get("status") != "blocked":
-            continue
-        reassessed = owner_eval.resume_owner_judge(client, item)
-        reports[index] = reassessed
-        failure = reassessed.get("eval_inconclusive")
-        if is_inconclusive(failure):
-            batch.update(status="blocked", eval_inconclusive=failure)
-            return batch
-        if reassessed.get("status") != "passed":
-            return batch
-    batch["status"] = "passed"
-    return batch
+def _initial_owner_wave_evidence(batches: list[dict]) -> list[dict]:
+    """用初始实测波次和原尝试记录证明重叠，补试结果只进入逐例最终报告。"""
+    return [{"wave_index": index, "execution_ids": batch["execution_ids"], "errors": batch["errors"],
+             "runtime_metrics": batch["runtime_metrics"], "initial_cases": [
+                 {key: report.get(key) for key in ("execution_id", "status", "attempt_dir")}
+                 for report in batch["reports"]]}
+            for index, batch in enumerate(batches, start=1)]
 
 
-def _concurrent_checkpoint_metrics(batches: list[dict], extra_stages: list[dict]) -> dict:
-    """聚合最终波次的实测峰值；失败尝试仍以各自的账本和用量报告留存。"""
-    evidence = [*batches, *extra_stages]
+def _concurrent_checkpoint_metrics(batches: list[dict], owner_reports: list[dict], extra_stages: list[dict],
+                                   scope: pathlib.Path, tasks: list[tuple]) -> dict:
+    """分别统计最终验收与实际全部调用，重叠峰值只引用真实的首轮并发波次。"""
+    evidence = [*owner_reports, *extra_stages]
     units = [item["runtime_metrics"] for item in evidence]
     counters = ("call_count", "failed_calls", "estimated_prompt_tokens")
-    provider = [unit["provider_concurrency"] for unit in units if unit.get("provider_concurrency")]
+    wave_metrics = [item["runtime_metrics"] for item in batches]
+    provider = [unit["provider_concurrency"] for unit in [*wave_metrics, *units] if unit.get("provider_concurrency")]
+    owner_attempts = []
+    for scenario, iteration in tasks:
+        key = _owner_case_checkpoint_key(scenario, iteration)
+        for path in (scope / hashlib.sha256(key.encode()).hexdigest()).glob("*/case/eval_result.json"):
+            attempt = json.loads(path.read_text(encoding="utf-8"))
+            if attempt.get("owner_runtime_attempt") is True:
+                owner_attempts.append(attempt)
+    accepted = {item["execution_id"] for item in owner_reports if item["status"] == "passed"}
+    observed = {key: sum(item["runtime_metrics"][key] for item in owner_attempts) for key in counters}
+    observed["confirmed_recovered_failed_calls"] = sum(
+        item["runtime_metrics"]["failed_calls"] for item in owner_attempts
+        if item["execution_id"] in accepted and item["status"] == "blocked"
+        and is_inconclusive(item.get("eval_inconclusive")))
     return {"measurement_scope": "shared_runtime_client_only", "independent_semantic_judge_included": False,
             **{key: sum(unit[key] for unit in units) for key in counters},
-            "max_concurrent_client_calls": max((unit["max_concurrent_client_calls"] for unit in units), default=0),
-            "owner_wave_max_concurrent_client_calls": max((batch["runtime_metrics"]["max_concurrent_client_calls"]
-                                                          for batch in batches), default=0),
+            "max_concurrent_client_calls": max((unit["max_concurrent_client_calls"]
+                                                for unit in [*wave_metrics, *units]), default=0),
+            "owner_wave_max_concurrent_client_calls": max((unit["max_concurrent_client_calls"]
+                                                          for unit in wave_metrics), default=0),
             "model_call_latency_ms": latency_summary([latency for item in evidence
                 for latency in item["model_call_latencies_ms"]]),
-            "provider_concurrency_by_execution_unit": provider}
+            "provider_concurrency_by_execution_unit": provider, "observed_owner_attempts": observed}
 
 
 def run_live_suite(
@@ -1491,33 +1533,45 @@ def run_live_suite(
     ]
     started = time.perf_counter()
 
-    managed = scope_directory() is not None
+    scope = scope_directory()
     waves, extra_stages = [], []
     active_revision, review_contract = {"status": "not_run"}, {"status": "not_run"}
     pending = None
-    if managed:
+    if scope is not None:
         for offset in range(0, len(tasks), workers):
             wave = tasks[offset:offset + workers]
-
-            def run_wave(folder):
-                """第一轮或 Agent 补试总是在本波次各自的并发证据目录。"""
+            evidence_path = scope / f"initial_owner_wave_{offset // workers + 1:03d}.json"
+            if evidence_path.exists():
+                initial = json.loads(evidence_path.read_text(encoding="utf-8"))
+                if initial["execution_ids"] != [_owner_execution_id(scenario, iteration) for scenario, iteration in wave]:
+                    raise ValueError("checkpointed owner wave has different case identities")
+            else:
                 wave_client = ObservedLLMClient(OpenAICompatibleAgentClient.from_env())
-                original = _run_concurrent_owner_batch(wave_client, base_args, wave, folder, workers, owner_eval)
-                return _resolve_concurrent_owner_batch(original, wave_client, owner_eval)
-
-            def resume_wave(prior, folder):
-                """同轮再判只读取原波次的主执行与实测客户端指标。"""
-                resumed = deepcopy(prior)
-                resumed.pop("attempt_dir", None)
-                return _resolve_concurrent_owner_batch(resumed, base_client, owner_eval)
-
-            result = checkpointed_case(f"concurrent_owner_wave_{offset}", run_wave, case_dir=work_dir,
-                                       resume_judge=resume_wave)
-            waves.append(result)
-            if result["status"] != "passed":
-                pending = result.get("eval_inconclusive")
+                folder = pathlib.Path(tempfile.mkdtemp(prefix="owner_wave_", dir=work_dir)) / "live"
+                initial = _run_concurrent_owner_batch(wave_client, base_args, wave, folder, workers, owner_eval,
+                                                      managed=True)
+                write_json(evidence_path, initial)
+            waves.append(initial)
+            if initial["errors"] or any(report["status"] == "failed" for report in initial["reports"]):
                 break
-        if waves and all(wave["status"] == "passed" for wave in waves):
+        final_reports = {report["execution_id"]: report for wave in waves for report in wave["reports"]}
+        initial_hard_passed = (len(final_reports) == len(tasks) and not any(wave["errors"] for wave in waves)
+            and all(report["status"] in {"passed", "blocked"} for report in final_reports.values()))
+        if initial_hard_passed:
+            for scenario, iteration in tasks:
+                execution_id = _owner_execution_id(scenario, iteration)
+                if final_reports[execution_id]["status"] != "blocked":
+                    continue
+                # 补试只打开该用例的账本。其余用例的最终结果及首轮并发指标已冻结。
+                result = _checkpoint_owner_case(base_client, base_args, scenario, iteration, work_dir, owner_eval)
+                final_reports[execution_id] = result
+                if result["status"] == "failed":
+                    pending = None
+                    break
+                if result["status"] == "blocked":
+                    pending = result["eval_inconclusive"]
+        reports = list(final_reports.values())
+        if initial_hard_passed and all(report["status"] == "passed" for report in reports):
             for key, evaluate in (("active_input_revision", run_live_active_input_revision),
                                   ("customer_visible_review_contract", run_live_customer_visible_review_contract)):
                 def execute(folder):
@@ -1542,15 +1596,16 @@ def run_live_suite(
                 if stage["status"] != "passed":
                     pending = stage.get("eval_inconclusive")
                     break
-        metrics = _concurrent_checkpoint_metrics(waves, extra_stages)
+        metrics = _concurrent_checkpoint_metrics(waves, reports, extra_stages, scope, tasks)
     else:
         waves = [_run_concurrent_owner_batch(observed, base_args, tasks,
             pathlib.Path(tempfile.mkdtemp(prefix="owner_live_", dir=work_dir)) / "live", workers, owner_eval)]
+        reports = waves[0]["reports"]
         active_revision = run_live_active_input_revision(observed, base_args, work_dir / "active_input_revision")
         review_contract = run_live_customer_visible_review_contract(observed, base_args, work_dir / "customer_visible_review_contract", True)
         metrics = observed.metrics()
+        metrics["owner_wave_max_concurrent_client_calls"] = waves[0]["runtime_metrics"]["max_concurrent_client_calls"]
     execution_errors = [failure for wave in waves for failure in wave["errors"]]
-    reports = [report for wave in waves for report in wave["reports"]]
     reports.sort(key=lambda item: (item.get("scenario_id", ""), item.get("iteration", 0)))
     passed_count = sum(1 for report in reports if report.get("status") == "passed")
     expected_count = len(tasks)
@@ -1582,6 +1637,8 @@ def run_live_suite(
         **({"eval_inconclusive": pending} if is_inconclusive(pending) else {}),
         "provider": provider,
         "model": model,
+        "repeat": max(1, repeats),
+        "workers": max(1, workers),
         "scenario_count": expected_count,
         "passed_count": passed_count,
         "failed_count": expected_count - passed_count,
@@ -1589,6 +1646,7 @@ def run_live_suite(
         "checks": checks,
         "errors": execution_errors,
         "metrics": metrics,
+        "initial_owner_waves": _initial_owner_wave_evidence(waves),
         "reports": reports,
         "recovery_summary": owner_eval.summarize_action_contract_recovery(reports),
         "active_input_revision": active_revision,

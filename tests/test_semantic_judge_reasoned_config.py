@@ -31,7 +31,7 @@ def run_http(monkeypatch,*,provider='deepseek',content=None,passed=True,judge_ti
     """固定业务判断输出只验证合同，绝不请求真实模型或声称真实语义通过。"""
     calls=[]
     raw=content if content is not None else json.dumps({'reason':'固定单测输出','criteria':[
-        {'id':'grounded',"verdict":("violated" if not passed else "clear"),'reason':'仅验证判定合同'}]},ensure_ascii=False)
+        {'id':1,"verdict":("violated" if not passed else "clear"),'reason':'仅验证判定合同'}]},ensure_ascii=False)
     def transport(request,**kwargs):
         calls.append(json.loads(request.data));return Response(raw)
     monkeypatch.setattr(inquiry,'OpenAICompatibleAgentClient',lambda *,config:OpenAICompatibleAgentClient(config=config,urlopen=transport))
@@ -47,7 +47,7 @@ def run_http(monkeypatch,*,provider='deepseek',content=None,passed=True,judge_ti
 def test_reasoned_v2_is_fixed_in_real_http_payload_and_safe_diagnostics(monkeypatch):
     assessment,calls=run_http(monkeypatch)
     assert len(calls)==1 and assessment['passed'] is True and assessment['error'] is None
-    assert assessment['judge_contract_version']=='responsibility_scope_v9_20261124'
+    assert assessment['judge_contract_version']=='responsibility_scope_v10_20261126'
     assert calls[0]['thinking']=={'type':'enabled'} and calls[0]['reasoning_effort']=='low'
     assert calls[0]['max_tokens']==16384 and calls[0]['response_format']=={'type':'json_object'}
     assert 'temperature' not in calls[0]  # DeepSeek思考模式按提供方协议不发送采样温度。
@@ -141,7 +141,7 @@ def run_budgeted_judge(client):
 
 def fixed_verdict(verdict):
     return json.dumps({'reason': '固定测试结果', 'criteria': [
-        {'id': 'grounded', 'verdict': verdict, 'reason': '原证据与条目对照。'}]}, ensure_ascii=False)
+        {'id': 1, 'verdict': verdict, 'reason': '原证据与条目对照。'}]}, ensure_ascii=False)
 
 
 def test_transport_retries_on_same_input_but_stops_at_valid_negative_verdict(monkeypatch):
@@ -161,8 +161,52 @@ def test_transport_retries_on_same_input_but_stops_at_valid_negative_verdict(mon
     assert verdict['trace_id'] == 'judge-timeout:transport_retry_1'
     assert verdict['timeout_seconds'] == 1 and verdict['effective_timeout_seconds'] == 0.5
     assert inquiry.semantic_judge_config_matches(result, require_http=True)
+    assert inquiry.semantic_judge_attempt_chain_matches(result, trace_id='judge-timeout')
     verdict['effective_timeout_seconds'] = 0.75
     assert not inquiry.semantic_judge_config_matches(result, require_http=True)
+
+
+@pytest.mark.parametrize('fault', [None, 'missing_failure', 'out_of_order', 'wrong_digest', 'wrong_repair_digest',
+                                  'changed_repair_input', 'reused_call', 'wrong_config', 'non_retryable',
+                                  'parsed_response', 'wrong_suffix'])
+def test_final_attempt_chain_requires_frozen_evidence_for_original_and_repair(monkeypatch, fault):
+    client, calls = install_judge_transport(monkeypatch, [TimeoutError('初次请求超时'), '{',
+                                                        TimeoutError('合同更正超时'), fixed_verdict('violated')])
+    budget = JudgeRetryBudget(3)
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: budget)
+    result = run_budgeted_judge(client)
+    assert result['error'] is None and result['passed'] is False and result['contract_repair_count'] == 1
+    assert calls[0] == calls[1] and calls[2] == calls[3]
+    assert inquiry.semantic_judge_config_matches(result, require_http=True)
+
+    failures = result['transport_failures']
+    assert [receipt['trace_id'] for receipt in failures] == [
+        'judge-timeout', 'judge-timeout:contract_repair_1:transport_retry_1']
+    assert [attempt['trace_id'] for attempt in result['attempts']] == [
+        'judge-timeout:transport_retry_1', 'judge-timeout:contract_repair_1:transport_retry_2']
+    if fault == 'missing_failure':
+        failures.pop(0)
+    elif fault == 'out_of_order':
+        failures.reverse()
+    elif fault in {'wrong_digest', 'wrong_repair_digest'}:
+        failures[int(fault == 'wrong_repair_digest')]['frozen_input_sha256'] = '0' * 64
+    elif fault == 'changed_repair_input':
+        message = result['frozen_judge_messages'][-1]
+        content = json.loads(message['content'])
+        content['output_contract_repair']['previous_raw_response'] = 'different original'
+        message['content'] = json.dumps(content)
+        failures[-1]['frozen_input_sha256'] = inquiry._frozen_judge_input_digest(result)
+    elif fault == 'reused_call':
+        failures[1]['completion_diagnostics']['call_id'] = failures[0]['completion_diagnostics']['call_id']
+    elif fault == 'wrong_config':
+        failures[0]['completion_diagnostics']['requested_model'] = 'another-model'
+    elif fault == 'non_retryable':
+        failures[0]['completion_diagnostics']['attempts'][0]['failure_reason'] = 'response_format_invalid'
+    elif fault == 'parsed_response':
+        failures[0]['completion_diagnostics']['attempts'][0]['response_json_parsed'] = True
+    elif fault == 'wrong_suffix':
+        result['attempts'][-1]['trace_id'] = 'judge-timeout:contract_repair_1:transport_retry_3'
+    assert inquiry.semantic_judge_attempt_chain_matches(result, trace_id='judge-timeout') is (fault is None)
 
 
 @pytest.mark.parametrize('repair_required', [False, True])
@@ -218,6 +262,45 @@ def test_deferred_judge_reuses_completed_agent_evidence_in_new_window(monkeypatc
     assert result['passed'] is True and len(calls) == len(fresh.retries) == 1
     assert result['deferred_judge'] == original['deferred_judge']
     assert inquiry.semantic_judge_config_matches(result, require_http=True)
+
+
+def test_deferred_repair_can_verify_earlier_original_stage_timeout(monkeypatch):
+    client, calls = install_judge_transport(monkeypatch, [TimeoutError('初次请求超时'), '{', fixed_verdict('clear')])
+    budget = JudgeRetryBudget(3)
+    limits = iter([1, 0.5, 0])
+    monkeypatch.setattr(budget, 'limit_timeout', lambda _: next(limits))
+    budget.last_failure = {'stage': 'judge', 'retryable': True,
+                           'category': 'unattributed_timeout', 'reason': 'timeout_waiting_for_response_headers'}
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: budget)
+    original = run_budgeted_judge(client)
+    assert original['eval_inconclusive'] == inquiry.DEFERRED_JUDGE
+    assert len(original['transport_failures']) == 1 and len(original['frozen_judge_messages']) == 3
+    assert len(calls) == 2
+
+    fresh = JudgeRetryBudget(3)
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: fresh)
+    result = inquiry.resume_reply_semantics(client, original)
+    assert result['passed'] is True and len(calls) == 3
+    assert inquiry.semantic_judge_attempt_chain_matches(result, trace_id='judge-timeout')
+
+
+def test_sorted_checkpoint_keeps_original_request_bytes_in_later_repair(monkeypatch):
+    client, calls = install_judge_transport(monkeypatch, [TimeoutError('原请求超时'), '{',
+                                                        TimeoutError('更正请求超时'), fixed_verdict('clear')])
+    budget = JudgeRetryBudget(0)
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: budget)
+    original = run_budgeted_judge(client)
+    assert len(calls) == 1 and len(original['transport_failures']) == 1
+    checkpoint = json.loads(json.dumps(original, ensure_ascii=False, sort_keys=True))
+    assert inquiry._judge_messages(checkpoint)[1] != original['frozen_judge_messages'][1]
+
+    fresh = JudgeRetryBudget(3)
+    monkeypatch.setattr(inquiry.eval_retry, 'current_budget', lambda: fresh)
+    result = inquiry.resume_reply_semantics(client, checkpoint)
+    assert result['passed'] is True and len(calls) == 4
+    assert calls[0] == calls[1] and calls[2] == calls[3]
+    assert calls[3]['messages'][:2] == calls[0]['messages']
+    assert inquiry.semantic_judge_attempt_chain_matches(result, trace_id='judge-timeout')
 
 
 def test_inquiry_gate_resumes_blocked_judge_after_an_isolated_agent_recovery(tmp_path, monkeypatch):

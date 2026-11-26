@@ -18,3 +18,15 @@ def semantic_http_completion(raw, *, config, trace_id):
     # 大量离线夹具不消耗真实每日预算；其余固定思考参数仍由生产factory提供。
     client=OpenAICompatibleAgentClient(config=replace(config,max_estimated_tokens_per_day=0),urlopen=lambda *args,**kwargs:Response())
     return client.complete([],trace_id=trace_id,timeout_seconds=config.attempt_timeout_seconds)
+
+
+def raise_semantic_http_timeout(messages, *, config, trace_id, timeout_seconds):
+    """通过真实客户端生成单次结构化响应头超时回执，离线测试不读取网络。"""
+    def wait_for_headers(*args, **kwargs):
+        raise TimeoutError('等待判定器响应头超时')
+
+    client = OpenAICompatibleAgentClient(
+        config=replace(config, retry_attempts=1, max_estimated_tokens_per_day=0),
+        urlopen=wait_for_headers,
+    )
+    client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)

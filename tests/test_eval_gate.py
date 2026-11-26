@@ -21,6 +21,28 @@ from mahjong_agent_runtime.models import DEFAULT_TZ
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_evals.py"
 
 
+@pytest.mark.parametrize(("flags", "base"), [(["--impact"], "HEAD"), (["--impact", "origin/main"], "origin/main")])
+def test_impact_does_not_load_credentials_or_start_a_run(gate, monkeypatch, flags, base):
+    """范围建议只读取 Git 差异，不初始化模型环境、评测目录或执行计划。"""
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", *flags])
+    calls = []
+    monkeypatch.setattr(gate, "print_eval_impact", lambda root, base: calls.append((root, base)))
+    for name in ("load_dotenv_defaults", "create_run_directory", "run_gate"):
+        monkeypatch.setattr(gate, name, lambda *args, **kwargs: pytest.fail("impact started an evaluation"))
+    assert gate.main() == 0
+    assert calls == [(gate.ROOT, base)]
+
+
+@pytest.mark.parametrize("flags", [
+    ["--full"], ["--scope", "all_pytest"], ["--resume", "archived-run"], ["--live-case-workers", "4"],
+])
+def test_impact_cannot_be_combined_with_execution_flags(gate, monkeypatch, flags):
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--impact", *flags])
+    with pytest.raises(SystemExit) as exc:
+        gate.parse_args()
+    assert exc.value.code == 2
+
+
 def test_run_command_preserves_platform_pythonpath(gate, monkeypatch):
     """子进程须保留原有路径列表，并以当前平台分隔符增加项目源码。"""
     monkeypatch.setenv("PYTHONPATH", str(gate.ROOT / "fixture-imports"))
@@ -275,12 +297,12 @@ def gate(monkeypatch, tmp_path_factory):
     return module
 
 
-def semantic_config_stub(trace_id, raw, *, passed=True, evidence=None):
+def semantic_config_stub(trace_id, raw, *, expectation, passed=True, evidence=None):
     """离线只替换HTTP传输，真实客户端生成固定配置诊断；不宣称真实远端语义通过。"""
     from mahjong_agent_runtime import AgentLLMConfig
     from mahjong_agent_runtime.llm import completion_diagnostics
     from run_inquiry_grounding_eval import (
-        SEMANTIC_JUDGE_CONTRACT_VERSION, SEMANTIC_JUDGE_FIXED_CONFIG, make_semantic_judge_config,
+        SEMANTIC_JUDGE_CONTRACT_VERSION, SEMANTIC_JUDGE_FIXED_CONFIG, _project_judge_expectation, make_semantic_judge_config,
         resolve_semantic_judge_transport,
     )
     from tests.semantic_http_stub import semantic_http_completion
@@ -293,6 +315,7 @@ def semantic_config_stub(trace_id, raw, *, passed=True, evidence=None):
     evidence = deepcopy(evidence or {})
     return {"evidence": evidence, "judge_evidence": project(evidence), "judge_input_projection_version": PROJECTION_VERSION,
         "judge_contract_version": SEMANTIC_JUDGE_CONTRACT_VERSION,
+        "judge_expectation": _project_judge_expectation(expectation),
         "judge_config": {"model": "unit-model", "provider": "deepseek", **deepcopy(SEMANTIC_JUDGE_FIXED_CONFIG),
             "attempt_timeout_seconds": config.attempt_timeout_seconds, "retry_attempts": config.retry_attempts},
         "judge_transport": transport,
@@ -304,18 +327,19 @@ def semantic_config_stub(trace_id, raw, *, passed=True, evidence=None):
 def successful_inquiry_stub_report():
     """用真实固定输入与生效期望构造完整报告形状，仅模拟独立判定输出，不调用模型。"""
     from run_inquiry_grounding_eval import (
-        inquiry_business_side_effect_checks, inquiry_input_catalog, inquiry_reply_expectation, _parse_semantic_assessment,
+        inquiry_business_side_effect_checks, inquiry_input_catalog, inquiry_reply_expectation,
+        _parse_semantic_assessment, _semantic_criteria_ids,
     )
 
     inputs = inquiry_input_catalog()
     transcript = []
     for index, (case_id, source) in enumerate(inputs.items(), start=1):
         expectation = inquiry_reply_expectation(source["criteria_incomplete"], case_id=case_id)
+        criterion_ids = _semantic_criteria_ids(expectation)
         raw = json.dumps({"reason": "固定离线判定，不代表真实模型语义通过。", "criteria": [
-            {"id": item["id"], "verdict": "clear", "reason": "本地测试判定器证据接线。"}
-            for field in ("required_meaning", "forbidden_meaning") for item in expectation[field]
+            {"id": index, "verdict": "clear", "reason": "本地测试判定器证据接线。"}
+            for index in range(1, len(criterion_ids) + 1)
         ]}, ensure_ascii=False)
-        criterion_ids = [item["id"] for field in ("required_meaning", "forbidden_meaning") for item in expectation[field]]
         preferred_game = source["preferred_game"]
         reply = "测试回复，不用于业务验收。"
         before = {"customer_related_games": [], "customer_invites": [], "customer_outbounds": [],
@@ -334,7 +358,7 @@ def successful_inquiry_stub_report():
             "business_side_effect_checks": inquiry_business_side_effect_checks([], business_state),
             "inquiry_assessment": {**_parse_semantic_assessment(raw, criterion_ids), "error": None,
                                    "raw_response": raw, "expectation": expectation, "evidence": evidence,
-                                   **semantic_config_stub("inquiry-stub:" + case_id, raw, evidence=evidence)},
+                                   **semantic_config_stub("inquiry-stub:" + case_id, raw, expectation=expectation, evidence=evidence)},
             "product_contract_revision_ids": list(expectation["product_contract_revision_ids"]),
         })
     return {"status": "completed", "quality_status": "passed", "total_messages": len(inputs),
@@ -345,7 +369,7 @@ def successful_inquiry_stub_report():
 
 def active_revision_semantic_stub(evidence, expectation, *, failed_ids=(), trace_id="trace_active_revision_semantics"):
     """生成严格原始JSON与派生结论的受控替身，标签不作为生产模型语义证据。"""
-    from run_inquiry_grounding_eval import REPLY_SEMANTIC_JUDGE_RUBRIC, _project_judge_expectation
+    from run_inquiry_grounding_eval import REPLY_SEMANTIC_JUDGE_RUBRIC
 
     criteria = [{"id": item["id"], "passed": item["id"] not in failed_ids, "reason": "本地受控判定标签"}
         for group in ("required_meaning", "forbidden_meaning") for item in expectation[group]]
@@ -353,11 +377,10 @@ def active_revision_semantic_stub(evidence, expectation, *, failed_ids=(), trace
     result = {"passed": all(item["passed"] for item in criteria), "error": None, "reason": reason,
         "criteria": criteria, "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
         "raw_response": json.dumps({"reason": reason, "criteria": [
-            {"id": item["id"], "verdict": ("violated" if not item["passed"] else "clear"), "reason": item["reason"]}
-            for item in criteria]}, ensure_ascii=False)}
+            {"id": index, "verdict": ("violated" if not item["passed"] else "clear"), "reason": item["reason"]}
+            for index, item in enumerate(criteria, 1)]}, ensure_ascii=False)}
     result.update(trace_id=trace_id, rubric=REPLY_SEMANTIC_JUDGE_RUBRIC,
-        judge_expectation=_project_judge_expectation(expectation),
-        **semantic_config_stub(trace_id, result["raw_response"], passed=result["passed"], evidence=evidence))
+        **semantic_config_stub(trace_id, result["raw_response"], expectation=expectation, passed=result["passed"], evidence=evidence))
     return result
 
 
@@ -468,7 +491,8 @@ def successful_stub_report(command, gate, *, repeat=1, review_config=None):
                 criteria = [{"id": criterion_id, "passed": True, "reason": "固定测试判定，不调用模型。"}
                             for criterion_id in contract["criterion_ids"][scenario_id]]
                 original = {"reason": "测试通过", "criteria": [
-                    {"id": item["id"], "verdict": "clear", "reason": item["reason"]} for item in criteria
+                    {"id": index, "verdict": "clear", "reason": item["reason"]}
+                    for index, item in enumerate(criteria, 1)
                 ]}
                 trace_id = f"trace_stub_{scenario_id}_{iteration}"
                 query_request = contract.get("query_reply_state_requests", {}).get(scenario_id)
@@ -507,7 +531,8 @@ def successful_stub_report(command, gate, *, repeat=1, review_config=None):
                         "reason": original["reason"], "criteria": criteria, "passed": True, "error": None,
                         "expectation": deepcopy(contract["expectations"][scenario_id]),
                         "raw_response": json.dumps(original, ensure_ascii=False),
-                        **semantic_config_stub(trace_id + "_semantic_judge", json.dumps(original, ensure_ascii=False), evidence={"reply":reply}),
+                        **semantic_config_stub(trace_id + "_semantic_judge", json.dumps(original, ensure_ascii=False),
+                            expectation=contract["expectations"][scenario_id], evidence={"reply": reply}),
                     },
                 })
         return {
@@ -565,7 +590,10 @@ def successful_stub_report(command, gate, *, repeat=1, review_config=None):
         from run_real_owner_chat_live_eval import summarize_action_contract_recovery
 
         owner_reports = successful_stub_report(["scripts/run_real_owner_chat_live_eval.py", "--report-path",
-            command[command.index("--report-path") + 1]], gate, repeat=2)["reports"]
+            command[command.index("--report-path") + 1]], gate, repeat=1)["reports"]
+        for item in owner_reports:
+            item["execution_id"] = f"{item['scenario_id']}_run_{item['iteration']}"
+        execution_ids = [item["execution_id"] for item in owner_reports]
         recovery_evidence = deepcopy(owner_reports[0])
         recovery_evidence["scenario_id"] = fixture["id"]
         recovery_evidence["checks"] = [{"name": name, "passed": True} for name in fixture["expected"]["hard_checks"]]
@@ -617,9 +645,27 @@ def successful_stub_report(command, gate, *, repeat=1, review_config=None):
         review_scope = run_live_customer_visible_review_contract(FixedReviewClient(),
             SimpleNamespace(timeout_seconds=1, max_tokens_per_call=64000),
             Path(command[command.index("--report-path") + 1]).parent / f"review_contract_{uuid.uuid4().hex}", include_follow_up_cases=True, review_client=FixedReviewClient())
+        count = len(owner_reports)
+        checks = [
+            {"name": name, "passed": True, "expected": expected, "actual": actual}
+            for name, expected, actual in (
+                ("all_scenarios_returned", count, count),
+                ("all_scenarios_passed", count, count),
+                ("real_model_calls_overlapped", ">=2", 2),
+                ("no_model_call_failed", 0, 0),
+                ("active_goal_revision_passed", "passed", "passed"),
+                ("customer_visible_review_contract_passed", "passed", "passed"),
+            )
+        ]
         return {
             "status": "passed", "deterministic": [{"status": "passed"} for _ in range(8)],
-            "live": {"status": "passed", "scenario_count": 4, "passed_count": 4, "failed_count": 0,
+            "configuration": {"live_workers": 4, "live_repeats": 1},
+            "live": {"status": "passed", "scenario_count": count, "passed_count": count, "failed_count": 0,
+                "checks": checks, "errors": [], "metrics": {"owner_wave_max_concurrent_client_calls": 2, "failed_calls": 0},
+                "initial_owner_waves": [{"wave_index": 1, "execution_ids": execution_ids,
+                    "initial_cases": [{"execution_id": identity, "status": "passed", "attempt_dir": None}
+                                      for identity in execution_ids],
+                    "runtime_metrics": {"max_concurrent_client_calls": 2}, "errors": []}],
                 "reports": owner_reports,
                 "recovery_summary": summarize_action_contract_recovery(owner_reports),
                 "customer_visible_review_contract": review_scope,
@@ -939,6 +985,15 @@ def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(
         gate.validate_customer_review_scope(scope, phase)
 
 
+def write_concurrency_wave_evidence(payload, folder):
+    """测试替身保留独立初始波次，允许对报告单独注入与原波次矛盾的证据。"""
+    folder.mkdir(parents=True, exist_ok=True)
+    for wave in payload["live"]["initial_owner_waves"]:
+        source = {key: wave[key] for key in ("execution_ids", "errors", "runtime_metrics")}
+        source.update(reports=wave["initial_cases"], scenario_count=len(wave["execution_ids"]))
+        (folder / f"initial_owner_wave_{wave['wave_index']:03d}.json").write_text(json.dumps(source))
+
+
 def install_recording_subprocess(monkeypatch, gate, *, fail_script=None, interrupt_script=None,
                                  produce_inquiry_report=True, alter_report=None, recorded_states=None):
     calls = []
@@ -986,11 +1041,11 @@ def install_recording_subprocess(monkeypatch, gate, *, fail_script=None, interru
 
             def judge(_client, *, evidence, expectation, trace_id):
                 passed = labels[trace_id.removesuffix(":judge")]
-                raw = json.dumps({"reason": "离线受控判定", "criteria": [{"id": "grounded_obligation",
+                raw = json.dumps({"reason": "离线受控判定", "criteria": [{"id": 1,
                     "verdict": "clear" if passed else "violated", "reason": "离线标签核验"}]})
                 return {**_parse_semantic_assessment(raw, _semantic_criteria_ids(expectation)),
                     "error": None, "expectation": expectation, "raw_response": raw,
-                    **semantic_config_stub(trace_id, raw, passed=passed, evidence=evidence)}
+                    **semantic_config_stub(trace_id, raw, expectation=expectation, passed=passed, evidence=evidence)}
 
             run_calibration(None, Path(command[command.index("--work-dir") + 1]), judge=judge)
         for script, module_name in (("run_conversation_topic_eval.py", "run_conversation_topic_eval"),
@@ -1004,6 +1059,9 @@ def install_recording_subprocess(monkeypatch, gate, *, fail_script=None, interru
         if "--report-path" in command:
             report = Path(command[command.index("--report-path") + 1])
             payload = successful_stub_report(command, gate)
+            retry_scope = kwargs["env"].get(gate.SCOPE_ENV)
+            if "scripts/run_concurrency_eval.py" in command and "live" in command and retry_scope:
+                write_concurrency_wave_evidence(payload, Path(retry_scope))
             if alter_report is not None:
                 payload = alter_report(command, payload)
             report.parent.mkdir(parents=True, exist_ok=True)
@@ -1122,7 +1180,7 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
         assert all("--strict" in command for command in commands)
     assert all(command[command.index("--env-file") + 1] == str(gate.ROOT / ".env") for command in groups)
     assert concurrency[concurrency.index("--live-workers") + 1] == "4"
-    assert concurrency[concurrency.index("--live-repeats") + 1] == "2"
+    assert concurrency[concurrency.index("--live-repeats") + 1] == "1"
     for command in (owner, *groups, concurrency, inquiry, privacy):
         assert not {"--scenario", "--case", "--skip-review", "--skip-text-generation"} & set(command)
     for command in (owner, privacy):
@@ -1756,9 +1814,56 @@ def test_active_revision_gate_accepts_both_coherent_reply_states_with_complete_e
     revision["reply_state_calibration"] = active_revision_calibration_stub(revision["fixture"], evidence)
     path.write_text(json.dumps(payload))
     phase = {"scope": "real_concurrency_all_scenarios", "report_path": str(path),
-             "command": ["scripts/run_concurrency_eval.py", "--live-repeats", "2"]}
+             "command": ["scripts/run_concurrency_eval.py", "--live-repeats", "1"]}
     gate.validate_scope_report(phase)
+    assert phase["case_coverage"]["repeat"] == 1
     assert phase["case_coverage"]["active_input_revision"]["passed"] == 1
+
+
+def test_concurrency_gate_requires_once_per_case_and_genuine_initial_overlap(gate, tmp_path):
+    """后续单例补试和汇总自报都不能替代初始并发证据。"""
+    path = tmp_path / "one-pass-concurrency.json"
+    valid = successful_stub_report(["scripts/run_concurrency_eval.py", "--report-path", str(path)], gate)
+    retry_scope = tmp_path / "retry"
+    write_concurrency_wave_evidence(valid, retry_scope)
+    phase = {"scope": gate.LIVE_SCOPES[2], "report_path": str(path), "retry_scope": str(retry_scope)}
+    path.write_text(json.dumps(valid))
+    gate.validate_scope_report(phase)
+    assert phase["case_coverage"]["repeat"] == 1
+
+    for fault in ("planned_repeat", "fake_repeat_type", "repeated_case", "wrong_iteration", "missing_waves",
+                  "duplicate_wave", "nonmatching_initial_case", "only_retry_overlapped", "failed_overlap_check",
+                  "rewritten_original_status"):
+        payload = deepcopy(valid)
+        live = payload["live"]
+        first_wave = live["initial_owner_waves"][0]
+        if fault == "planned_repeat":
+            payload["configuration"]["live_repeats"] = 2
+        elif fault == "fake_repeat_type":
+            payload["configuration"]["live_repeats"] = True
+        elif fault == "repeated_case":
+            live["reports"][1] = deepcopy(live["reports"][0])
+        elif fault == "wrong_iteration":
+            live["reports"][0]["iteration"] = 2
+        elif fault == "missing_waves":
+            live.pop("initial_owner_waves")
+        elif fault == "duplicate_wave":
+            live["initial_owner_waves"].append(deepcopy(first_wave))
+        elif fault == "nonmatching_initial_case":
+            first_wave["initial_cases"][0]["execution_id"] = "different_run_1"
+        elif fault == "only_retry_overlapped":
+            first_wave["runtime_metrics"]["max_concurrent_client_calls"] = 1
+        elif fault == "failed_overlap_check":
+            next(check for check in live["checks"] if check["name"] == "real_model_calls_overlapped")["passed"] = False
+        elif fault == "rewritten_original_status":
+            first_wave["initial_cases"][0]["status"] = "blocked"
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ValueError):
+            gate.validate_scope_report(phase)
+    path.write_text(json.dumps(valid))
+    (retry_scope / "initial_owner_wave_001.json").unlink()
+    with pytest.raises(ValueError, match="original archived measurements"):
+        gate.validate_scope_report(phase)
 
 
 @pytest.mark.parametrize("fault", [

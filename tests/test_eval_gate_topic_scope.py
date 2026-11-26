@@ -20,9 +20,9 @@ def assessment_stub(evidence, expectation, trace_id, *, passed=True):
     ids = _semantic_criteria_ids(expectation)
     raw = json.dumps({"reason": "本地测试判决", "criteria": [
         {"id": identifier, "verdict": "clear" if passed else "violated", "reason": "本地测试证据"}
-        for identifier in ids]})
+        for identifier in range(1, len(ids) + 1)]})
     return {**_parse_semantic_assessment(raw, ids), "error": None, "expectation": expectation,
-            "raw_response": raw, **semantic_config_stub(trace_id, raw, passed=passed, evidence=evidence)}
+            "raw_response": raw, **semantic_config_stub(trace_id, raw, expectation=expectation, passed=passed, evidence=evidence)}
 
 
 @pytest.fixture

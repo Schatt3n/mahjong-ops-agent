@@ -499,7 +499,7 @@ The project maps DeepSeek's `thinking` and `reasoning_effort` settings according
 
 The high-effort example caps reasoning and final text at 16,384 tokens combined. Actual usage may be lower. Keep historical replays with a 6,400-token budget separate from results under the new limit. Raising the token limit leaves request deadlines as configured. Restart running services to load the updated settings.
 
-Complex semantic evaluation uses fixed `enabled/low/16384` settings and the `responsibility_scope_v9_20261124` contract. Its transport budget comes from an explicit `judge_timeout_seconds` first and `MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS` second, with a 180-second default. The independent judge configures the same value for the per-attempt HTTP cap and total call budget. Individual attempts still reserve retry time as described below. The main agent and the blind state and amount classifiers keep their own budgets. A 180-second probe with the original input finished in 70,970.808 ms. The provider reported 11,634 completion tokens, including 11,176 reasoning tokens, and the judge correctly rejected the negative case. The original 60-second attempt did not produce a complete judgment. Calibration, full-gate results, the provider's internal root cause, and a reliable success rate remain unestablished by this probe. [Evaluation budgets and calibration](eval/README.md)
+Complex semantic evaluation uses fixed `enabled/low/16384` settings and the `responsibility_scope_v10_20261126` contract. The judge uses request-local integer IDs, which the evaluation report maps back to the original criterion IDs. Its transport budget comes from an explicit `judge_timeout_seconds` first and `MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS` second, with a 180-second default. The independent judge configures the same value for the per-attempt HTTP cap and total call budget. Individual attempts still reserve retry time as described below. The main agent and the blind state and amount classifiers keep their own budgets. Under the earlier `responsibility_scope_v9_20261124` contract, a 180-second probe with the original input finished in 70,970.808 ms. The provider reported 11,634 completion tokens, including 11,176 reasoning tokens, and the judge correctly rejected the negative case. The original 60-second attempt did not produce a complete judgment. Calibration, full-gate results, the provider's internal root cause, and a reliable success rate remain unestablished by this probe. [Evaluation budgets and calibration](eval/README.md)
 
 Queueing, retry backoff, and fallback share one total budget. When retries are allowed, the effective HTTP limit per attempt is the smaller of the explicit `attempt_timeout_seconds` cap and half the total budget remaining at the start of the retry loop. Later attempts can only reduce this limit. The explicit cap cannot override the retry reserve. With 45 seconds total and a 60-second explicit cap, the first attempt gets at most 22.5 seconds. An explicit cap of 10 seconds reduces that to 10 seconds. Single-attempt calls need no retry reserve and remain subject to both the explicit cap and the remaining budget. The client checks the remaining time while reading successful and error response bodies and across chunk boundaries. Continued whitespace never resets the budget. DNS, connection setup, and response headers use `urllib` timeouts, which may leave some lower-level blocking operations outside the client's direct control. Client metrics track `http_attempts`, `http_retries`, `http_timeouts`, and `http_recoveries` separately from safe recovery after a model action contract error.
 
@@ -769,12 +769,15 @@ traceId-yyyy-mm-dd hh:mm:ss-loglevel: content
 
 ## Tests and evaluation
 
-For everyday development and ordinary commits, run the unified offline checks. They run the full pytest suite once and check runtime boundaries, evaluation assets, and deterministic regressions. For changes that affect model behavior, also replay the affected scenarios and closely related negative cases with the target model.
+Choose checks based on the impact of the change for development, commits, merges, and releases. `--impact` classifies changed paths and suggests checks. For changes that affect model behavior, replay the affected scenarios and closely related negative cases with the target model.
 
-During solo development, work and sync on `main`. Run the full checks when the repository maintainer explicitly requests them. Once other developers are actively contributing, the final candidate must pass the full checks before merging into `main`, pushing to `main`, or releasing. The full checks also cover real shop-owner conversations with independent semantic review, group chats, game inquiries, privacy, and concurrency. Record any coverage you could not verify because API keys were unavailable.
+Review historical evidence for compatibility case by case or scope by scope and cite its source in the validation record. To broaden offline coverage, run the unified offline checks, which include the full pytest suite, runtime boundaries, evaluation assets, and deterministic regressions. Maintainers can select the full gate, which also covers real shop-owner conversations with independent semantic review, group chats, game inquiries, privacy, and concurrency. Record coverage still pending because API keys were unavailable.
 
 ```bash
-# Routine offline evaluation
+# Analyze changes and suggest checks, using HEAD as the default base
+PYTHONPATH=src python scripts/run_evals.py --impact
+
+# Unified offline evaluation
 PYTHONPATH=src python scripts/run_evals.py
 
 # Full checks, stopping after the first failing group of checks by default
@@ -1198,7 +1201,7 @@ When the system needs durable multi-node orchestration, visual workflows, human 
 4. The database is the source of truth for business state. Conversation, task context, game, customer, and trace identifiers each have a distinct purpose.
 5. Side effects must be validated, deduplicated, recoverable, and auditable. Customer-facing text goes through a minimal data projection, model generation or review, and deterministic keyword and pattern filtering.
 6. Turn failures into reproducible tests before fixing general causes in prompts, contracts, context, tools, or domain models. Keep one-off semantic branches out of the agent loop.
-7. Follow the [verification matrix](AGENTS.md#6-验证矩阵) for routine offline checks, targeted tests, and the circumstances that require the full gate.
+7. Follow the [verification matrix](AGENTS.md#6-验证矩阵) for affected offline and targeted checks, and record verified historical evidence and gaps in coverage.
 8. Documentation and public claims must reflect verified capabilities. Describe personal WeChat bridges as unofficial pilot integrations.
 9. During development, use the current database schema. Rebuildable runtime state can be replaced. Preserve test and evaluation assets and original observed messages.
 

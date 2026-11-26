@@ -1852,17 +1852,23 @@ def _recovery_feedback_in_context(payload: Any, feedback: dict[str, Any], *, sou
 
 
 def _recovery_prompt_payload(prompt: Any) -> dict[str, Any] | None:
-    """读取实际发送的最后一条user JSON；不能以尚未发送的context_built代替模型输入。"""
+    """从实际系统合同和末条用户 JSON 还原审计视图，不用构建快照填补传输证据。"""
+    from mahjong_agent_runtime.domains.context_builders.builder import read_main_agent_system_contract
+
     if not isinstance(prompt, dict) or not isinstance(prompt.get("messages"), list):
         return None
-    for message in reversed(prompt["messages"]):
+    messages = prompt["messages"]
+    for message in reversed(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         try:
             payload = json.loads(message.get("content", ""))
+            contract = read_main_agent_system_contract(messages[0])
         except (ValueError, TypeError):
             return None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or payload.keys() & contract.keys():
+            return None
+        return {**contract, **payload}
     return None
 
 
@@ -2190,10 +2196,11 @@ def assess_action_contract_recovery(
         built_context = next(((position, item.content) for position, item in
             reversed(list(enumerate(preceding, start=request_start))) if item.step == "context_built"), None)
         request = requests[-1] if requests else None
+        request_payload = _recovery_prompt_payload(request.content) if request else None
         request_proven = (request is not None and getattr(request, "trace_id", None) == getattr(response, "trace_id", None)
             and isinstance(request.content, dict) and isinstance(response.content, dict)
             and request.content.get("step_index") == response.content.get("step_index")
-            and _recovery_prompt_payload(request.content) is not None)
+            and request_payload is not None)
         events = trace_events[start:end]
         proposed = [item.content for item in events if item.step == "action_proposed" and isinstance(item.content, dict)]
         # 服务端AgentAction序列化会补全可选call_id/depends_on为None；JSON合同则用字段
@@ -2232,7 +2239,7 @@ def assess_action_contract_recovery(
                          "legal": bool(legal), "completed": bool(tool_feedback or terminal), "terminal": terminal,
                          "tool_trace_complete": bool(trace_complete), "request_proven": bool(request_proven),
                          "action": action, "built_context": built_context,
-                         "request_payload": _recovery_prompt_payload(request.content) if request else None})
+                         "request_payload": request_payload})
 
     final_legal = any(segment["legal"] and segment["terminal"] for segment in segments)
     if parameter_errors:
@@ -3873,7 +3880,8 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
     import sqlite3
     from run_inquiry_grounding_eval import (
         REPLY_SEMANTIC_EVIDENCE_FIELDS, REPLY_SEMANTIC_JUDGE_RUBRIC,
-        _parse_semantic_assessment, _project_judge_expectation, _semantic_criteria_ids, semantic_judge_config_matches,
+        _parse_semantic_assessment, _project_judge_expectation, _semantic_criteria_ids,
+        semantic_judge_attempt_chain_matches, semantic_judge_config_matches,
     )
 
     cases = load_reply_semantic_calibration_cases()
@@ -3966,7 +3974,7 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
         if (not isinstance(attempts, list) or len(attempts) not in {1, 2}
                 or type(assessment.get("contract_repair_count")) is not int or assessment["contract_repair_count"] != len(attempts) - 1
                 or attempts[-1].get("raw_response") != assessment.get("raw_response") or attempts[-1].get("error") is not None
-                or attempts[0].get("trace_id") != item["trace_id"] + ":judge"):
+                or not semantic_judge_attempt_chain_matches(assessment, trace_id=item["trace_id"] + ":judge")):
             raise ValueError("semantic calibration lacks its actual independent call attempt")
         if len(attempts) == 2:
             try:
@@ -3975,8 +3983,6 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
                 pass
             else:
                 raise ValueError("semantic calibration retried a valid business judgement")
-            if attempts[1].get("trace_id") != item["trace_id"] + ":judge:contract_repair_1":
-                raise ValueError("semantic calibration repair call has inconsistent identity")
         parsed = _parse_semantic_assessment(assessment.get("raw_response", ""), criterion_ids)
         if any(assessment.get(key) != parsed[key] for key in ("reason", "criteria", "passed")):
             raise ValueError("semantic calibration verdict contradicts the original judge JSON")
