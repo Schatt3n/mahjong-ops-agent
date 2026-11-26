@@ -192,6 +192,16 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     planned, ends_at = lifecycle["planned_start_at"], lifecycle["planned_end_at"]
     if planned is not None:
         if not evidence.get("has_fixed_opening_authority"):
+            if planned == arrival_floor:
+                arrival = "最早可到店" if evidence.get("clock_role") == "arrival_not_before" else "可到店"
+                soft_end = (f"保留顾客想打到 {play_until.isoformat()} 的柔性偏好，不当成硬截止或固定时长。"
+                            if play_until and hard_departure is None else "")
+                return (
+                    f"本次未建局。{planned.isoformat()} 只核实为本人{arrival}的时间，还没选定固定开场。"
+                    "先反馈现成桌的实查结果。顾客已经明确委托组局时，只问这个时间是否也是本桌开场，"
+                    "用 waiting_user 等本人答复，不要重新征询组局委托。仅询局时按已核实的查局结果回复。"
+                    f"不要再次尝试同一建局。{soft_end}"
+                )
             return "顾客授权找局或凑桌，但还没选定或委托你定一个固定开场。先反馈现成局或只问开场时间。"
         if (earliest and planned < earliest) or (limit and planned > limit[1]):
             return "拟建局的固定开场超出了核实过的可开打时段。"

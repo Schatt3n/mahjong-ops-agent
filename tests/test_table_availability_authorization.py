@@ -1037,6 +1037,86 @@ def test_v4_0038_asap_recruitment_expiry_does_not_bind_the_end_of_play(tmp_path,
     store._connection.close()
 
 
+def test_v5_0146_repeated_arrival_time_prompts_only_the_opening_decision(tmp_path):
+    """同任务的到店钟点不能偷换成开场。解开该歧义后才可实际建局。"""
+    at = datetime.fromisoformat("2026-11-25T19:02:00+08:00")
+    start = "2026-11-25T19:30:00+08:00"
+    soft_end = "2026-11-25T23:00:00+08:00"
+    prior = _incoming("七点半我能到 红中2块3块都行 这桌有位置吗", sent=at - timedelta(minutes=2), message_id="prior")
+    message = _incoming("那帮我组一桌吧 红中2块3块都行 七点半可以 我打到十一点左右", sent=at, message_id="ambiguous")
+    agreed = _incoming("就定晚上七点半开吧，我想打到十一点左右。", sent=at + timedelta(minutes=2), message_id="confirmed")
+    stakes = {"min": 2, "max": 3}
+    initial = _multi_decision("arrival_estimate", "play_until") | {
+        "current_ref": 3, "supporting_customer_refs": [1, 3], "accepted_stake_range": stakes,
+    }
+    confirmed = _multi_decision("opening", "play_until") | {
+        "current_ref": 5, "supporting_customer_refs": [3, 5], "accepted_stake_range": stakes,
+        "has_fixed_opening_authority": True, "opening_customer_ref": 5,
+        "opening_window": {"start_at": start, "end_at": start},
+    }
+    review = ReviewClient([initial, confirmed])
+    creation = ReviewClient([{"scope": "create", "customer_ref": 3, "shop_offer_ref": None}])
+    store = SQLiteAgentStore(tmp_path / "rolling-v5-0146.sqlite3")
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "red_center_mahjong", "stake_range": stakes}
+
+    def run_tool(source, call, step):
+        with using_clock(lambda: source.sent_at):
+            action = AgentAction(goal="处理已收到的组局委托", objective_status="needs_tool", reasoning_summary="核实开场",
+                                 tool_calls=[call])
+            return service.execute_tool_calls(action, message=source, trace_id=source.message_id,
+                previous_step_tool_results=[], step_index=step, run_id=source.message_id,
+                run_version=store.conversation_version("dm")).tool_results[0]
+
+    with using_clock(lambda: prior.sent_at):
+        _activate(store, started=prior.sent_at)
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "七点半这个点，红中2块3块的现成桌现在没有能搭的诶，要不我帮你组一桌？", "offer",
+                                   metadata={"delivery_status": "delivered"})
+    with using_clock(lambda: at):
+        _persist(store, message)
+        other, _ = store.create_game(conversation_id="unrelated", organizer_id="host", organizer_name="桌主",
+            known_players=[{"customer_id": "host"}], trace_id="unrelated", requirement={
+                "game_type": "hangzhou_mahjong", "stake": 2, "planned_start_at": start,
+            })
+
+    fixed = {"start_time_kind": "scheduled", "planned_start_at": start}
+    read = run_tool(message, ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": terms | {
+        "start_time_range": {"start_at": start, "end_at": "2026-11-25T23:59:59+08:00"},
+    }}), 1)
+    assert read.called and read.allowed and not read.result["matches"]
+    assert read.result["customer_reply_contract"]["evidence_scope"]["unfiltered_available_pool_empty"] is False
+
+    write = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                      "requirement": terms | fixed})
+    refused = run_tool(message, write, 2)
+    assert not refused.called and not refused.allowed and not creation.calls
+    assert all(clause in refused.error for clause in (
+        "本次未建局", "顾客已经明确委托组局时", f"{start} 只核实为本人可到店", "只问这个时间是否也是本桌开场",
+        "仅询局时按已核实的查局结果回复",
+        "waiting_user", "不要重新征询组局委托", f"{soft_end} 的柔性偏好", "不当成硬截止或固定时长",
+    ))
+    evidence = refused.result["table_availability_evidence"]
+    assert not evidence["has_fixed_opening_authority"] and evidence["play_until_at"] == soft_end
+    with using_clock(lambda: at):
+        other_clock = ToolCall("create_game", {"requirement": terms | fixed | {"planned_start_at": "2026-11-25T20:00:00+08:00"}})
+        assert "还没选定" in validate_table_availability(other_clock, evidence)
+        assert "只核实为本人可到店" not in validate_table_availability(other_clock, evidence)
+    assert set(store.games) == {other.game_id}
+
+    with using_clock(lambda: agreed.sent_at):
+        store.append_assistant_turn("dm", "现在没有合适现成桌。七点半你能到，那这桌定七点半开可以吗？", "ask-opening",
+                                   metadata={"delivery_status": "delivered"})
+        _persist(store, agreed)
+    created = run_tool(agreed, write, 1)
+    assert created.called and created.allowed and created.result["game"]["planned_start_at"] == start
+    assert all(key not in created.result["game"]["requirement"] for key in ("must_end_by", "duration_hours", "max_duration_hours"))
+    assert len(review.calls) == 2 and len(creation.calls) == 1
+    store._connection.close()
+
+
 def test_rolling_0146_verified_clocks_replace_only_unsupported_earlier_read_duration(tmp_path):
     """回放两次独立核验和真实查写，修订旧查局时长并保留玩法、离店和建局授权守卫。"""
     at = datetime.fromisoformat("2026-11-25T19:05:00+08:00")
