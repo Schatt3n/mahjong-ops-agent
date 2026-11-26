@@ -1,0 +1,69 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "source_code_commit": "bf3428d",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev4_20261127/2026-11-25-real-270ac8a1b6",
+  "customer_case": "0022",
+  "prior_turn": {
+    "trace_id": "trace_4eb1c9dc883b3b1a52920dc2",
+    "source_message_id": "customer:role-event:a58a73545a371d97027f094553cf8583a8e124a2140a76687a2b262ec451a19e",
+    "text": "老板好 19:30那桌杭麻的还有位吗 我最早19:52能到 可以晚点开吗",
+    "delivered_message_id": "outbound:trace_4eb1c9dc883b3b1a52920dc2:1",
+    "delivered_text": "19:30那桌杭麻还在凑，1～3元、烟不限，现在就一个人，还缺三位。你19:52到比开场晚二十来分钟，这桌现在还没定能不能等。要不要我去问问这桌能不能等你到？"
+  },
+  "trace_id": "trace_3448e521651aff72ee73dd70",
+  "message": {
+    "message_id": "customer:role-event:be76cc89703dec50ac8da2638578c34370d53ea1d6fc60cc75cae0bcec49b82f",
+    "sent_at": "2026-11-25T19:37:00+08:00",
+    "chat_sequence": 59,
+    "text": "要的 麻烦帮我问下这桌能不能等到我19:52到 谢谢"
+  },
+  "confirmed_tool_history": {
+    "first_attempt": {
+      "gateway_step_index": 101,
+      "call_id": "late_arrival_lookup",
+      "name": "request_late_arrival",
+      "game_id": "game_89625744e97c",
+      "arrival_at": "2026-11-25T19:52:00+08:00",
+      "idempotency_args_digest": "1051a5ecda8d9880d58a7988",
+      "deduplicated": false,
+      "called": false,
+      "allowed": false,
+      "error": "请先按这桌原条件查到同一桌，再安排晚到核实。"
+    },
+    "subsequent_same_turn_lookup": {
+      "step_index": 2,
+      "call_id": "lookup_original_table_retry",
+      "name": "search_current_games",
+      "called": true,
+      "allowed": true,
+      "lookup_scope": "specific_table",
+      "match_count": 1,
+      "match_kind": "exact",
+      "game_id": "game_89625744e97c",
+      "status": "forming",
+      "planned_start_at": "2026-11-25T19:30:00+08:00",
+      "operational_planned_end_at": "2026-11-25T22:00:00+08:00"
+    },
+    "retries": {
+      "gateway_step_indexes": [301, 401, 601, 701, 801],
+      "used_first_attempt_idempotency_key": true,
+      "all_deduplicated": true,
+      "all_called": false,
+      "contact_started": false
+    },
+    "final_delivery": {
+      "chat_sequence": 60,
+      "message_id": "outbound:trace_3448e521651aff72ee73dd70:1",
+      "text": "稍等一下",
+      "runtime_status": "needs_help"
+    }
+  },
+  "analysis": "第一次征询缺本轮精确查桌凭据，写锁内在安排任何事务之前退出。补查已将同一原桌和唯一正选写入同一会话，但此后的同号操作一律重放首次失败，未再次执行前置条件检查。顾客已明确授权征询，现有对话证据无需重复询问。",
+  "change": "只把缺本轮原桌凭据的无副作用失败标为可重领。用完全相同的消息与参数重试时，网关原样校验最新查桌、当前牌局与联系人权限；已成功的结果沿用同一幂等账本，避免重复登记。排队回执仍和送达、占席区分。",
+  "offline_verification": {
+    "test": "tests/test_late_arrival.py::test_v4_0022_missing_current_lookup_can_retry_same_key_without_double_arranging",
+    "controls": "内存与SQLite执行首次无原桌、错误查询、真实同桌精确查询、重试及重复。可联系时只登记一条面向原桌桌主的征询，不改开场或占席。真实查中但责任方无法私聊时仍拒绝，且不标记可重领。",
+    "live_replay": "pending",
+    "focused_tests_passed": 490
+  }
+}

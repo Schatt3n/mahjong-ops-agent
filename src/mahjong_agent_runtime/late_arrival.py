@@ -23,6 +23,10 @@ _ACTIVE_QUESTION_STATUSES = {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PR
 _ORIGIN_LINK_TYPES = {"origin", "private_switch_created", "private_board_created"}
 
 
+class LateArrivalLookupRequired(ValueError):
+    """本轮尚无准确查桌凭据，事务计划在安排任何征询之前退出。"""
+
+
 def _aware(value: Any) -> datetime | None:
     """只接受明确时区的时间，不由服务端为模型猜测日期或时区。"""
     try:
@@ -256,7 +260,7 @@ def plan_late_arrival_request(store: AgentStore, *, game_id: str, arrival_at: da
     """在调用方写锁内校验真实来源、牌局及私聊授权，然后生成全部责任任务。"""
     query = _same_turn_search(store, conversation_id, sender_id, trace_id, game_id)
     if query is None:
-        raise ValueError("请先按这桌原条件查到同一桌，再安排晚到核实。")
+        raise LateArrivalLookupRequired("请先按这桌原条件查到同一桌，再安排晚到核实。")
     source, observed = query
     if source.occurred_at.utcoffset() is None or source.occurred_at > at:
         raise ValueError("请先按这桌原条件查到同一桌，再安排晚到核实。")
@@ -464,9 +468,16 @@ def request_late_arrival(store: AgentStore, call, trace_id, conversation_id, sen
         questions, changes = store.ensure_late_arrival_questions(game_id=call.arguments["game_id"],
             arrival_at=arrival, sender_id=sender_id, conversation_id=conversation_id, trace_id=trace_id, at=stamp)
     except ValueError as exc:
-        return ToolResult(name=call.name, called=False, allowed=False, error=str(exc),
-                          result={"late_arrival_request": {"game_id": call.arguments["game_id"],
-                                  "arrival_at": arrival.isoformat(), "status": "unavailable"}, "contact_started": False})
+        details = {"late_arrival_request": {"game_id": call.arguments["game_id"], "arrival_at": arrival.isoformat(),
+                    "status": "unavailable"}, "contact_started": False}
+        if isinstance(exc, LateArrivalLookupRequired):
+            details.update(
+                retryable_no_effect=True,
+                validation_error={"code": "late_arrival_current_table_lookup_required", "message": str(exc)},
+                instruction="先按原条件查到同一张桌，再用本轮凭据重试。已明确委托的晚到征询无需再问。"
+                            "等待真实回执前不要说已经联系或留位。",
+            )
+        return ToolResult(name=call.name, called=False, allowed=False, error=str(exc), result=details)
     status, started = _status(store, questions, stamp)
     return ToolResult(name=call.name, called=True, allowed=True, state_transitions=changes,
         result={"late_arrival_request": _candidate_request_summary(questions[0], status),

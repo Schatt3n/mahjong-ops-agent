@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage
+from mahjong_agent_runtime import AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage
 from mahjong_agent_runtime.domains.context_builders.tool_results import tool_result_for_context
 from mahjong_agent_runtime.domains.game_participants import LateParticipationRequiresConfirmation
 from mahjong_agent_runtime.group_chat.models import ChannelIdentity, GroupRoomPolicy
@@ -14,6 +14,7 @@ from mahjong_agent_runtime.late_arrival import (
     late_arrival_delivery_context, late_arrival_seat_status, record_late_arrival_decision, request_late_arrival,
 )
 from mahjong_agent_runtime.models import MessageReference, using_clock
+from mahjong_agent_runtime.services import ToolExecutionService
 
 
 TOUCH = datetime.fromisoformat("2026-11-26T11:39:30+08:00")
@@ -39,7 +40,7 @@ def _private(account):
     return "private:" + account
 
 
-def _seed(store, *, peer=False, reachable=True, duration_hours=4):
+def _seed(store, *, peer=False, reachable=True, duration_hours=4, start=START):
     accounts = ["host", "guest"] + (["peer"] if peer else [])
     store.upsert_group_room_policy(GroupRoomPolicy(room_id=ROOM, channel=CHANNEL))
     for account in accounts:
@@ -48,7 +49,7 @@ def _seed(store, *, peer=False, reachable=True, duration_hours=4):
             can_private_message=account != "peer" or reachable))
     game, _ = store.create_game(conversation_id=_private("host"), organizer_id="host", organizer_name="桌主",
         requirement={"game_type": "hangzhou_mahjong", "stake": "2", "start_time_kind": "scheduled",
-                     "planned_start_at": START.isoformat(),
+                     "planned_start_at": start.isoformat(),
                      **({"duration_hours": duration_hours} if duration_hours is not None else {})},
         known_players=[{"customer_id": account, "display_name": account, "seat_count": 1}
                        for account in accounts if account != "guest"], trace_id="setup-table")
@@ -112,6 +113,74 @@ def test_late_arrival_hides_unagreed_duration_and_rejects_incomplete_lookup(stor
         assert result.called and result.allowed and game.planned_end_at is not None
         assert "planned_end_at" not in result.result["late_arrival_request"]
         assert "remaining_play_minutes" not in result.result["late_arrival_request"]
+
+
+@pytest.mark.parametrize("reachable", [True, False])
+def test_v4_0022_missing_current_lookup_can_retry_same_key_without_double_arranging(store, reachable):
+    """按同一来话补查原桌后可重领尚无副作用的调用，仍由后端核对联系人边界。"""
+    at = datetime.fromisoformat("2026-11-25T19:37:00+08:00")
+    start, arrival = at.replace(minute=30), at.replace(minute=52)
+    message = UserMessage(_private("guest"), "guest", "客人", "要的 麻烦帮我问下这桌能不能等到我19:52到 谢谢",
+                          message_id="late-arrival-input", sent_at=at)
+    trace = InMemoryTraceRecorder()
+    gateway = ToolGateway(store, trace_recorder=trace)
+    service = ToolExecutionService(store, gateway, trace)
+
+    def submit(call, step):
+        goal = AgentAction("核实顾客晚到", "needs_tool", "按同桌现状核对", tool_calls=[call])
+        result, = service.execute_tool_calls(goal, message=message, trace_id="v4-late-arrival",
+            previous_step_tool_results=[], step_index=step, run_id="v4-late-run",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        return result
+
+    with using_clock(lambda: at):
+        game = _seed(store, peer=not reachable, reachable=reachable, duration_hours=None, start=start)
+        store.update_game_requirement(game_id=game.game_id, requirement_patch={"max_duration_hours": 2.5},
+            reason="原桌约定最迟可用时间", trace_id="table-cap")
+        game_before = store.require_game(game.game_id)
+        assert game_before.planned_end_at == at.replace(hour=22, minute=0)
+        store.append_user_turn(message, "v4-late-arrival")
+
+        def request(step):
+            return submit(ToolCall("request_late_arrival", {"game_id": game.game_id, "arrival_at": arrival.isoformat()},
+                                   call_id=f"late-{step}"), step)
+
+        first = request(1)
+        assert not first.called and not first.allowed and not first.deduplicated
+        assert first.result["retryable_no_effect"] is True
+        assert first.result["validation_error"]["code"] == "late_arrival_current_table_lookup_required"
+        assert "无需再问" in tool_result_for_context(first)["result"]["instruction"]
+        assert not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+
+        wrong = submit(ToolCall("search_current_games", {"lookup_scope": "specific_table",
+            "requirement": {"game_type": "sichuan_mahjong"}}, call_id="not-this-table"), 2)
+        assert wrong.called and wrong.allowed and not wrong.result["matches"]
+        absent = request(3)
+        assert not absent.called and not absent.allowed and not absent.deduplicated
+        assert absent.result["retryable_no_effect"] is True and not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+
+        read = submit(ToolCall("search_current_games", {"lookup_scope": "specific_table", "requirement": {
+            "game_type": "hangzhou_mahjong", "planned_start_at": start.isoformat(), "start_time_kind": "scheduled",
+        }}, call_id="original-table"), 4)
+        assert read.called and read.allowed
+        only, = read.result["matches"]
+        assert only["match_kind"] == "exact" and only["game"]["game_id"] == game.game_id
+        retried = request(5)
+        replay = request(6)
+
+        assert retried.called is retried.allowed is reachable and not retried.deduplicated
+        assert "retryable_no_effect" not in retried.result
+        assert replay.called is replay.allowed is reachable and replay.deduplicated
+        assert first.idempotency_key == absent.idempotency_key == retried.idempotency_key == replay.idempotency_key
+        assert store.require_game(game.game_id).to_dict() == game_before.to_dict()
+        if reachable:
+            assert retried.result["late_arrival_request"]["status"] == "queued"
+            assert retried.result["contact_started"] is False
+            question, = _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+            assert question.subject_id == "host" and question.payload["source_message_id"] == message.message_id
+            assert question.payload["arrival_at"] == arrival.isoformat()
+        else:
+            assert "联系人授权不足" in retried.error and not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
 
 
 def test_late_arrival_requires_real_receipts_and_all_confirmed_contacts(store):
