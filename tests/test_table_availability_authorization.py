@@ -712,6 +712,42 @@ def test_multi_clock_authority_cannot_omit_duplicate_or_relabel_the_opening_sour
     assert _check(store, ReviewClient([decision]), message) is None
 
 
+@pytest.mark.parametrize("complete", [True, False])
+def test_fixed_opening_rechecks_an_unsupported_customer_citation_before_allowing_a_read(monkeypatch, complete):
+    """真响应的坏引用用原证据及剩余预算复判一次，来源不全则仍然无授权。"""
+    from mahjong_agent_runtime.domains import table_availability_authorization as module
+
+    store = InMemoryAgentStore()
+    _activate(store, started=MULTI_SENT - timedelta(minutes=5))
+    store.append_user_turn(_incoming("我七点半有空", sent=MULTI_SENT - timedelta(minutes=4), message_id="prior"), "prior")
+    message = _incoming("八点开行 两小时五十分钟到十一点 能凑到人吗", sent=MULTI_SENT)
+    _persist(store, message)
+    point = "2026-11-26T20:00:00+08:00"
+    corrected = _multi_decision("opening", "departure_deadline", current_ref=2, supporting_customer_refs=[1, 2],
+        opening_customer_ref=2, has_fixed_opening_authority=True) | {"opening_window": {"start_at": point, "end_at": point}}
+    old = corrected | {"opening_customer_ref": 1, "max_duration_hours": 2.83}
+    review = ReviewClient([old, corrected])
+    trace = InMemoryTraceRecorder()
+    times = iter((10.0, 13.0))
+    monkeypatch.setattr(module, "monotonic", lambda: next(times))
+    monkeypatch.setattr(module, "model_response_source", lambda *args, **kwargs: {"http_response_complete": complete})
+    result = _check(store, review, message, trace)
+
+    events = trace.get_trace(message.message_id)
+    assert events[1].step == "table_availability_authorization_invalid"
+    assert "not supported by its clock references" in events[1].content["error"]
+    assert len(review.calls) == (2 if complete else 1)
+    if complete:
+        assert result["opening_customer_ref"] == 2 and result["must_end_by"] == "2026-11-26T23:00:00+08:00"
+        assert result.get("max_duration_hours") is None
+        assert review.calls[1][0][:2] == review.calls[0][0]
+        assert review.calls[1][1]["timeout_seconds"] == 9.0
+        assert events[-1].content["attempt"] == 2
+        assert _check(store, review, message, trace, step=2) == result
+    else:
+        assert result is None and len(events) == 2
+
+
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
 def test_same_goal_history_and_durable_source_version_cache(backend, tmp_path):
     """原 morning 来话的本人时段仍可引用，过期任务、未交付回复和其他顾客不会串入。"""

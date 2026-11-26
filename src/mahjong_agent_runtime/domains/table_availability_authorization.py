@@ -9,6 +9,7 @@ import unicodedata
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
+from time import monotonic
 from typing import Any
 
 from ..group_chat.parsing import has_unresolved_han_clock_minutes, observe_clock_candidates
@@ -448,21 +449,41 @@ def check_table_availability(
         **source_info, "input": payload, "step_index": step_index, "system": prompt,
     })
     decision = None
-    record = {**source_info, "step_index": step_index}
-    try:
-        raw = client.complete([{"role": "system", "content": prompt}, {"role": "user", "content": serialized}],
-                              trace_id=source_trace, timeout_seconds=timeout_seconds)
-    except Exception as exc:
-        record.update(error=type(exc).__name__, diagnostics=completion_diagnostics(exc))
-        trace_recorder.record(trace_id, "table_availability_authorization_unavailable", record, level="WARN")
-    else:
-        record.update(raw=str(raw), response_source=model_response_source(raw, trace_id=source_trace,
-                      step_index=step_index), diagnostics=completion_diagnostics(raw))
+    original = [{"role": "system", "content": prompt}, {"role": "user", "content": serialized}]
+    messages, budget = original, timeout_seconds
+    deadline = monotonic() + timeout_seconds
+    for attempt in (1, 2):
+        attempt_trace = source_trace if attempt == 1 else f"{source_trace}:repair"
+        record = {**source_info, "step_index": step_index, "attempt": attempt}
+        try:
+            raw = client.complete(messages, trace_id=attempt_trace, timeout_seconds=budget)
+        except Exception as exc:
+            record.update(error=type(exc).__name__, diagnostics=completion_diagnostics(exc))
+            trace_recorder.record(trace_id, "table_availability_authorization_unavailable", record, level="WARN")
+            break
+        availability_source = model_response_source(raw, trace_id=attempt_trace, step_index=step_index)
+        record.update(raw=str(raw), response_source=availability_source, diagnostics=completion_diagnostics(raw))
         try:
             decision = _parse_decision(str(raw), evidence, source_dates=dates, local_at=local_at, clock=clock)
         except (TypeError, ValueError, OverflowError) as exc:
             record["error"] = str(exc)
             trace_recorder.record(trace_id, "table_availability_authorization_invalid", record, level="WARN")
+            budget = deadline - monotonic()
+            if (attempt != 1 or budget <= 0 or availability_source["http_response_complete"] is not True
+                    or str(exc) not in {"the cited opening is not supported by its clock references",
+                                        "fixed opening requires a cited customer statement"}
+                    or _current_source(store, message) != source):
+                break
+            correction = {"previous_result": str(raw), "validation_error": str(exc)}
+            messages = [*original, {"role": "system", "content": (
+                "上一份固定开场缺少有效的本人引用。用原来的对话重新核实，确认具体哪条本人来话选定了开场。"
+                "能证明才填写正确编号，否则取消固定开场权限。时长上限也须独立引用本人明确的限制，保留原格式。"
+            )}, {"role": "user", "content": json.dumps(correction, ensure_ascii=False)}]
+            trace_recorder.record(trace_id, "table_availability_authorization_repair_prompt", {
+                **source_info, "step_index": step_index, "error": str(exc), "remaining_seconds": budget,
+            })
+        else:
+            break
     if decision is None and not recheck_personal_read:
         return None
     if _current_source(store, message) != source or _authorization_history(store, message, task_id) != (evidence, dates):
