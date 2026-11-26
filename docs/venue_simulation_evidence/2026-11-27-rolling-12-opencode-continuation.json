@@ -715,7 +715,8 @@
     "2026-11-27-actor-cancellation-recheck.json",
     "2026-11-27-past-create-recheck.json",
     "2026-11-27-verified-read-scope-recheck.json",
-    "2026-11-27-formation-arrival-floor-recheck.json"
+    "2026-11-27-formation-arrival-floor-recheck.json",
+    "2026-11-27-same-day-recovery-live.json"
   ],
   "additional_cases": [
     {
@@ -753,8 +754,24 @@
     "manual_cross_checks": [
       "最早到店和选定开场是两件事，不能因同一钟点直接认定老板重复问",
       "重复说记上了会影响话术质量，SQLite 显示相应案例实际只存同一桌",
-      "工具派生的 planned_end_at 不能直接当作已向顾客确认的牌桌时长"
-    ]
+      "工具派生的 planned_end_at 不能直接当作已向顾客确认的牌桌时长",
+      "看板写烟况待定，顾客收到相关回复后再明确要求无烟，是可能合理的条件核实。"
+    ],
+    "valid_side_verdicts": {
+      "role": {
+        "pass": 5,
+        "fail": 3,
+        "inconclusive": 2
+      },
+      "shop": {
+        "pass": 2,
+        "fail": 5,
+        "inconclusive": 3
+      },
+      "duration": {
+        "fail": 1
+      }
+    }
   },
   "observed_progressive_board_case": {
     "source_sequence": 94,

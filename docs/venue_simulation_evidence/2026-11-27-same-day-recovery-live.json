@@ -1,0 +1,37 @@
+{
+  "run": "replay-vcj8rodu",
+  "original_sequence": 63,
+  "original_trace": "trace_8a53199d8d4563ecb673109b",
+  "setup": "原话及原钟，独立沙盒内置早于和晚于本人可到时段各一张桌",
+  "query_text": "老板 今天有杭麻的局吗 0.5到1档 我六点半以后能到 能搭一桌吗",
+  "reads": [
+    {
+      "range": {
+        "start_at": "2026-11-26T18:30:00+08:00",
+        "end_at": "2026-11-26T23:59:59+08:00"
+      },
+      "matches": [
+        "after_floor"
+      ]
+    }
+  ],
+  "rejections": [
+    {
+      "name": "search_current_games",
+      "error": "这次还没有查到库存结果。请保留其他查局条件，用 start_time_range 重试。start_at=2026-11-26T18:30:00+08:00，end_at=2026-11-26T23:59:59.999999+08:00，include_nearby=false。不要另填固定开场或人齐开的开场方式。"
+    }
+  ],
+  "checks": {
+    "correct_same_day_tool_query_and_candidate": true,
+    "substantive_reply": true,
+    "no_writes": true
+  },
+  "shop_status": "waiting_user",
+  "outbound": [
+    "今晚有一桌，19:15 开的杭麻，1 块底，现在还缺三个，你打吗？"
+  ],
+  "archive_group": "same_day_recovery_20261127",
+  "focused_tests_passed": 165,
+  "original_outcome": "三次提交到次日06:00，均被退回，顾客只收到稍等一下。",
+  "test_scope": "回放原来话和原业务钟，使用另置的两桌库存，不与原滚动营业结果合并。"
+}

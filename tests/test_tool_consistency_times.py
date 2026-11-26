@@ -23,6 +23,28 @@ ANCHOR = "2026-10-30T18:30:00+08:00"
 UTC_EQUIVALENT = "2026-10-30T10:30:00Z"
 
 
+@pytest.mark.parametrize(("verified_end", "retry_end"), [
+    (None, "2026-11-26T23:59:59.999999+08:00"),
+    ("2026-11-27T06:00:00+08:00", "2026-11-27T06:00:00+08:00"),
+])
+def test_rejected_availability_lookup_gives_a_complete_retry_window(verified_end, retry_end):
+    """在同一回执给出能执行的两端和排除早场的参数，已核实的跨日尾界不缩回当日。"""
+    floor = "2026-11-26T18:30:00+08:00"
+    evidence = {"lookup_scope": "personal", "clock_role": "arrival_not_before", "arrival_lookup_floor_at": floor}
+    if verified_end:
+        evidence["opening_window"] = {"start_at": floor, "end_at": verified_end}
+    wrong = ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {
+        "stake": 1, "start_time_range": {"start_at": floor, "end_at": "2026-11-27T09:00:00+08:00"},
+    }})
+    error = validate_table_availability(wrong, evidence)
+    assert error and "这次还没有查到库存结果" in error
+    assert f"start_at={floor}，end_at={retry_end}，include_nearby=false" in error
+    corrected = ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": False, "requirement": {
+        "stake": 1, "start_time_range": {"start_at": floor, "end_at": retry_end},
+    }})
+    assert validate_table_availability(corrected, evidence) is None
+
+
 def test_new_table_preserves_duration_cap_from_executed_lookup():
     """最多打三小时要沿用为新局上限，不能漏掉或换成三小时固定约定。"""
     lookup = ToolResult("search_current_games", True, True, result={"requirement": {"max_duration_hours": 3}})
