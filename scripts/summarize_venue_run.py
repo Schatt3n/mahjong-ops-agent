@@ -25,6 +25,8 @@ def summary(report: dict) -> dict:
         evidence["show_verified_write_scope"] = True
     if report.get("sandbox_reply_consent_prompt_sha256"):
         evidence["sandbox_reply_consent_prompt_sha256"] = report["sandbox_reply_consent_prompt_sha256"]
+    if runtime_limits := report.get("runtime_limits"):
+        evidence["runtime_limits"] = runtime_limits
     acceptance = report.get("acceptance") or {}
     evidence["checks"] = report.get("checks", {})
     if contacts := report.get("initial_contacts"):

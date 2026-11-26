@@ -370,6 +370,13 @@ def run_simulation(
                 local_coordination=True,
                 tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
             )
+            runtime_limits = {"max_steps": runtime.max_steps,
+                              "max_model_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+                              "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
+                              "llm_timeout_seconds": runtime.llm_timeout_seconds}
+            if starting and starting.get("runtime_limits", runtime_limits) != runtime_limits:
+                raise ValueError("续跑的店家运行限制与起点不同，请沿用原运行步数、模型调用预算和超时")
+            report["runtime_limits"] = runtime_limits
             if align_write_reviews:
                 digests = configure_venue_preflight_prompts(runtime, run_dir, write_guard, clarify_consent=clarify_consent)
                 report["sandbox_consent_prompt_sha256"] = digests["planner_sha256"]
@@ -427,6 +434,7 @@ def run_simulation(
             if not resume:
                 # 角色账本已经创建。此后才公开可续跑的起点，避免中断时留下残缺归档。
                 snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles,
+                    "runtime_limits": runtime_limits,
                     "role_seed_profiles": role_seed_summary, "options": {
                     "mode": mode, "seed": seed, "scenario_date": scenario_date.isoformat(), "background_events": background_events,
                     "env_file": str(env_file.resolve()) if env_file else None, "model_source": model_source,

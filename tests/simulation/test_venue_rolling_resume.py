@@ -48,8 +48,17 @@ def test_resume_reuses_original_actors_and_receipt_if_interrupted_after_sending(
     assert journal.path.stat().st_size == 0
     backup.replace(journal.path)
     assert not (run / "report.json").exists()
+    snapshot = json.loads((run / "rolling_start.json").read_bytes())
+    limits = snapshot["runtime_limits"]
+    with monkeypatch.context() as patch:
+        patch.setenv("MAHJONG_AGENT_MAX_CALLS_PER_TURN", str(limits["max_model_calls_per_turn"] + 1))
+        with pytest.raises(ValueError, match="续跑的店家运行限制与起点不同"):
+            resume_rolling_simulation(run)
+    assert not (run / "report.json").exists()
+    assert journal.get(interrupted["event_id"]).decision == interrupted["decision"]
     report = resume_rolling_simulation(run)
     assert report["status"] == "passed", report
+    assert report["runtime_limits"] == limits
     assert report["initial_contacts"]["initial_archive_messages"] == 0
     assert (run / "personas.json").read_bytes() == original_roster
     stored = journal.get(interrupted["event_id"])
