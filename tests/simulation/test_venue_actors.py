@@ -642,6 +642,78 @@ def test_table_claim_keeps_the_quoted_opening_for_a_first_person_confirmation():
     assert quoted["message_id"] == proposal["message_id"] and quoted["text"] == proposal["text"]
 
 
+@pytest.mark.parametrize("channel,outcome", [
+    ("private", "corrected"), ("private", "same_invalid_quote"), ("private", "physically_late"),
+    ("group", "corrected"), ("group", "foreign_quote"),
+])
+def test_v6_0038_actor_retries_literal_source_without_echoing_bad_quote(channel, outcome):
+    """保留原稿的口语指代。校验未回退到错误引文或其他人的到店时间。"""
+    now, arrival = "2026-11-25T19:02:00+08:00", "2026-11-25T19:30:00+08:00"
+    earliest = "2026-11-25T19:36:00+08:00" if outcome == "physically_late" else "2026-11-25T19:32:00+08:00"
+    draft = "老板 一块的杭麻七点半还有位吗 我差不多那会儿能到"
+    person = generate_personas(43, count=1)[0]
+    received_text = "稍等一下" if channel == "private" else "我七点二十分能到，帮我留个位。"
+    delivered = {"message_id": "outbound:trace_488f8c12def0d347339915f9:1" if channel == "private" else "other-group-member",
+                 "kind": channel, "sender_id": OWNER if channel == "private" else "peer",
+                 "recipient_id": person.sender_id if channel == "private" else ROOM,
+                 "sent_at": "2026-11-25T19:00:00+08:00", "text": received_text}
+    previous = {"message_id": "customer:role-event:57625a244c70e0ec081b333707bbac72399e473880179f9c6e4442ef88768b93",
+                "kind": "private", "sender_id": person.sender_id, "recipient_id": OWNER,
+                "sent_at": "2026-11-25T19:00:00+08:00",
+                "text": "老板 371那桌七点半的 我那会儿能到 一块的杭麻有吗 还有位吗"}
+    event = {"kind": "delivered", "at": now, "caused_by": delivered["message_id"], "details": {
+        "can_arrive": True, "earliest_arrival": earliest, "event_condition": "ordinary_day",
+        "free_from": "2026-11-25T17:30:00+08:00", "free_until": "2026-11-25T23:00:00+08:00",
+    }}
+    context = ActorContext(person, now, history=(previous, delivered), events=(event,), group_targets=(ROOM,))
+    proposal = json.dumps({"action": "send", "text": draft, "kind": channel,
+                           "recipient_id": OWNER if channel == "private" else ROOM}, ensure_ascii=False, separators=(",", ":"))
+    archived = ('{"claims":[{"kind":"arrival","quote":"七点半……我差不多那会儿能到","local_date":"2026-11-25",'
+                '"local_at":"2026-11-25T19:30:00+08:00","approximate":true}]}')
+    owned = {"kind": "arrival", "quote": "我差不多那会儿能到", "local_date": "2026-11-25",
+             "local_at": arrival, "approximate": True}
+    if outcome == "same_invalid_quote":
+        retry_raw = archived
+    elif outcome == "foreign_quote":
+        retry_raw = json.dumps({"claims": [owned | {"quote": "我七点二十分能到"}]}, ensure_ascii=False)
+    else:
+        retry_raw = json.dumps({"claims": [owned]}, ensure_ascii=False)
+    responses = (proposal, archived, retry_raw)
+    if outcome == "physically_late":
+        responses += ('{"action":"wait"}',)
+    captured = []
+    result = ModelActor(_client(responses, captured)).decide(context, trace_id="v6-0038-actor-quote")
+
+    first, retry = result.availability_reviews
+    assert first["error"] == "availability assertion must quote the actual customer draft"
+    assert first["raw"] == archived and first["response_source"]["http_response_complete"]
+    assert first["response_source"]["raw_response_sha256"] == "ae3d8eedf332f3c7aa1a7a8a7a324e37dbe667b884e15679f169c5617544ded7"
+    assert retry["raw"] == retry_raw and retry["response_source"]["http_response_complete"]
+    assert (first["step_index"], retry["step_index"]) == (2, 3)
+    assert json.loads(captured[1]["messages"][-1]["content"]) == {"draft": draft, "local_now": now,
+                                                                 "received_text": received_text}
+    system, received, pending = captured[2]["messages"]
+    assert "不可拼接" in system["content"] and "那会儿" in system["content"]
+    assert json.loads(received["content"]) == {"local_now": now, "received_reference_only": {
+        "message_id": delivered["message_id"], "speaker": "shop" if channel == "private" else "another_customer",
+        "text": received_text,
+    }}
+    assert json.loads(pending["content"]) == {"draft": draft}
+    extraction_retry = json.dumps(captured[2], ensure_ascii=False)
+    assert "previous_extraction" not in extraction_retry and "七点半……" not in extraction_retry
+    assert "free_until" not in extraction_retry and "earliest_arrival" not in extraction_retry
+    if outcome == "corrected":
+        assert result.status == "valid" and result.raw == proposal and result.action.text == draft
+        assert result.action.kind == channel and result.action.recipient_id == (OWNER if channel == "private" else ROOM)
+        assert retry["claims"] == [owned] and not retry["conflict"] and len(captured) == 3
+    elif outcome == "physically_late":
+        assert retry["claims"] == [owned] and "19:36" in retry["conflict"]
+        assert result.action.action == "wait" and result.prior_attempts[0]["raw"] == proposal and len(captured) == 4
+    else:
+        assert result.status == "invalid" and result.action is None and len(captured) == 3
+        assert retry["error"] == first["error"]
+
+
 @pytest.mark.parametrize("free_until, fits", [("23:00", False), ("23:30", True)])
 def test_archived_approximate_duration_marker_keeps_minimum_and_world_check(free_until, fits):
     """真实返回中的约数标记不触发格式重试，也不会给四小时安排增加可用时间。"""
@@ -692,6 +764,9 @@ def test_live_actor_rechecks_same_draft_after_extractor_mistakes_duration_cap_fo
     assert first["raw"] == malformed and "local_date" in first["error"]
     assert repaired["claims"] == [arrival] and repaired["step_index"] == 3
     assert json.loads(captured[2]["messages"][1]["content"])["draft"] == draft
+    assert json.loads(captured[2]["messages"][-1]["content"]) == {
+        "previous_extraction": malformed, "format_error": first["error"],
+    }
     if can_arrive:
         assert result.action.text == draft and not result.prior_attempts and not remaining
     else:

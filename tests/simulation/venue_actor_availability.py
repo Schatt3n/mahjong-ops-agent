@@ -29,6 +29,10 @@ _MIXED_HALF_AND_MINUTE_CLOCK = re.compile(
 )
 
 
+class AvailabilityQuoteMismatch(ValueError):
+    """提取有引用文本，但引用未能在待发原稿中唯一定位。"""
+
+
 def mixed_clock_expression(text: str) -> str | None:
     """识别同一钟点里并写的半点和具体分钟，保留分隔的备选和明确的相对时长。"""
     match = _MIXED_HALF_AND_MINUTE_CLOCK.search(text)
@@ -136,9 +140,10 @@ def parse_availability_claims(raw: str, *, text: str, local_now: datetime) -> li
         if not isinstance(claim, dict):
             raise ValueError("availability assertion must be an object")
         kind, quote = claim.get("kind"), claim.get("quote")
-        if (not isinstance(kind, str) or kind not in _KNOWN_CLAIMS or not isinstance(quote, str)
-                or not quote.strip() or text.count(quote) != 1):
+        if (not isinstance(kind, str) or kind not in _KNOWN_CLAIMS or not isinstance(quote, str) or not quote.strip()):
             raise ValueError("availability assertion must quote the actual customer draft")
+        if text.count(quote) != 1:
+            raise AvailabilityQuoteMismatch("availability assertion must quote the actual customer draft")
         local_date = claim.get("local_date")
         try:
             day = date.fromisoformat(local_date)

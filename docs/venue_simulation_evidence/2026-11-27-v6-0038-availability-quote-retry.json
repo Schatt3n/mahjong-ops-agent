@@ -1,0 +1,70 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "customer_case": "0038",
+  "event_id": "role-event:1bf3cafceec82b93a19ec484eca72cef1bb2b3cea891f19fbc17d35b8e077f48",
+  "sequence": 45,
+  "local_at": "2026-11-25T19:02:00+08:00",
+  "wake": {
+    "kind": "private_receipt",
+    "message_id": "outbound:trace_488f8c12def0d347339915f9:1",
+    "text": "稍等一下",
+    "verified_visible": true
+  },
+  "prior_customer_message": {
+    "message_id": "customer:role-event:57625a244c70e0ec081b333707bbac72399e473880179f9c6e4442ef88768b93",
+    "text": "老板 371那桌七点半的 我那会儿能到 一块的杭麻有吗 还有位吗"
+  },
+  "actor_draft": {
+    "call_id": "llm_call_b38ee3fb8c90455d8ae8807dd1662aa5",
+    "terminal_attempt_id": "llm_attempt_bb57434475ed420b82b11f96043a9c54",
+    "raw_response_sha256": "f742d1d3c189e5bb82011b8491b9ba9353cc8532ea5f9ead00d7bb0534011999",
+    "text": "老板 一块的杭麻七点半还有位吗 我差不多那会儿能到",
+    "kind": "private"
+  },
+  "extraction_attempts": [
+    {
+      "step": 2,
+      "call_id": "llm_call_7db0f30fbd2944d098d552a704c7016a",
+      "terminal_attempt_id": "llm_attempt_4ff78009d152463683e5e685030ad4ab",
+      "http_status": 200,
+      "body_complete": true,
+      "raw_response_sha256": "ae3d8eedf332f3c7aa1a7a8a7a324e37dbe667b884e15679f169c5617544ded7"
+    },
+    {
+      "step": 3,
+      "call_id": "llm_call_42eee83ce4414f429413e2aa06440d2a",
+      "terminal_attempt_id": "llm_attempt_f5fdd358111c4eaabee4748362aa4213",
+      "http_status": 200,
+      "body_complete": true,
+      "raw_response_sha256": "ae3d8eedf332f3c7aa1a7a8a7a324e37dbe667b884e15679f169c5617544ded7"
+    }
+  ],
+  "identical_extracted_claim": {
+    "kind": "arrival",
+    "quote": "七点半……我差不多那会儿能到",
+    "local_date": "2026-11-25",
+    "local_at": "2026-11-25T19:30:00+08:00",
+    "approximate": true
+  },
+  "original_actor_result": {
+    "status": "invalid",
+    "error": "availability assertion must quote the actual customer draft",
+    "draft_delivered": false
+  },
+  "actual_world_availability": {
+    "can_arrive": true,
+    "earliest_arrival": "2026-11-25T19:32:00+08:00",
+    "free_from": "2026-11-25T17:30:00+08:00",
+    "free_until": "2026-11-25T23:00:00+08:00"
+  },
+  "diagnosis": "顾客本人说『我差不多那会儿能到』，同一原稿前文已经写明七点半。提取模型将答问之间的正文换成省略号，导致引用在原稿中不存在。两次提取均完整返回，重试仍逐字复现拼接。真实收到的店家消息只有『稍等一下』，与先前桌群错误引用其他顾客话术不同。旧私聊重试把有误提取作为请求的末项，无法帮助模型逐字回看原稿。",
+  "change": "仅在普通私聊或普通群聊的逐字引文无法唯一定位时，现有一次重提取将可见来话标出说话者后单独传入，并把原稿放在最后。提醒模型可从语境解释『那会儿』，引用必须照抄顾客实际的连续片段，不回显错误提取。原稿、可用性判断、重试次数、超时预算和桌群隔离规则保持现有约定。",
+  "offline_verification": {
+    "test": "tests/simulation/test_venue_actors.py::test_v6_0038_actor_retries_literal_source_without_echoing_bad_quote",
+    "controls": "HTTP 形状的本地响应复现两次提取记录，正确重提取引用『我差不多那会儿能到』可发送逐字不变的原稿。重复错误短语或引用其他群成员仍拒绝。有真正到店时间冲突时保留原规则，模型按既有流程重选为等待。非引用的格式错误继续走原重试。",
+    "focused_tests_passed": 208,
+    "live_replay": "pending"
+  }
+}

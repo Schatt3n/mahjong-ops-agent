@@ -22,7 +22,9 @@ from mahjong_agent_runtime.llm import (
     AgentLLMClient, completion_diagnostics, is_completion_transport_timeout, model_response_source,
 )
 
-from .venue_actor_availability import ActorAvailability, CLAIM_PROMPT, mixed_clock_expression, parse_availability_claims
+from .venue_actor_availability import (
+    ActorAvailability, AvailabilityQuoteMismatch, CLAIM_PROMPT, mixed_clock_expression, parse_availability_claims,
+)
 
 
 RelationKind = Literal["regular_partner", "avoid_same_table", "neutral"]
@@ -627,6 +629,26 @@ def _table_availability_request(
     ]
 
 
+def _literal_availability_quote_retry(
+    draft: str | None, receipt: dict[str, Any], local_now: str, repair_prompt: str,
+) -> list[dict[str, str]]:
+    """重提取逐字引文时分开放置已收信息和当前原稿，不回显上次错误引文。"""
+    received = None
+    if receipt.get("text"):
+        speaker = ("self_history" if receipt.get("from_self") else
+                   "shop" if receipt.get("sender_id") == SIMULATION_AGENT else "another_customer")
+        received = {"message_id": receipt.get("message_id"), "speaker": speaker, "text": receipt["text"]}
+    return [
+        {"role": "system", "content": CLAIM_PROMPT + "\n" + repair_prompt + "\n"
+            "上次引文无法逐字定位。最后一条用户消息的 draft 才是本次待发原稿。每个 quote 从 draft 照抄唯一的连续片段，"
+            "不可拼接、替换文字或补入省略号。『那会儿』可用同一原稿前文的钟点或已经收到的参考来话消歧，"
+            "但只引用顾客当前表达本人可到等意思的原句。received_reference_only 是已收参考，不能从中取引文。"},
+        {"role": "user", "content": json.dumps({"local_now": local_now, "received_reference_only": received},
+                                              ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({"draft": draft}, ensure_ascii=False)},
+    ]
+
+
 class ModelActor:
     """复用兼容客户端生成角色动作，保留原回复和真实 HTTP 来源。"""
 
@@ -791,6 +813,8 @@ class ModelActor:
                     request = [{"role": "system", "content": table_request[0]["content"] + "\n"
                                 + repair_prompt + "\n上次输出未通过校验。原因是 " + error},
                                *table_request[1:]]
+                elif isinstance(exc, AvailabilityQuoteMismatch):
+                    request = _literal_availability_quote_retry(action.text, receipt, local_now, repair_prompt)
                 else:
                     request = original_request + [{"role": "system", "content": repair_prompt},
                         {"role": "user", "content": json.dumps({"previous_extraction": str(raw), "format_error": error},
