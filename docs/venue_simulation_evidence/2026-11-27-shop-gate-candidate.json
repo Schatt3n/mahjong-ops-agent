@@ -1,6 +1,6 @@
 {
   "source_run": "2026-11-25-real-e36b335fcc",
-  "status": "offline_verified",
+  "status": "offline_verified_with_separate_live_probe_results",
   "old_shop_failures": [
     {
       "sequence": 21,
@@ -42,6 +42,128 @@
   },
   "offline_evidence": {
     "passed": 238,
-    "scope": ["tests/simulation/test_venue_models.py", "tests/test_table_availability_authorization.py", "tests/test_tool_consistency_times.py", "tests/test_reply_review_config.py"]
+    "scope": [
+      "tests/simulation/test_venue_models.py",
+      "tests/test_table_availability_authorization.py",
+      "tests/test_tool_consistency_times.py",
+      "tests/test_reply_review_config.py"
+    ]
+  },
+  "live_probes": {
+    "raw_archive_group": "shop49_review_probe_20261127",
+    "original_frozen_review": {
+      "status": "complete_independent_verdict",
+      "source_run": "2026-11-25-real-e36b335fcc",
+      "source_trace": "trace_68b5c8e3f35af0516156a264",
+      "source_line": 2537,
+      "message_sha256": "c6da90b14b5c2606954eb6edebe942c70eb4efc51c82cd14c3825f705c29839e",
+      "provider": "opencode_go",
+      "model": "deepseek-v4.1-flash",
+      "max_concurrency": 1,
+      "wire": {
+        "max_tokens": 16384,
+        "response_format": "json_object",
+        "thinking_mode": null,
+        "reasoning_effort": "none",
+        "api_protocol": "responses"
+      },
+      "elapsed_seconds": 3.91,
+      "http_response_complete": true,
+      "attempts": [
+        {
+          "http_status": 200,
+          "response_status": "completed",
+          "incomplete_reason": null,
+          "usage": {
+            "prompt_tokens": 24958,
+            "completion_tokens": 202,
+            "total_tokens": 25160,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "http_elapsed_ms": 3895.412
+        }
+      ],
+      "approved": true,
+      "violations": [],
+      "errors": [],
+      "interpretation": "完整判决验证该次模型传输及结构，旧草稿没有在此复验中外发。"
+    },
+    "full_exact_last_turn": {
+      "status": "failed",
+      "archive_run": "full-replay-v86c5uld",
+      "source_run": "2026-11-25-real-e36b335fcc",
+      "source_sequence": 49,
+      "source_trace": "trace_68b5c8e3f35af0516156a264",
+      "replayed_virtual_at": "2026-11-25T19:35:00+08:00",
+      "original_user_text": "老板，组的局定八点一刻开场吧。我这边过去八点出头到。",
+      "prefix_source_sequences": [
+        22,
+        27,
+        40,
+        43
+      ],
+      "scope": "精确原最后一句和虚拟钟，归档原先实收的两轮前缀，复用原门店房间基线且不复制同群其他顾客的业务。",
+      "wire": {
+        "max_tokens": 16384,
+        "response_format": "json_object",
+        "thinking_mode": null,
+        "reasoning_effort": "none",
+        "api_protocol": "responses"
+      },
+      "max_concurrency": 1,
+      "checks": {
+        "trusted_original_two_turn_prefix": true,
+        "one_authorized_scheduled_game": true,
+        "one_substantive_private_reply_delivered": false,
+        "independent_reply_review_approved": false,
+        "no_unsolicited_room_reservation": true
+      },
+      "runtime_status": "needs_human",
+      "runtime_trace": "trace_68b5c8e3f35af0516156a264",
+      "private_receipts": [
+        "稍等一下"
+      ],
+      "actual_tools": [
+        "check_room_availability",
+        "create_game",
+        "search_customers"
+      ],
+      "tool_failures": [
+        {
+          "name": "create_game",
+          "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+        },
+        {
+          "name": "customer_visible_content_review",
+          "error": "RuntimeError: LLM HTTP error 429 Too Many Requests: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limit exceeded. Please try again later.\"}}"
+        }
+      ],
+      "store_facts": {
+        "type": "hangzhou_mahjong",
+        "planned_start": "2026-11-25T20:15:00+08:00",
+        "stake_options": [
+          [
+            1.0,
+            3.0,
+            null
+          ]
+        ],
+        "remaining_seats": 3,
+        "duration_agreed": false
+      },
+      "review_elapsed_ms": [],
+      "review_attempt_http_statuses": [
+        429,
+        429,
+        429
+      ],
+      "failed_review_elapsed_ms": 7169,
+      "write_and_delivery_interpretation": "只收到等待提示。业务落库成功，回复审查限流。整轮不算通过。"
+    }
   }
 }
