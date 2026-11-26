@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from typing import Any
 
+from ..action_contract import validate_fact_scope_contract
 from ..budget import TokenBudget
 from ..domains.context_builders import AgentContextBuilder, BuiltContext
 from ..domains.context_builders.builder import main_agent_system_message_with_packed_tools, main_agent_user_message
@@ -53,6 +56,13 @@ _ACTION_ENVELOPE_RETRY = (
     "只回复或等待时，使用对应终态、空工具数组和 can_stop=true；静默仍按原合同声明。"
     "不把计划当成已执行事实，不因补齐结构添加未知业务事实或扩大授权。"
 )
+_STALE_FACT_SCOPE_RETRY = (
+    "【修正终态的旧工具绑定】上一次动作没有本步调用，却在 objective_state.fact_assertions 中引用本轮已执行的旧 call_id。"
+    "重新生成完整终态动作，若已有真实回执可回答，使用 tool_calls=[]。只省略那一条带旧 scope.call_id 的可选断言，"
+    "保留其他有原话来源的条件，不给这条断言改绑一个工具或牌桌。不要为了保留旧引用重跑已执行的调用。"
+    "从 turn_tool_evidence 的成功回执核对实际状态、档位、余位等再给顾客回复，不照抄上次被拒正文。"
+    "缺少真实依据时按原规则核实，不能把回复草稿、计划或当前动作拒绝当成业务结果。"
+)
 
 
 def _completed_contract_source(item: ToolResult, *, trace_id: str, rejected_step: int) -> dict[str, Any] | None:
@@ -62,6 +72,36 @@ def _completed_contract_source(item: ToolResult, *, trace_id: str, rejected_step
     source = compact_model_response_source(item.result.get("response_source"))
     if source and source["http_response_complete"] and source["trace_id"] == trace_id and source["step_index"] == rejected_step:
         return source
+    return None
+
+
+def _stale_scope_of_single_terminal_assertion(
+    item: ToolResult, source: dict[str, Any], turn_tool_evidence: list[ToolResult],
+) -> str | None:
+    """识别只回复却挂着已执行调用的单一旧断言，仅对有真实回执的一轮给重写提示。"""
+    errors = item.result.get("errors") or []
+    if (not isinstance(errors, list) or len(errors) != 1 or not isinstance(errors[0], str)
+            or not errors[0].startswith("objective_state.fact_assertions[")
+            or not errors[0].endswith("; valid IDs: []")):
+        return None
+    raw = item.result.get("raw_response")
+    if (not isinstance(raw, str)
+            or sha256(raw.encode("utf-8", errors="surrogatepass")).hexdigest() != source["raw_response_sha256"]):
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if (not isinstance(payload, dict) or payload.get("tool_calls") != []
+            or payload.get("objective_status") not in ("completed", "waiting_user")
+            or not isinstance(payload.get("reply_to_user"), str) or not payload["reply_to_user"].strip()
+            or validate_fact_scope_contract(payload) != errors):
+        return None
+    call_id, = [assertion["scope"]["call_id"] for assertion in payload["objective_state"]["fact_assertions"]
+                if "call_id" in assertion.get("scope", {})]
+    matching = [receipt for receipt in turn_tool_evidence if receipt.call_id == call_id]
+    if len(matching) == 1 and matching[0].called and matching[0].allowed and not matching[0].error:
+        return call_id
     return None
 
 
@@ -116,6 +156,12 @@ class ContextLifecycleManager:
             source = _completed_contract_source(item, trace_id=trace_id, rejected_step=step_index - 1)
             if not source:
                 continue
+            if stale_call_id := _stale_scope_of_single_terminal_assertion(item, source, turn_tool_evidence):
+                built.messages.insert(len(built.messages) - 1, {"role": "system", "content": _STALE_FACT_SCOPE_RETRY})
+                self.trace_recorder.record(trace_id, "agent_action_stale_fact_scope_retry_prompt", {
+                    "step_index": step_index, "rejected_response_source": source, "historical_call_id": stale_call_id,
+                })
+                break
             errors = set(item.result.get("errors") or ())
             prior_source = None
             if errors == _MISSING_REQUIRED_TOOL_CALLS:

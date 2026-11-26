@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import hashlib
 import json
 from uuid import UUID
@@ -17,7 +18,7 @@ from mahjong_agent_runtime.llm import (
     AgentLLMConfig, LLMCompletionText, OpenAICompatibleAgentClient, compact_model_response_source,
     completion_diagnostics, model_response_source, validate_model_response_source,
 )
-from mahjong_agent_runtime.models import now
+from mahjong_agent_runtime.models import now, using_clock
 from mahjong_agent_runtime.responses_api import parse_responses_output
 from mahjong_agent_runtime.services.run_state_service import AgentRunStateManager
 
@@ -492,6 +493,89 @@ def test_v6_0402_contract_hint_precedes_loop_abort_without_inventing_an_action(s
             assert "每个 JSON 对象内同名键只写一次" in guidance[0]
     assert not store.games and not store.room_reservations and not store.invite_drafts
     assert not any(event.step == "tool_called" for event in trace.events)
+
+
+@pytest.mark.parametrize("case", ["truthful", "wrong_seats", "wrong_bare_seats", "no_http", "unseen_scope", "current_call"])
+def test_v6_0402_stale_scope_guidance_uses_only_an_executed_receipt_and_keeps_reply_review(store, case):
+    """实际查局后仍须生成合法终态，不能靠旧调用绑定或错误座位话术放行。"""
+    at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")
+    message = UserMessage(conversation_id="v6-0402-scope", sender_id="customer", sender_name="顾客",
+        text="老板，红中那桌还在凑吗？底2到3都能打。", message_id="v6-0402-source", sent_at=at)
+    correct = "还在凑呢，红中底2～3元，现在一缺三，人齐就开。"
+    wrong = "三缺一，你打吗？" if case == "wrong_bare_seats" else "还在凑呢，红中底2～3元，现在三缺一，你打吗？"
+    scope_id = "lookup_unknown" if case == "unseen_scope" else "lookup_table"
+    game_assertion = {"field": "game_type", "value": "red_center_mahjong", "role": "current",
+                      "source_message_id": message.message_id, "scope": {"call_id": scope_id}}
+    stake_assertion = {"field": "stake_range", "value": {"min": 2, "max": 3}, "role": "condition",
+                       "source_message_id": message.message_id}
+    lookup = ToolCall("search_current_games", {"lookup_scope": "specific_table", "requirement": {
+        "game_type": "red_center_mahjong", "start_time_kind": "asap_when_full"}}, "核对余位", call_id="lookup_table")
+    look = AgentAction(goal="查原桌还缺几人", objective_status="needs_tool", reasoning_summary="先查实",
+        objective_state={"fact_assertions": [game_assertion | {"scope": {"call_id": "lookup_table"}}, stake_assertion]},
+        tool_calls=[lookup], stop_reason={"can_stop": False, "why": "要查实际余位", "pending_work": ["查询当前局况"],
+                                         "depends_on_tool_results": True})
+    terminal = AgentAction(goal=look.goal, objective_status="completed", reasoning_summary="按查局结果回复",
+        objective_state={"fact_assertions": [stake_assertion]}, reply_to_user=correct,
+        stop_reason={"can_stop": True, "why": "实际查询已完成", "pending_work": [], "depends_on_tool_results": False}).to_dict()
+    stale = terminal | {"reply_to_user": "还在凑，红中桌现在1缺3，底2～3元，人齐就开。",
+                        "objective_state": {"fact_assertions": [game_assertion, stake_assertion]}}
+    if case == "current_call":
+        stale["tool_calls"] = [ToolCall(lookup.name, lookup.arguments, "重查余位", call_id="new_lookup").to_dict()]
+    raw_rejected = json.dumps(stale, ensure_ascii=False)
+    rejected = raw_rejected if case == "no_http" else _text(raw_rejected, number=2)
+    outputs = [_text(json.dumps(look.to_dict(), ensure_ascii=False), number=1), rejected]
+    reviews = [(correct, True)]
+    if case in {"wrong_seats", "wrong_bare_seats"}:
+        outputs.append(_text(json.dumps(terminal | {"objective_status": "waiting_user", "reply_to_user": wrong},
+                                        ensure_ascii=False), number=3))
+        reviews.insert(0, (wrong, case == "wrong_bare_seats"))
+    outputs.append(_text(json.dumps(terminal, ensure_ascii=False), number=4))
+    review_outputs = []
+    for draft, approved in reviews:
+        violations = [] if approved else ["semantic_contradiction"]
+        reasoning = "同意发送" if approved else "真实回执还差三人"
+        review_outputs.append(json.dumps({"approved": approved, "needs_human": False, "violations": violations,
+            "reasoning_summary": reasoning, "item_reviews": [{"item_id": "reply_to_user", "approved": approved,
+                "violations": violations, "reasoning_summary": reasoning, "suggested_safe_text": draft if approved else correct,
+                "follow_up_commitments": []}]}, ensure_ascii=False))
+    reviewer = RecordingClient(review_outputs)
+    client, trace = RecordingClient(outputs), InMemoryTraceRecorder()
+    runtime = AgentRuntime(store=store, llm_client=client, trace_recorder=trace, reply_self_review_enabled=True,
+                           reply_self_review_client=reviewer)
+    with using_clock(lambda: at):
+        game, _ = store.create_game(conversation_id="v6-red-center-organizer", organizer_id="host", organizer_name="牌友",
+            requirement={"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3},
+                         "start_time_kind": "asap_when_full"}, known_players=[], trace_id="seed-table")
+        result = runtime.handle_user_message(message, trace_id="source-trace")
+
+    assert result.final_reply == correct and result.status == "completed"
+    assert len(client.messages) == len(outputs)
+    assert len(reviewer.messages) == len(reviews)
+    receipt, = [row for row in result.tool_results if row.name == "search_current_games"]
+    assert receipt.called and receipt.allowed and receipt.call_id == lookup.call_id
+    assert [(row["game"]["game_id"], row["game"]["seat_summary"]["remaining_seats"])
+            for row in receipt.result["matches"]] == [(game.game_id, 3)]
+    assert set(store.games) == {game.game_id} and store.require_game(game.game_id).remaining_seats() == 3
+    assert not store.invite_drafts and not store.room_reservations
+    errors = [event.content for event in trace.events if event.step == "action_contract_error"]
+    assert len(errors) == 1 and any("must reference exactly one" in reason for reason in errors[0]["errors"])
+    hinted = case in {"truthful", "wrong_seats", "wrong_bare_seats"}
+    hints = [event.content for event in trace.events if event.step == "agent_action_stale_fact_scope_retry_prompt"]
+    guidance = [item["content"] for item in client.messages[2] if item["content"].startswith("【修正终态的旧工具绑定】")]
+    if hinted:
+        assert hints == [{"step_index": 3, "historical_call_id": lookup.call_id,
+                          "rejected_response_source": errors[0]["response_source"]}]
+        assert "只省略那一条" in guidance[0] and "turn_tool_evidence 的成功回执" in guidance[0]
+    else:
+        assert not hints and not guidance
+    tool_calls = [event.content["call"]["call_id"] for event in trace.events if event.step == "tool_called"]
+    assert tool_calls == [lookup.call_id]
+    if case in {"wrong_seats", "wrong_bare_seats"}:
+        reviewed_item, = json.loads(reviewer.messages[0][-1]["content"])["review_items"]
+        assert reviewed_item["text"] == wrong and reviewed_item["seat_claim_evidence"][0]["remaining_seats"] == 3
+        expected_error = "semantic_contradiction" if case == "wrong_seats" else "seat_count.current_table_mismatch"
+        assert any(expected_error in json.dumps(item.result) and not item.result.get("approved")
+                   for item in result.tool_results if item.name == "customer_visible_content_review")
 
 
 @pytest.mark.parametrize(("mode", "hint_steps"), [

@@ -1,0 +1,121 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "customer_case": "0402",
+  "trace_id": "trace_2b7749a2ccaa8d45ac6fba2a",
+  "role_event_id": "role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50",
+  "public_board_received": {
+    "message_id": "outbound:board:board_snapshot_a96eebfde42246391bef17f8b5fb2f8f",
+    "text": "当前缺人局：\n1、人齐开 红中 2～3元 烟况待定 173",
+    "kind": "group",
+    "sent_at": "2026-11-26T01:07:30+00:00"
+  },
+  "message": {
+    "message_id": "customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50",
+    "sent_at": "2026-11-26T09:09:30+08:00",
+    "text": "老板，红中那桌还在凑吗？底2到3都能打。"
+  },
+  "executed_read": {
+    "call_id": "lookup_table",
+    "called": true,
+    "allowed": true,
+    "lookup_scope": "specific_table",
+    "requirement": {
+      "game_type": "red_center_mahjong",
+      "start_time_kind": "asap_when_full"
+    },
+    "game": {
+      "game_id": "game_a8f1932c9d54",
+      "status": "forming",
+      "seat_summary": {
+        "claimed_seats": 1,
+        "remaining_seats": 3,
+        "seats_total": 4
+      },
+      "stake_range": {
+        "max": 3.0,
+        "min": 2.0
+      },
+      "seat_format": "173"
+    }
+  },
+  "model_responses": [
+    {
+      "step": 1,
+      "call_id": "llm_call_3f6602025b9f4d6ebee667cfba0510c2",
+      "terminal_attempt_id": "llm_attempt_f541fe92ef36458b8bfaf9cc5f533d32",
+      "http_status": 200,
+      "body_complete": true,
+      "raw_response_sha256": "1ec28768f4d3fd6c5c77e635040c0894afd257a0dfc15ebd0fa0a588bd6dc835",
+      "raw_text": "{\"goal\": \"回答孙雨晴关于红中那桌是否还在凑，并核对其底2到3的条件\", \"objective_status\": \"needs_tool\", \"reasoning_summary\": \"群看板显示有一桌红中(2~3元、人齐开、173)，需实际查询该原桌当前余位与状态。\", \"objective_state\": {\"current_phase\": \"query_existing_games\", \"known_facts\": {\"board_game_id\": \"game_a8f1932c9d54\", \"game_type\": \"red_center_mahjong\", \"stake_range\": {\"min\": 2, \"max\": 3}, \"start_time_kind\": \"asap_when_full\", \"seat_code\": \"173\"}, \"missing_facts\": [], \"request_scope\": {\"kind\": \"query_only\", \"source_message_ids\": [\"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"], \"explicit_limits\": []}, \"fact_assertions\": [{\"field\": \"game_type\", \"value\": \"red_center_mahjong\", \"role\": \"current\", \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\", \"scope\": {\"call_id\": \"lookup_table\"}}, {\"field\": \"stake_range\", \"value\": {\"min\": 2, \"max\": 3}, \"role\": \"condition\", \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}], \"blockers\": []}, \"objective_plan\": [{\"step_id\": \"s1\", \"title\": \"按原桌线索查红中桌当前状态与余位\", \"status\": \"in_progress\", \"tool\": \"search_current_games\", \"depends_on\": [], \"decision_rule\": \"查到真实余位后据实说明是否还在凑\"}], \"plan_revision_reason\": \"首次处理该询问，先查原桌真实桌况。\", \"reply_to_user\": \"\", \"tool_calls\": [{\"call_id\": \"lookup_table\", \"name\": \"search_current_games\", \"reason\": \"核对红中那桌当前余位\", \"depends_on\": [], \"arguments\": {\"lookup_scope\": \"specific_table\", \"requirement\": {\"game_type\": \"red_center_mahjong\", \"start_time_kind\": \"asap_when_full\"}}}], \"needs_human\": false, \"stop_reason\": {\"can_stop\": false, \"depends_on_tool_results\": true, \"pending_work\": [\"查原桌真实桌况与余位\"], \"why\": \"需真实查询结果才能回答是否还在凑\"}}"
+    },
+    {
+      "step": 2,
+      "call_id": "llm_call_2bd468866b2a42c583778684de96fa4f",
+      "terminal_attempt_id": "llm_attempt_fa354779d36d4baf951cf3adb414ec49",
+      "http_status": 200,
+      "body_complete": true,
+      "raw_response_sha256": "b35382eb4ac9ace8ca30fccbc26e8f48aabc602a720e644c3f1521347e94e449",
+      "raw_text": "{\"goal\": \"回答孙雨晴红中那桌是否还在凑，并核对档位条件\", \"objective_status\": \"completed\", \"reasoning_summary\": \"查原桌成功，红中桌仍在凑，底2～3元，一个人，还差三个，符合她说的底2到3。\", \"objective_state\": {\"current_phase\": \"answer_user\", \"known_facts\": {\"game_type\": \"red_center_mahjong\", \"stake_range\": {\"min\": 2, \"max\": 3}, \"seat_code\": \"173\", \"remaining_seats\": 3, \"start_time_kind\": \"asap_when_full\", \"board_game_id\": \"game_a8f1932c9d54\"}, \"missing_facts\": [], \"blockers\": [], \"fact_assertions\": [{\"field\": \"game_type\", \"value\": \"red_center_mahjong\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table\"}, \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}, {\"field\": \"stake_range\", \"value\": {\"min\": 2, \"max\": 3}, \"role\": \"condition\", \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}], \"request_scope\": {\"kind\": \"query_only\", \"source_message_ids\": [\"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"], \"explicit_limits\": []}, \"reply_scope\": {\"requested_information\": \"红中桌是否还在凑、档位是否匹配\", \"allowed_response_facts\": [\"红中，底2～3元，一缺三，还在凑\"], \"background_facts_to_withhold\": []}}, \"objective_plan\": [{\"step_id\": \"s1\", \"title\": \"按原桌线索查红中桌当前状态与余位\", \"status\": \"done\", \"tool\": \"search_current_games\", \"depends_on\": [], \"decision_rule\": \"查到真实余位后据实说明\"}], \"plan_revision_reason\": \"查局成功，桌况已核实，直接回答。\", \"reply_to_user\": \"还在凑，红中底2～3，一缺三，你打吗？\", \"tool_calls\": [], \"needs_human\": false, \"stop_reason\": {\"can_stop\": true, \"depends_on_tool_results\": true, \"pending_work\": [], \"why\": \"已核实原桌状态并据实回答，属于仅查询，无待办。\"}}"
+    },
+    {
+      "step": 3,
+      "call_id": "llm_call_1188a724f9bd437eb98000b7addb04f5",
+      "terminal_attempt_id": "llm_attempt_a517739b98f44afaaeb74186ed0db9ab",
+      "http_status": 200,
+      "body_complete": true,
+      "raw_response_sha256": "3c844415303800e2a14b438ca415ccb9795c4e6867800848255e45b9bdb13b4b",
+      "raw_text": "{\"goal\": \"回答孙雨晴红中那桌是否还在凑，并核对她的底2到3条件\", \"objective_status\": \"completed\", \"reasoning_summary\": \"本轮已成功查到原桌：红中麻将看板第1桌，1缺3，底2～3元，人齐开，正在凑。与客户条件相符，据实说明仍在凑即可。\", \"objective_state\": {\"current_phase\": \"answer_user\", \"known_facts\": {\"game_id\": \"game_a8f1932c9d54\", \"game_type\": \"red_center_mahjong\", \"stake_range\": {\"min\": 2, \"max\": 3}, \"start_time_kind\": \"asap_when_full\", \"claimed_seats\": 1, \"remaining_seats\": 3}, \"missing_facts\": [], \"blockers\": [], \"request_scope\": {\"kind\": \"query_only\", \"source_message_ids\": [\"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"], \"explicit_limits\": []}, \"fact_assertions\": [{\"field\": \"game_type\", \"value\": \"red_center_mahjong\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table\"}, \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}, {\"field\": \"stake_range\", \"value\": {\"min\": 2, \"max\": 3}, \"role\": \"condition\", \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}], \"reply_scope\": {\"requested_information\": \"红中那桌是否还在凑\", \"allowed_response_facts\": [\"红中麻将\", \"底2～3元\", \"还差3人\", \"人齐开\"], \"background_facts_to_withhold\": [\"game_id\", \"内部看板快照\"]}}, \"objective_plan\": [{\"step_id\": \"s1\", \"title\": \"按原桌线索查红中桌当前状态与余位\", \"status\": \"done\", \"tool\": \"search_current_games\", \"depends_on\": [], \"decision_rule\": \"查到真实余位后据实说明\"}], \"plan_revision_reason\": \"原桌已查到，状态为1缺3、底2～3元、人齐开，直接据实回答。\", \"reply_to_user\": \"还在凑，红中桌现在1缺3，底2～3元，人齐就开。\", \"tool_calls\": [], \"needs_human\": false, \"stop_reason\": {\"can_stop\": true, \"depends_on_tool_results\": true, \"pending_work\": [], \"why\": \"已查到原桌真实桌况并据实回答，本轮询问完成。\"}}"
+    },
+    {
+      "step": 4,
+      "call_id": "llm_call_ddcc12684227445aabe63a4f9cc71ad9",
+      "terminal_attempt_id": "llm_attempt_8eb190154e114abc9e6512d192c14cb3",
+      "http_status": 200,
+      "body_complete": true,
+      "raw_response_sha256": "a80a460c148333dcd49e1835589cd4c259a3b277339dd4579e92b5abf33a6536",
+      "raw_text": "{\"goal\": \"回答孙雨晴红中那桌是否还在凑，核对其底2到3的条件\", \"objective_status\": \"completed\", \"reasoning_summary\": \"本轮已成功查到原桌 game_a8f1932c9d54：红中、底2～3元、人齐开、173，还在凑，适合她的档位；直接据实告知余位并问她打不打。\", \"objective_state\": {\"current_phase\": \"answer_user\", \"known_facts\": {\"board_game_id\": \"game_a8f1932c9d54\", \"game_type\": \"red_center_mahjong\", \"stake_range\": {\"min\": 2, \"max\": 3}, \"start_time_kind\": \"asap_when_full\", \"seat_code\": \"173\", \"claimed_seats\": 1, \"remaining_seats\": 3}, \"missing_facts\": [], \"blockers\": [], \"fact_assertions\": [{\"field\": \"game_type\", \"value\": \"red_center_mahjong\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table\"}, \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}, {\"field\": \"stake_range\", \"value\": {\"min\": 2, \"max\": 3}, \"role\": \"condition\", \"source_message_id\": \"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"}], \"request_scope\": {\"kind\": \"query_only\", \"source_message_ids\": [\"customer:role-event:f26673b55370b3ba5c51c275856f10e9df91dc4d83686aeb499a448fd5044b50\"], \"explicit_limits\": []}, \"reply_scope\": {\"requested_information\": \"红中那桌是否还在凑、档位是否合适\", \"allowed_response_facts\": [\"红中、底2～3元、人齐开、还差3位\"], \"background_facts_to_withhold\": [\"内部game_id\", \"其他候选人信息\"]}}, \"objective_plan\": [{\"step_id\": \"s1\", \"title\": \"按原桌线索查红中桌当前状态与余位\", \"status\": \"done\", \"tool\": \"search_current_games\", \"depends_on\": [], \"decision_rule\": \"查到真实余位后据实说明\"}, {\"step_id\": \"s2\", \"title\": \"据实回复并征询是否参加\", \"status\": \"done\", \"depends_on\": [\"s1\"], \"decision_rule\": \"有实位且档位相符，告知并问她打不打\"}], \"plan_revision_reason\": \"原桌查询已成功，条件相符，直接据实回复。\", \"reply_to_user\": \"还在凑呢，红中底2～3元，现在三缺一，你打吗？\", \"tool_calls\": [], \"needs_human\": false, \"stop_reason\": {\"can_stop\": true, \"depends_on_tool_results\": true, \"pending_work\": [], \"why\": \"已查到原桌真实桌况并回复，等待她决定是否参加。\"}}"
+    }
+  ],
+  "contract_rejections": [
+    {
+      "step": 2,
+      "errors": [
+        "objective_state.fact_assertions[0].scope.call_id='lookup_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []"
+      ]
+    },
+    {
+      "step": 3,
+      "errors": [
+        "objective_state.fact_assertions[0].scope.call_id='lookup_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []"
+      ]
+    },
+    {
+      "step": 4,
+      "errors": [
+        "objective_state.fact_assertions[0].scope.call_id='lookup_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []"
+      ]
+    }
+  ],
+  "final_output": {
+    "message_id": "outbound:trace_2b7749a2ccaa8d45ac6fba2a:1",
+    "text": "稍等一下",
+    "runtime_status": "needs_help",
+    "runtime_reason": "agent_loop_no_progress",
+    "visible_review_called": false,
+    "business_writes_observed": false
+  },
+  "analysis": [
+    "角色从真实看板看到红中桌后问余位。查询明确成功，唯一候选仍在凑人，四席已占一席、还缺三席。档位和人齐开均有真实回执。",
+    "后续三个HTTP正文都完整，结构可解析，但终态的 fact_assertions 保留了上一步已消费的调用编号，当前工具数组为空。普通修复提示只说编号须属当前动作，未说明可以省略这一条已经用完的可选断言。所有待发送草稿都在动作合同处被拒，未到送审。",
+    "第二和第三份草稿中人数符合回执。第四份口语回复把一缺三误说成三缺一，证明不能照抄被拒正文。现有确定性余位校验能识别独立报出的席位标签。这个带多段修饰的无钟点口语仍走普通语义审查，不能当成已经被确定性规则拦住。"
+  ],
+  "change": "只在完整HTTP来源、当前无工具的答复动作且唯一错误是事实作用域悬空，并且同轮能唯一找到该次成功执行时提示重写。下一动作只省略旧的可选断言，继续按实际工具回执生成回复。保持原动作合同、业务权限、发送审查、步骤上限。",
+  "offline_verification": {
+    "test": "tests/test_action_response_source.py::test_v6_0402_stale_scope_guidance_uses_only_an_executed_receipt_and_keeps_reply_review",
+    "controls": "内存与SQLite均实际查询一席已占的红中桌。确认不会重跑查询。语义审查用真实三席挡住原档错误草稿，已有确定性核对也会挡住可绑定的简短错报。缺HTTP出处、无可证实的历史编号以及仍有当前调用时均不触发专门提示。",
+    "focused_tests_passed": 467,
+    "live_replay": "pending"
+  }
+}
