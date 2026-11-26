@@ -2,9 +2,13 @@
 
 from datetime import datetime
 import json
+import re
+import unicodedata
 
 from mahjong_agent_runtime.domains.game_commitments import active_game_participant_ids
 from mahjong_agent_runtime.domains.game_domain import START_KIND_ASAP_WHEN_FULL
+from mahjong_agent_runtime.domains.invitation_policy import invite_duration_terms
+from mahjong_agent_runtime.domains.stake_values import format_number, parse_number
 from mahjong_agent_runtime.llm import completion_diagnostics, model_response_source
 from mahjong_agent_runtime.models import GameStatus
 
@@ -14,10 +18,42 @@ from .venue_table_opening import VenueTableOpening
 
 _PROPOSAL_PREFIX = "table-opening-offer|"
 _CONFIRM_PREFIX = "table-opening-confirm|"
+_HAN_HOURS = {digit: hours for hours, digit in enumerate("零一二三四五六七八九")} | {"两": 2, "半": 0.5}
+_HOURS_VALUE = r"(?:[0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九半])"
+_HARD_PLAY_LIMIT = re.compile(
+    r"(?:^|[、,。;!?\n]\s*)(?:我(?:今晚|今天|明天|这次|这边)?\s*)?"
+    r"(?:最多|至多|顶多|只能|只可以|不能超过|不超过)\s*(?:能|可以|只能)?\s*(?:打|玩)?\s*"
+    rf"(?:(?P<range>[一二两三四五六七八九]{{2}})|(?P<low>{_HOURS_VALUE})(?:\s*(?:到|至|[-~～–—])\s*(?P<high>{_HOURS_VALUE}))?)"
+    r"\s*个?\s*(?P<half>半)?\s*(?:小时|钟头|[hH](?![a-zA-Z]))(?P<after_half>半)?"
+)
+_UNSETTLED_LIMIT_SUFFIX = re.compile(r"\s*(?:左右|上下|前后|吗|嘛|么)")
 _PROMPT = """你在模拟麻将馆的四人桌群负责约开场。只用本群已送达的话，没收到的同意不能补写。
 vote 仅判断 current 这一条顾客消息对 active_proposal 的态度。明确同意该版确切开场用 accept；明确不行或反提其他时间用 decline。问句、估计、条件式接受、对旧版的回复及无开场提议时，一律用 other。引用其他提议不能当成当前的同意。
+table_terms.agreed_duration_hours 是当前桌已明确约定的时长，null 表示未定。顾客说只打更短时间、或说符合某个条件才来时，不能当作无条件接受。按本群原话理解同一人的限制，直到本人明确撤回或修改。未定时长不能猜成已约定的时长，近似偏好也不能推成硬上限。
 proposed_start 仅在本群顾客已说出可用时间或给出足够协商信息，且没有提议、当前来话明确拒绝或 active_proposal.declined_count 大于零时填写。一个人可以先说赶不及，随后自己或另一位才说明能接受的时间。用当地带时区 ISO 分钟，选一个未来开场，考虑已经说出的到店、离店和可打时长。若当前时间有人同意且没有尚未撤回的拒绝，等其他人。无合适时间时为 null，不从身份或画像猜。
 只输出 JSON {"vote":"accept|decline|other","proposed_start":null}。"""
+
+
+def _explicit_play_limit(text: str) -> float | None:
+    """只识别本人明确上限的常见词形，口语范围使用其上沿。"""
+    text = unicodedata.normalize("NFKC", text)
+    matches = list(_HARD_PLAY_LIMIT.finditer(text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if _UNSETTLED_LIMIT_SUFFIX.match(text, match.end()):
+        return None
+    if match["range"]:
+        low, hours = (_HAN_HOURS[digit] for digit in match["range"])
+        if hours - low != 1:
+            return None
+    else:
+        value = match["high"] or match["low"]
+        hours = _HAN_HOURS[value] if value in _HAN_HOURS else parse_number(value)
+    if hours is None or hours <= 0:
+        return None
+    return hours + 0.5 if match["half"] or match["after_half"] else hours
+
 
 class VenueTableShop:
     """给滚动沙盒挂接独立的桌群处理器，同时保留原始判断和真实通道回执。"""
@@ -52,17 +88,18 @@ class VenueTableShop:
             return self._confirmation(group, at, active, records)
         if game.planned_start_at is not None or game.requirement.get("start_time_kind") != START_KIND_ASAP_WHEN_FULL:
             return None
+        agreed_hours = invite_duration_terms(game)["duration_hours"]
         if reply_to is None:
             message_id = f"table-opening-inquiry:{group.game_id}"
             if revision_id is not None:
                 message_id = f"{message_id}|{revision_id}"
-            return self._message(group, message_id, at,
-                                 "人齐了，大家各自几点能到？咱们在这儿定个开场。")
+            hours = f"这桌打 {format_number(agreed_hours)} 小时。" if agreed_hours is not None else ""
+            return self._message(group, message_id, at, f"人齐了，{hours}大家各自几点能到？咱们在这儿定个开场。")
 
         source = reply_to.message
         observed = active if (active and positions[active["proposal_id"]] < positions[source.message_id]
                               and source.quoted_message_id in {None, active["proposal_id"]}) else None
-        vote, start = self._decide(group, reply_to, at, records, observed)
+        vote, start = self._decide(group, reply_to, at, records, observed, agreed_hours=agreed_hours)
         result = None
         if observed and vote in {"accept", "decline"}:
             result = opening.record_vote(reply_to, proposal_id=observed["proposal_id"], accepts=vote == "accept")
@@ -76,12 +113,13 @@ class VenueTableShop:
         message_id = f"{_PROPOSAL_PREFIX}{start.isoformat()}|{source.message_id}"
         return opening.proposal_message(message_id, at=at, start_at=start)
 
-    def _decide(self, group, reply, at, records, active):
+    def _decide(self, group, reply, at, records, active, *, agreed_hours):
         """单轮只解释当前发言和同桌公开历史，调用失败继续保留待协商状态。"""
         body = {
             "now": at.isoformat(),
             "current": reply.history_row(),
             "active_proposal": active,
+            "table_terms": {"agreed_duration_hours": agreed_hours},
             "history": [
                 {"speaker": "shop" if row.message.sender_id == AGENT_ID else row.message.sender_id,
                  "message_id": row.message.message_id, "text": row.message.text,
@@ -114,6 +152,10 @@ class VenueTableShop:
         except Exception as exc:
             evidence.update(error=type(exc).__name__, diagnostics=completion_diagnostics(exc))
             vote, start = "other", None
+        if agreed_hours is not None and (limit := _explicit_play_limit(reply.message.text)) is not None and limit < agreed_hours:
+            evidence["vote_guard"] = {"reason": "agreed_duration_exceeds_customer_limit", "customer_max_hours": limit,
+                                      "model_vote": vote}
+            vote, start = "decline", None
         with self.trace_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(evidence, ensure_ascii=False) + chr(10))
         return vote, start

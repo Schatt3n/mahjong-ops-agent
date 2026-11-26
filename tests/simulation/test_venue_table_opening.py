@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+import json
 
 import pytest
 
@@ -19,16 +20,19 @@ _EARLY = _OPEN.replace(hour=19, minute=0)
 _LATE = _EARLY + timedelta(minutes=30)
 
 
-def _table(tmp_path, *, anonymous=False):
+def _table(tmp_path, *, anonymous=False, duration_hours=4):
     """经正式建桌和报名形成一张尚未定时的人齐开局。"""
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    requirement = {"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
+                   "start_time_kind": "asap_when_full"}
+    if duration_hours is not None:
+        requirement["duration_hours"] = duration_hours
     with using_clock(lambda: _OPEN - timedelta(minutes=3)):
         store.configure_rooms(["room"])
         game, _ = store.create_game(
             conversation_id="owner-dm-a", organizer_id="a", organizer_name="A",
             known_players=[{"customer_id": "a", "seat_count": 2, "anonymous_seat_count": 1}] if anonymous else [],
-            requirement={"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
-                         "start_time_kind": "asap_when_full", "duration_hours": 4},
+            requirement=requirement,
             trace_id="create-asap",
         )
         for actor in _MEMBERS[1:3] if anonymous else _MEMBERS[1:]:
@@ -144,8 +148,6 @@ def test_same_roster_after_withdrawal_requires_new_proposal(tmp_path):
 @pytest.mark.parametrize("delayed_alternative", [False, True])
 def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path, delayed_alternative):
     """店家处理器只看桌群实际消息，拒绝旧回应并在第四票后才通告。"""
-    import json
-
     from .venue_table_shop import VenueTableShop
 
     store, game_id, group, opening = _table(tmp_path)
@@ -205,6 +207,54 @@ def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path
     assert confirmation.recipient_ids == _MEMBERS
     assert react(receipt) is None
     assert len(trace.read_text().splitlines()) == 7 + delayed_alternative
+
+
+@pytest.mark.parametrize("agreed_hours", [4, None])
+def test_table_shop_checks_receipt_capacity_against_explicit_duration(tmp_path, agreed_hours):
+    """真实回放的两条时长限制不能充作四小时的确认，未定时长不冒充四小时。"""
+    from .venue_table_shop import VenueTableShop
+
+    class OveracceptingReviewer:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            payload = json.loads(messages[-1]["content"])
+            assert payload["table_terms"] == {"agreed_duration_hours": agreed_hours}
+            current = payload["current"]
+            assert set(current) == {"message_id", "sender_id", "text", "sent_at", "quoted_message_id"}
+            vote, start = ("other", _EARLY.isoformat()) if current["message_id"] == "suggest" else ("accept", None)
+            return json.dumps({"vote": vote, "proposed_start": start})
+
+    store, game_id, group, opening = _table(tmp_path, duration_hours=agreed_hours)
+    trace = tmp_path / "table-shop.jsonl"
+    shop = VenueTableShop(OveracceptingReviewer(), trace)
+    inquiry = group.send(shop(group, None, _OPEN))
+    assert ("打 4 小时" in inquiry.message.text) == (agreed_hours == 4)
+
+    def react(receipt):
+        return shop(group, receipt, receipt.message.sent_at.astimezone(DEFAULT_TZ))
+
+    suggestion = _vote(group, "a", "suggest", 1, "我七点能到。", inquiry.message.message_id)
+    offered = group.send(react(suggestion)).message.message_id
+    for minute, (actor, text) in enumerate(zip(_MEMBERS[:3], (
+        "七点我没问题。", "七点行，我最多打四五个小时。", "我七点能到，大概打三个小时最舒服。",
+    ), strict=True), 2):
+        assert react(_vote(group, actor, f"yes-{actor}", minute, text, offered)) is None
+    assert opening.current()["accepted_count"] == 3
+
+    if agreed_hours == 4:
+        for minute, text in enumerate(("我最多打两三个小时，行的话给我留一个", "我最多打两三个小时，给我留一个就行"), 5):
+            assert react(_vote(group, "d", f"conditional-{minute}", minute, text, offered)) is None
+            assert opening.current()["accepted_count"] == 3 and opening.current()["declined_count"] == 1
+            assert store.require_game(game_id).planned_start_at is None
+        reviews = [json.loads(line) for line in trace.read_text().splitlines()]
+        blocked = [row["vote_guard"] for row in reviews if "vote_guard" in row]
+        assert blocked == [{"reason": "agreed_duration_exceeds_customer_limit", "customer_max_hours": 3,
+                            "model_vote": "accept"}] * 2
+
+    final_text = "我现在能留足四小时，七点我也能到。" if agreed_hours else "七点我能到。"
+    response = react(_vote(group, "d", "unconditional", 7, final_text, offered))
+    assert response.text == "那就 19:00 开，大家按这个时间到哈。"
+    assert opening.current()["committed"] and opening.current()["accepted_count"] == 4
+    assert store.require_game(game_id).planned_start_at == _EARLY
 
 
 def test_unquoted_message_sent_before_proposal_in_same_clock_tick_cannot_vote(tmp_path):
