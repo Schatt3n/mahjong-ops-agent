@@ -1,0 +1,181 @@
+{
+  "source_run": "2026-11-25-real-e36b335fcc",
+  "model": "deepseek-v4.1-flash",
+  "provider": "opencode_go",
+  "cases": [
+    {
+      "case": "greeting",
+      "customer": "老板，晚上好，1块档有合适的吗，大概八点到店，有吗",
+      "raw": "{\"clock_role\": \"arrival_estimate\", \"clock_roles\": null, \"lookup_scope\": \"personal\", \"opening_window\": null, \"opening_dayparts\": null, \"accepted_stake_range\": {\"min\": 1, \"max\": 1}, \"known_cap_score\": null, \"max_duration_hours\": null, \"agreed_duration_hours\": null, \"has_fixed_opening_authority\": false, \"opening_customer_ref\": null, \"current_ref\": 1, \"supporting_customer_refs\": [1]}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "arrival_estimate",
+        "clock_roles": null,
+        "lookup_scope": "personal",
+        "opening_window": null,
+        "opening_dayparts": null,
+        "accepted_stake_range": {
+          "min": 1.0,
+          "max": 1.0
+        },
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": false,
+        "opening_customer_ref": null,
+        "current_ref": 1,
+        "supporting_customer_refs": [
+          1
+        ],
+        "arrival_lookup_floor_at": "2026-11-25T20:00:00+08:00"
+      },
+      "overnight_read_rejection": "请使用核实过的可开打时段查现成桌。到店时刻、离店时刻和等回复的时刻都不是固定开场。本次直接匹配起点为 2026-11-25T20:00:00+08:00，结束用同日查询时间。",
+      "passed": true
+    },
+    {
+      "case": "evening",
+      "customer": "老板 晚上杭州麻将一底现在有现成的桌吗 我最早七点半到",
+      "raw": "{\n  \"clock_role\": \"arrival_not_before\",\n  \"clock_roles\": null,\n  \"lookup_scope\": \"personal\",\n  \"opening_window\": null,\n  \"opening_dayparts\": {\n    \"date\": \"2026-11-25\",\n    \"parts\": [\"evening\"],\n    \"source_ref\": 3\n  },\n  \"accepted_stake_range\": {\n    \"min\": 1,\n    \"max\": 1\n  },\n  \"known_cap_score\": null,\n  \"max_duration_hours\": null,\n  \"agreed_duration_hours\": null,\n  \"has_fixed_opening_authority\": false,\n  \"opening_customer_ref\": null,\n  \"current_ref\": 3,\n  \"supporting_customer_refs\": [1, 3]\n}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "arrival_not_before",
+        "clock_roles": null,
+        "lookup_scope": "personal",
+        "opening_window": {
+          "start_at": "2026-11-25T19:30:00+08:00",
+          "end_at": "2026-11-26T06:00:00+08:00"
+        },
+        "opening_dayparts": {
+          "date": "2026-11-25",
+          "parts": [
+            "evening"
+          ],
+          "source_ref": 3
+        },
+        "accepted_stake_range": {
+          "min": 1.0,
+          "max": 1.0
+        },
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": false,
+        "opening_customer_ref": null,
+        "current_ref": 3,
+        "supporting_customer_refs": [
+          1,
+          3
+        ],
+        "arrival_lookup_floor_at": "2026-11-25T19:30:00+08:00"
+      },
+      "overnight_read_rejection": null,
+      "matched_after_midnight": true,
+      "passed": true
+    },
+    {
+      "case": "unrelated_board_stake",
+      "customer": "就是群里那条371 七点半 0.5底 后面有人问烟况那个 我也说不清是谁组的 看板只写了人齐开 杭麻 2到3块底无烟 还有别的无烟局吗",
+      "raw": "{\"clock_role\":\"other\",\"lookup_scope\":\"specific_table\",\"also_requests_personal_options\":true,\"opening_window\":null,\"opening_dayparts\":null,\"accepted_stake_range\":null,\"known_cap_score\":null,\"max_duration_hours\":null,\"agreed_duration_hours\":null,\"has_fixed_opening_authority\":false,\"opening_customer_ref\":null,\"current_ref\":5,\"supporting_customer_refs\":[1,3,5]}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "other",
+        "lookup_scope": "specific_table",
+        "also_requests_personal_options": true,
+        "opening_window": null,
+        "opening_dayparts": null,
+        "accepted_stake_range": null,
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": false,
+        "opening_customer_ref": null,
+        "current_ref": 5,
+        "supporting_customer_refs": [
+          1,
+          3,
+          5
+        ],
+        "personal_clocks_not_opening": []
+      },
+      "personal_smoke_only_read_rejection": null,
+      "passed": true,
+      "inventory_match_labels": [
+        "different_kind_and_price",
+        "same_price"
+      ],
+      "inventory_checked_on_sqlite": true
+    },
+    {
+      "case": "explicit_personal_stake",
+      "customer": "就是群里那条371 七点半 0.5底 后面有人问烟况那个 我也说不清是谁组的 看板只写了人齐开 杭麻 2到3块底无烟 还有别的无烟局吗？另外也只找二到三块的无烟局",
+      "raw": "{\"clock_role\": \"other\", \"clock_roles\": null, \"lookup_scope\": \"specific_table\", \"also_requests_personal_options\": true, \"opening_window\": null, \"opening_dayparts\": null, \"accepted_stake_range\": {\"min\": 2, \"max\": 3}, \"known_cap_score\": null, \"max_duration_hours\": null, \"agreed_duration_hours\": null, \"has_fixed_opening_authority\": false, \"opening_customer_ref\": null, \"current_ref\": 5, \"supporting_customer_refs\": [3, 5]}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "other",
+        "clock_roles": null,
+        "lookup_scope": "specific_table",
+        "also_requests_personal_options": true,
+        "opening_window": null,
+        "opening_dayparts": null,
+        "accepted_stake_range": {
+          "min": 2.0,
+          "max": 3.0
+        },
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": false,
+        "opening_customer_ref": null,
+        "current_ref": 5,
+        "supporting_customer_refs": [
+          3,
+          5
+        ],
+        "personal_clocks_not_opening": []
+      },
+      "personal_smoke_only_read_rejection": "请使用核实过的可接受档位区间。封顶是另一件事，不能由区间端点推断。",
+      "passed": true,
+      "inventory_match_labels": [
+        "same_price"
+      ],
+      "inventory_checked_on_sqlite": true
+    }
+  ],
+  "archive_group": "query_scope_recheck_20261127",
+  "original_failures": [
+    {
+      "sequence": 21,
+      "trace_id": "trace_488f8c12def0d347339915f9",
+      "verified_opening_dayparts": null,
+      "rejected_read_proposals": 7,
+      "current_turn_actual_reads": 0,
+      "delivered": "稍等一下"
+    },
+    {
+      "sequence": 23,
+      "trace_id": "trace_92d8322c99eebbc1891c220f",
+      "type": "greeting_control",
+      "rejected_overnight_proposals": 5,
+      "executed_range": "20:00–23:59",
+      "matches": 0,
+      "substantive_reply_delivered": true
+    },
+    {
+      "sequence": 34,
+      "trace_id": "trace_84dd27da94d44ea788044669",
+      "personal_query_clause": "还有别的无烟局吗",
+      "carried_original_board_stake": {
+        "min": 2,
+        "max": 3
+      },
+      "first_personal_read_blocked": true,
+      "executed_personal_read_added_original_stake_and_game_type": true,
+      "execution_matches": 1
+    }
+  ],
+  "candidate_scope": "原话及对照的独立 OpenCode 核验、正式工具参数检查、SQLite 查局。未重跑规划、写入或对客回复。",
+  "validation": {
+    "live_scope_controls_passed": 4,
+    "offline_focused_passed": 163
+  }
+}
