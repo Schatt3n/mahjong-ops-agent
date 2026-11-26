@@ -56,6 +56,12 @@ def _explicit_play_limit(text: str) -> float | None:
     return hours + 0.5 if match["half"] or match["after_half"] else hours
 
 
+def companion_inquiry_id(game_id: str, revision_id: str | None) -> str:
+    """用同一局和名册版本标记店家实际发出的同行提醒。"""
+    message_id = f"{_COMPANION_INQUIRY_PREFIX}{game_id}"
+    return f"{message_id}|{revision_id}" if revision_id is not None else message_id
+
+
 class VenueTableShop:
     """给滚动沙盒挂接独立的桌群处理器，同时保留原始判断和真实通道回执。"""
 
@@ -77,9 +83,7 @@ class VenueTableShop:
             if (len(seat_ids) < 4 and reply_to is None and seats["seats_total"] == seats["claimed_seats"] == 4
                     and seats["anonymous_seat_count"]
                     and (game.planned_start_at is None or at < game.planned_start_at)):
-                message_id = f"{_COMPANION_INQUIRY_PREFIX}{group.game_id}"
-                if revision_id is not None:
-                    message_id = f"{message_id}|{revision_id}"
+                message_id = companion_inquiry_id(group.game_id, revision_id)
                 if not any(receipt.message.message_id == message_id for receipt in group.delivered_receipts()):
                     return self._message(group, message_id, at, "带朋友来的，麻烦把还没进群的同行拉进来哈。")
             return None

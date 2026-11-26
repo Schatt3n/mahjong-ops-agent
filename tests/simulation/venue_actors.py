@@ -28,7 +28,8 @@ from .venue_actor_availability import (
 
 
 RelationKind = Literal["regular_partner", "avoid_same_table", "neutral"]
-ActionKind = Literal["send", "wait", "arrive", "leave"]
+ActionKind = Literal["send", "wait", "arrive", "leave", "invite_companion", "accept_companion", "decline_companion"]
+COMPANION_ACTION_STAGES = {"invite_companion": "offer", "accept_companion": "received", "decline_companion": "received"}
 Verdict = Literal["pass", "fail", "inconclusive"]
 OpeningDisclosure = Literal["main_need_first", "key_conditions_when_useful", "share_context_upfront"]
 SIMULATION_AGENT = "simulation-agent"
@@ -242,6 +243,14 @@ class FamiliarShop:
 
 
 @dataclass(frozen=True, slots=True)
+class CompanionInviteContext:
+    """本人能操作的私下邀请，只显示已知搭子或实际邀请者的称呼。"""
+
+    stage: Literal["offer", "received"]
+    contact_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class ActorContext:
     """调度器提供该演员已看见的投影；显式受众用于二次隔离跨会话消息。"""
 
@@ -253,6 +262,7 @@ class ActorContext:
     group_targets: tuple[str, ...] = ()
     visible_groups: tuple[str, ...] = ()
     familiar_shop: FamiliarShop | None = None
+    companion_invite: CompanionInviteContext | None = None
 
     def _project_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         selected = _visible_fields(row, _VISIBLE_FIELDS)
@@ -310,6 +320,8 @@ class ActorContext:
         familiarity = self._visible_familiar_shop(history)
         if familiarity:
             projected["familiar_shop"] = familiarity
+        if self.companion_invite is not None:
+            projected["companion_invite"] = asdict(self.companion_invite)
         return projected
 
     def _visible_familiar_shop(self, history: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -418,6 +430,10 @@ def _parse_action(raw: str, projected: Mapping[str, Any]) -> ActorAction:
     if not isinstance(value, dict) or set(value) - {"action", "text", "kind", "recipient_id", "quote_message_id"}:
         raise ValueError("expected an action object with only allowed fields")
     action = value.get("action")
+    if isinstance(action, str) and action in COMPANION_ACTION_STAGES:
+        if set(value) != {"action"} or (projected.get("companion_invite") or {}).get("stage") != COMPANION_ACTION_STAGES[action]:
+            raise ValueError("companion action requires its own invitation context and takes no other fields")
+        return ActorAction(action)
     if action in ("wait", "arrive", "leave"):
         if set(value) != {"action"}:
             raise ValueError("wait, arrive and leave take no other fields")
@@ -505,6 +521,11 @@ rain 中的 heavy_rain_travel_suspended 表示大雨已经影响你的出行，t
 本次能发给谁只看 `private_targets` 和 `group_targets`。`visible_groups` 只表示能看到群消息，`group_targets=[]` 就不能发群；即使本轮聊的是群看板上的桌，也可以在允许的私聊里接住老板的回话，或继续等。
 只输出一个平铺 JSON 对象。发送格式是 {"action":"send","text":"<你自己刚决定要说的话>","kind":"private","recipient_id":"<给定的私聊收件人>"}。私聊收件人必须取自 private_targets；给老板时使用其中的 simulation-agent。过去私聊回执的 recipient_id 是当时收到回执的人，勿用作本次回复对象。发群消息时用 group 以及 group_targets 对应群 ID。要引用目标群的一条已见消息时，用可选的 quote_message_id 填 history 中那条消息自己的 message_id。引用必须属于本次发送的群；不引用或发私聊时省略 quote_message_id。
 不要用 send_message，不要把动作包在外层键内。等待、到达和离开分别用 {"action":"wait"}、{"action":"arrive"}、{"action":"leave"}。不要输出额外说明。"""
+
+_COMPANION_INVITE_PROMPT = """这轮有一个可以操作的模拟小群邀请卡。只做你本人愿意做的动作。
+对于 companion_invite.stage=offer，老板的实际群来话在 delivery。contact_name 是唯一可用的已知搭子。确认对方就是你这次带的同行且你愿意拉入小群时，用 {"action":"invite_companion"}。拿不准、想说明情况或不想发时，可按已有渠道回复或等待。
+对于 companion_invite.stage=received，contact_name 是实际向你发出邀请的人。按你自己的安排和意愿决定接受、拒绝或暂时不回，分别用 {"action":"accept_companion"}、{"action":"decline_companion"}、{"action":"wait"}。接受表示愿意入群并认下已经给同行留的位置。开场安排仍按实际群消息商量。
+邀请卡动作只有 action 字段，不加收件人、文字或群 ID。"""
 
 _FAMILIAR_SHORT_OPENING = (
     "这次是你主动开启一段新私聊，你习惯先讲来意，对方又已经知道你的常打条件。"
@@ -714,6 +735,8 @@ class ModelActor:
         if shop_reply and (newer := _newer_shop_dialogue(projected["history"], delivery, previous)):
             projected["newer_shop_dialogue"] = newer
             prompt = _OLDER_SHOP_RECEIPT + "\n\n" + prompt
+        if context.companion_invite is not None:
+            prompt += "\n\n" + _COMPANION_INVITE_PROMPT
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(projected, ensure_ascii=False)},
@@ -878,6 +901,8 @@ class ModelActor:
 
 def _missing_delivery(projected: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
     """消失、越权或未关联的消息不能引起回复或远程调用。"""
+    if event.get("kind") == "table_companion_invitation":
+        return (projected.get("companion_invite") or {}).get("stage") != "received"
     return bool(event.get("kind") == "delivered" and not projected["delivery"]
                 and (event.get("caused_by") or event.get("details", {}).get("activity") == "open_dialogue"))
 

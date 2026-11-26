@@ -15,12 +15,13 @@ from threading import Lock
 from mahjong_agent_runtime.models import GameStatus, using_clock
 
 from .venue_acceptance import _delivered_replies, assess_pending_handling
-from .venue_actors import ActorContext, ModelActor
+from .venue_actors import COMPANION_ACTION_STAGES, ActorContext, ModelActor
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
 from .venue_judging import ROLLING_REVIEW_INSTRUCTIONS, review_dialogue, shop_reply_verdicts
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
+from .venue_rolling_companions import TABLE_COMPANION_WAKE, VenueRollingCompanions
 from .venue_rolling_history import deliver_rolling_group_history
 from .venue_rolling_play_link import PLAY_ROLE_KINDS, PLAY_TICK_KIND, VenueRollingPlayLink
 from .venue_rolling_world import VenueRollingWorld
@@ -92,6 +93,9 @@ class VenueRollingRoles:
         self.board = VenueRollingBoard(channel) if publish_boards else None
         self.seed_public_history = seed_public_history
         self.journal = VenueRoleJournal(self.run_dir / VenueRoleJournal.filename)
+        cutoff = (start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        self.companions = (VenueRollingCompanions(channel, self.journal, self.actors,
+                           response_delay=_WAIT_FOR_REPLY, cutoff=cutoff) if table_groups else None)
         self.play = (VenueRollingPlayLink(VenueRollingWorld(channel.runtime.store, self.run_dir), channel, self.journal,
                     active_actors=self.actors, allow_controlled=not isinstance(actor, ModelActor)) if physical_play else None)
         self._private_world: dict[tuple, dict] = {}
@@ -137,8 +141,11 @@ class VenueRollingRoles:
                 if deferred := [event for event in planned if event.decision is None]:
                     self._pause_before_delivery(wave, planned, deferred)
                 # 不同人的私聊可并行提交。共享群入口与后续唤醒保持稳定顺序。
-                independent = [event for event in planned
-                               if ((event.decision or {}).get("decision", {}).get("action") or {}).get("kind") != "group"]
+                independent = []
+                for event in planned:
+                    action = event.decision["decision"].get("action") or {}
+                    if action.get("kind") != "group" and action.get("action") not in COMPANION_ACTION_STAGES:
+                        independent.append(event)
                 delivered = dict(zip((event.event_id for event in independent), pool.map(self._dispatch, independent), strict=True))
                 for event in planned:
                     result, receipts = delivered[event.event_id] if event.event_id in delivered else self._dispatch(event)
@@ -211,6 +218,10 @@ class VenueRollingRoles:
                     report["rolling_table_groups"]["roster_pauses"] = pauses
                 if reconciled:
                     report["rolling_table_groups"]["roster_reconciliations"] = reconciled
+                companion_outcomes = Counter(row["runtime_status"] for row in rows
+                                             if (row.get("runtime_status") or "").startswith("table_companion_"))
+                if companion_outcomes:
+                    report["rolling_table_groups"]["companion_outcomes"] = dict(companion_outcomes)
             return report
 
     @staticmethod
@@ -554,7 +565,11 @@ class VenueRollingRoles:
             private.pop("earliest_arrival", None)
         kind = event.kind if overtime or event.kind in _WORLD_WAKES or event.kind in PLAY_ROLE_KINDS else (
             "delivered" if event.caused_by else "activity")
+        companion = (self.companions.context(event, at=at) if self.companions is not None
+                     and event.kind in {_TABLE_RECEIPT_WAKE, TABLE_COMPANION_WAKE} else None)
         private_targets, peer_id = self._private_targets(event)
+        if event.kind == TABLE_COMPANION_WAKE:
+            kind, private_targets, peer_id = TABLE_COMPANION_WAKE, (), None
         if peer_id is not None:
             private["peer_id"] = peer_id
         if kind == "activity":
@@ -577,7 +592,7 @@ class VenueRollingRoles:
                 "已经明确答复过当前提议时，其他人只报自己的意见，你可以等店家定下来。"
                 "有新时间、条件变化或别人真在问你，再回需要补充的那件事。"
             )
-        private_cue = overtime or event.kind in PLAY_ROLE_KINDS
+        private_cue = overtime or event.kind in {*PLAY_ROLE_KINDS, TABLE_COMPANION_WAKE}
         groups = (self.channel.room_id,) if event.actor_id in self.group_members else ()
         table_room = event.details.get("table_room_id") if event.kind == _TABLE_RECEIPT_WAKE else None
         table_rooms = self.channel.table_rooms_for(event.actor_id, at=at) if self.table_groups else ()
@@ -586,7 +601,8 @@ class VenueRollingRoles:
             "event_id": event.event_id, "kind": kind, "caused_by": event.caused_by, "at": at.isoformat(),
             "visible_to": (event.actor_id,), "details": private,
         }], private_targets=private_targets,
-            group_targets=() if private_cue else group_targets, visible_groups=(*groups, *table_rooms))
+            group_targets=() if private_cue else group_targets, visible_groups=(*groups, *table_rooms),
+            companion_invite=companion)
         with self._overlap_lock:
             self._inflight_decisions += 1
             inflight = self._inflight_decisions
@@ -600,7 +616,8 @@ class VenueRollingRoles:
         planned = {
             "event_id": event.event_id, "actor_id": event.actor_id, "virtual_at": at.isoformat(),
             "caused_by": event.caused_by, "wake_kind": event.kind, "decision": decision.to_dict(),
-            "visible_cause_verified": (delivery.get("message_id") == event.caused_by
+            "visible_cause_verified": (companion is not None if event.kind == TABLE_COMPANION_WAKE else
+                                       delivery.get("message_id") == event.caused_by
                                        and (event.kind != "peer_receipt" or
                                             peer_id is not None and delivery.get("sender_id") == peer_id)),
             "inflight_decisions_at_start": inflight,
@@ -619,6 +636,11 @@ class VenueRollingRoles:
         action = decision.get("action")
         if not action or decision.get("status") != "valid":
             return {"failure_stage": "role", "error_type": decision.get("status", "invalid")}, []
+        if action["action"] in COMPANION_ACTION_STAGES:
+            if self.companions is None or event.kind not in {_TABLE_RECEIPT_WAKE, TABLE_COMPANION_WAKE}:
+                return {"failure_stage": "delivery", "error_type": "unauthorized_companion_action"}, []
+            at = event.due_at.astimezone(self.start_at.tzinfo)
+            return self.companions.dispatch(event, action["action"], at=at), []
         if self.play is not None and (physical := self.play.role_result(event)) is not None:
             return physical, []
         if action["action"] in {"wait", "leave"}:
