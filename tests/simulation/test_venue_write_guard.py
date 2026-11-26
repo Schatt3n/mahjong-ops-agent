@@ -17,6 +17,7 @@ from mahjong_agent_runtime.models import ToolCall, using_clock
 
 from . import venue_write_guard
 from .venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
+from .venue_fixture import _call, _reply
 from .venue_models import configure_venue_preflight_prompts
 from .venue_write_guard import VenueWriteGuard
 
@@ -484,6 +485,135 @@ def test_private_turn_traces_same_preflight_to_planner_and_reply_review(tmp_path
     if not authorized:
         assert evidence["create_game"]["error"]
         assert evidence["search_current_games"]["called"] and not evidence["search_current_games"]["result"]["matches"]
+
+
+@pytest.mark.parametrize("path", ["direct", "after_lookup", "known_opening"])
+def test_v7_0402_opening_clarification_uses_delivered_delegation_and_actual_scope(tmp_path, path):
+    """到店更正能推进问开场；确有可行开场和权限时保留实际登记与查验。"""
+    at = datetime.fromisoformat("2026-11-25T19:35:00+08:00")
+    planned = "2026-11-25T20:15:00+08:00"
+    known = path == "known_opening"
+    looked_up = path == "after_lookup"
+    body = ("杭州麻将。我最早20:10才能到。就20:15开吧，帮我组一桌。" if known
+            else "杭州麻将。我七点四十到不了，最早八点过一点。")
+    question = "这桌几点开合适？" if known else "你最早八点过一点到。这桌几点开合适？"
+    if looked_up:
+        question = "八点过一点以后没有能搭的现成杭麻桌。你想这桌几点开？"
+    receipt_text = "八点一刻开场的杭麻给你记上了，还差三位。" if known else question
+    prior = [
+        ("prior-inquiry", "老板，一底两底的局有合适的吗？我晚上七点四十能到。"),
+        ("prior-offer", "七点四十以后现在没有一底两底能搭的现成桌诶，要不我帮你组一桌？"),
+        ("prior-delegation", "老板，组一桌吧。一底两底的，我七点四十能到。"),
+        ("prior-question", "行，一底两底的我帮你组。你想打什么玩法？"),
+    ]
+    authority = StubAuthorizationClient(permission("organize", "帮我组一桌。") if known else '{"permissions":[]}')
+    store = SQLiteAgentStore(tmp_path / "v7-0402.sqlite3")
+    guard = VenueWriteGuard(authority, tmp_path / "authorization.jsonl")
+    trace = InMemoryTraceRecorder()
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 2}}
+    steps = [_reply(prior[1][1], status="waiting_user"), _reply(prior[3][1], status="waiting_user")]
+    if looked_up:
+        steps.append(_call("search_current_games", {"lookup_scope": "personal", "requirement": {**terms,
+            "start_time_range": {"start_at": "2026-11-25T20:05:00+08:00", "end_at": "2026-11-25T23:59:59+08:00"}}}))
+    steps.append(_reply(question, status="waiting_user"))
+    if known:
+        steps.extend([_call("create_game", {"organizer_id": CUSTOMER, "organizer_name": "顾客", "known_players": [],
+            "requirement": {**terms, "start_time_kind": "scheduled", "planned_start_at": planned}}), _reply(receipt_text)])
+    class ShopClient(StaticAgentClient):
+        """成功建局后用真实局号查当前可以联系的候选。"""
+
+        def complete(self, messages, **options):
+            content = json.loads(messages[-1]["content"])
+            recent_tools = content.get("turn_tool_evidence") or []
+            if known and recent_tools and recent_tools[-1].get("name") == "create_game" and recent_tools[-1].get("allowed"):
+                game_id = recent_tools[-1]["result"]["game"]["game_id"]
+                self.outputs.insert(0, _call("search_customers", {"game_id": game_id}))
+            return super().complete(messages, **options)
+
+    main = ShopClient(steps)
+
+    def review_result(text, *, violations):
+        """为离线回放提供原稿及有据审查结果。"""
+        return json.dumps({"approved": not violations, "needs_human": False, "violations": violations,
+            "reasoning_summary": "核对是否仍缺真正的开场和可执行范围",
+            "item_reviews": [{"item_id": "reply_to_user", "approved": not violations, "violations": violations,
+                "suggested_safe_text": "" if violations else text, "reasoning_summary": "比对原话及实际回执",
+                "follow_up_commitments": []}]}, ensure_ascii=False)
+
+    reviewer = StaticAgentClient(
+        [review_result(prior[index][1], violations=[]) for index in (1, 3)]
+        + ([review_result(question, violations=["known_constraint_reask", "delegation_not_advanced"])] if known else [])
+        + [review_result(receipt_text, violations=[])]
+    )
+    clock_client = (StaticAgentClient([json.dumps({
+        "clock_role": "other", "clock_roles": [{"clock_ref": 1, "role": "arrival_not_before"},
+            {"clock_ref": 2, "role": "opening"}], "lookup_scope": "personal",
+        "opening_window": {"start_at": planned, "end_at": planned}, "accepted_stake_range": {"min": 1, "max": 2},
+        "known_cap_score": None, "has_fixed_opening_authority": True, "opening_customer_ref": 5,
+        "current_ref": 5, "supporting_customer_refs": [3, 5],
+    })]) if known else StubAuthorizationClient(TimeoutError("no complete clock response")))
+    runtime = AgentRuntime(llm_client=main, store=store, tool_gateway=guard.guarded_gateway(store),
+        trace_recorder=trace, table_availability_client=clock_client,
+        reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    configure_venue_preflight_prompts(runtime, tmp_path, guard)
+    channel = SandboxChannel(runtime, room_id="venue", identities={CUSTOMER: "顾客"},
+        archive_path=tmp_path / "chat.sqlite3", write_guard=guard, show_verified_write_scope=True)
+    current_permission = authority.payload
+    for index, minute in ((0, 0), (2, 2)):
+        identifier, text = prior[index]
+        history_at = at.replace(minute=minute)
+        authority.payload = '{"permissions":[]}' if index == 0 else permission("organize", "组一桌吧。")
+        with using_clock(lambda: history_at):
+            delivered = channel.send(MessageEnvelope(identifier, CUSTOMER, text, history_at, "private", AGENT_ID))
+        assert delivered["final_reply"] == prior[index + 1][1]
+    authority.payload = current_permission
+    with using_clock(lambda: at):
+        result = channel.send(MessageEnvelope("current-later-arrival", CUSTOMER, body, at, "private", AGENT_ID))
+
+    audits = [json.loads(line) for line in (tmp_path / "authorization.jsonl").read_text().splitlines()
+              if json.loads(line).get("event") == "authorization"]
+    assert [row["status"] for row in audits] == ["no_permission", "authorized", "authorized" if known else "no_permission"]
+    assert [row["text"] for row in authority.calls[-1]["history"]] == [text for _, text in prior]
+    prompted = reviewer.calls[2]["messages"]
+    payload = json.loads(prompted[-1]["content"])
+    assert payload["current_message"]["text"] == body
+    assert prior[2][1] in [turn["content"] for turn in payload["recent_conversation_tail"]]
+    assert json.loads(prompted[0]["content"].split("sandbox_private_write_preflight = ", 1)[1])["verified_scopes"] == (
+        ["organize"] if known else [])
+    rule = payload["game_query_strategy_contract"]["delegation_acceptance"]["progress_review"]["opening_clarification"]
+    assert "最早到店时间与牌局开场是两件事" in rule and "当前获准办理时，应按原委托推进" in rule
+    assert "只问仍缺的可行开场属有效承接" in "".join(payload["semantic_fidelity_contract"]["rules"])
+    assert "沙盒未给 `organize` 时" in prompted[0]["content"]
+    events = trace.get_trace(result["trace_id"])
+    receipt, = result["archive_outputs"]
+    assert receipt["text"] == receipt_text and receipt["source_message_id"] == "current-later-arrival", [
+        event.content for event in events if event.step in {"action_contract_error", "tool_result", "final_output",
+                                                           "table_availability_authorization_invalid"}
+    ]
+    assert result["status"] == ("completed" if known else "waiting_user")
+    tools = [event.content for event in events
+             if event.step == "tool_result" and event.content["name"] in {"search_current_games", "create_game"}]
+    if known:
+        decision, = [event.content["decision"] for event in events
+                     if event.step == "table_availability_authorization_result"]
+        assert decision["has_fixed_opening_authority"] is True
+        created, = tools
+        assert created["name"] == "create_game" and created["called"] and created["allowed"]
+        assert any(event.step == "tool_result" and event.content["name"] == "search_customers"
+                   and event.content["called"] and event.content["allowed"] for event in events)
+        game, = store.games.values()
+        assert game.planned_start_at.isoformat() == planned and game.organizer_id == CUSTOMER
+    elif looked_up:
+        assert any(event.step == "table_availability_authorization_unavailable" for event in events)
+        lookup, = tools
+        assert lookup["name"] == "search_current_games" and lookup["called"] and lookup["result"]["matches"] == []
+    else:
+        assert not tools
+    if not known:
+        assert not store.games and not store.invite_drafts and not store.room_reservations
+        assert "create_game" not in {spec["name"] for spec in read_main_agent_system_contract(
+            main.calls[2]["messages"][0])["available_tools"]}
+    store._connection.close()
 
 
 @pytest.mark.parametrize("unconditional", [False, True])

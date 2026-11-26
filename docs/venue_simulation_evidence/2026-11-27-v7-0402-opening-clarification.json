@@ -1,0 +1,193 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_code_commit": "a87e461",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev7_20261127/2026-11-25-real-f43d9234b8",
+  "customer_case": "0402",
+  "trace_id": "trace_68b5c8e3f35af0516156a264",
+  "ledger": [
+    {
+      "sequence": 23,
+      "message_id": "customer:role-event:06e2c19813d9eea4893b89751189f88ea67ec60b0f9c340ee52ca80d83f7b927",
+      "source_message_id": null,
+      "trace_id": "trace_4f76ff99d2c62b850853dfab",
+      "kind": "private",
+      "direction": "inbound",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "text": "老板，一底两底的局有合适的吗？我晚上七点四十能到。"
+    },
+    {
+      "sequence": 24,
+      "message_id": "outbound:trace_4f76ff99d2c62b850853dfab:1",
+      "source_message_id": "customer:role-event:06e2c19813d9eea4893b89751189f88ea67ec60b0f9c340ee52ca80d83f7b927",
+      "trace_id": "trace_4f76ff99d2c62b850853dfab",
+      "kind": "private",
+      "direction": "outbound",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "text": "七点四十以后现在没有一底两底能搭的现成桌诶，要不我帮你组一桌？"
+    },
+    {
+      "sequence": 40,
+      "message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+      "source_message_id": null,
+      "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+      "kind": "private",
+      "direction": "inbound",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "text": "老板，组一桌吧。一底两底的，我七点四十能到。"
+    },
+    {
+      "sequence": 42,
+      "message_id": "outbound:trace_4b84e1633c4b01139ba1ec18:1",
+      "source_message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+      "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+      "kind": "private",
+      "direction": "outbound",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "text": "行，一底两底的我帮你组。你想打什么玩法？"
+    },
+    {
+      "sequence": 51,
+      "message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+      "source_message_id": null,
+      "trace_id": "trace_68b5c8e3f35af0516156a264",
+      "kind": "private",
+      "direction": "inbound",
+      "sent_at": "2026-11-25T11:35:00+00:00",
+      "text": "杭州麻将。我七点四十到不了，最早八点过一点。"
+    },
+    {
+      "sequence": 53,
+      "message_id": "outbound:trace_68b5c8e3f35af0516156a264:1",
+      "source_message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+      "trace_id": "trace_68b5c8e3f35af0516156a264",
+      "kind": "private",
+      "direction": "outbound",
+      "sent_at": "2026-11-25T11:35:00+00:00",
+      "text": "杭州麻将一底两底的，八点过一点以后现在没有能搭的现成桌，得新组一桌。这桌我这边这会儿还没能给你组上，先跟你说一声，别白等着。"
+    }
+  ],
+  "independent_current_write_scopes": [
+    {
+      "source_message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+      "status": "authorized",
+      "permissions": [
+        {
+          "scope": "organize",
+          "evidence": "老板，组一桌吧。一底两底的，我七点四十能到。",
+          "offer_message_id": null,
+          "offer_evidence": null
+        }
+      ],
+      "raw": "{\"permissions\":[{\"scope\":\"organize\",\"evidence\":\"老板，组一桌吧。一底两底的，我七点四十能到。\",\"offer_message_id\":null,\"offer_evidence\":null}]}",
+      "call_id": "llm_call_dc93cddfb05e4d7e926a8c44a94d77fe",
+      "terminal_attempt_id": "llm_attempt_fd75c497453a4fac90da2d0b06c04002",
+      "http_response_complete": true
+    },
+    {
+      "source_message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+      "status": "no_permission",
+      "permissions": [],
+      "raw": "{\"permissions\":[]}",
+      "call_id": "llm_call_d1665d99b5e44b51885a93068ad7bd13",
+      "terminal_attempt_id": "llm_attempt_a7d7012d2b9b402b9d3f2e82bd1760b3",
+      "http_response_complete": true
+    }
+  ],
+  "timing_verification": {
+    "step_index": 3,
+    "call_id": "llm_call_902418422aae4ff48a43ca3a1a71a571",
+    "attempts": [
+      {
+        "attempt_id": "llm_attempt_60db6688b99247b18a02789102757a30",
+        "http_status": null,
+        "body_complete": false,
+        "error_type": "TimeoutError"
+      },
+      {
+        "attempt_id": "llm_attempt_8127e23a76864d56ab3d480c8edbb124",
+        "http_status": null,
+        "body_complete": false,
+        "error_type": "TimeoutError"
+      }
+    ],
+    "verified_fixed_opening": null
+  },
+  "lookup": {
+    "called": true,
+    "allowed": true,
+    "requirement": {
+      "game_type": "hangzhou_mahjong",
+      "stake_label": "1～2元",
+      "stake_range": {
+        "max": 2.0,
+        "min": 1.0
+      },
+      "start_time_range": {
+        "end_at": "2026-11-25T23:59:59+08:00",
+        "start_at": "2026-11-25T20:05:00+08:00"
+      }
+    },
+    "matches": [],
+    "evidence_scope": {
+      "applied_filter_fields": [
+        "game_type",
+        "stake_range",
+        "start_time_range"
+      ],
+      "available_pool_scope": "same_requester_and_conversation",
+      "unfiltered_available_pool_empty": true,
+      "supports_narrower_empty_claim": true
+    }
+  },
+  "lead_drafts_and_actual_review": [
+    {
+      "draft": "杭州麻将一底两底，记上了。八点过一点到没问题，那开场定在八点一刻行吗？还是你想再晚点开？",
+      "approved": false,
+      "violations": [
+        "delegation_not_advanced"
+      ],
+      "review_reason": "玩法、档位和到店时间均已明确，委托也可按本人一席承接；当前应将组局变为真实推进，而不是仅复述并追问开场。安全改写只作承接，不新增时间或人员保证。",
+      "suggested_safe_text": "杭州麻将一底两底，记上了。我先照八点过一点帮你组一桌。"
+    },
+    {
+      "draft": "杭州麻将一底两底，记下了。八点过一点之后人齐就开，行吗？还是你想定个钟点开？",
+      "approved": false,
+      "violations": [
+        "delegation_not_advanced"
+      ],
+      "review_reason": "玩法、档位、到店时间均已知且无冲突，不应重问；但组局委托尚无实际推进，仅承接话术不能掩盖缺执行，需重新规划真实建局或找人步骤。",
+      "suggested_safe_text": "杭州麻将一底两底，记下了，你最早八点过一点到。这个我先确认一下怎么安排，稍后回你。"
+    },
+    {
+      "draft": "杭州麻将一底两底的，八点过一点以后现在还没有能搭的现成桌，得新组一桌。你想人齐就开，还是定个钟点开？",
+      "approved": false,
+      "violations": [
+        "delegation_not_advanced"
+      ],
+      "review_reason": "空局结论符合查询范围；但组局委托尚无实际承接推进，改为如实告知当前未能办理，并保留真实局况。",
+      "suggested_safe_text": "杭州麻将一底两底的，八点过一点以后现在没有能搭的现成桌，得新组一桌。组局这块我这边这会儿还没能安排上，先跟你说明一下。"
+    },
+    {
+      "draft": "杭州麻将一底两底的，八点过一点以后现在没有能搭的现成桌，得新组一桌。这桌我这边这会儿还没能给你组上，先跟你说一声，别白等着。",
+      "approved": true,
+      "violations": [],
+      "review_reason": "空局结论限于本次成功查询的玩法、档位与时段，支持 narrower empty；组局未办成如实告知，未承诺后续通知，无待答问题。",
+      "suggested_safe_text": "杭州麻将一底两底的，八点过一点以后现在没有能搭的现成桌，得新组一桌。这桌我这边这会儿还没能给你组上，先跟你说一声，别白等着。"
+    }
+  ],
+  "analysis": [
+    "顾客在上一轮已有真实组局委托。当前是在答上轮的玩法问题，随后更正本人最早到店，语义自然。较早 19:40 同样是到店时间，店家从未与本人约定开场。",
+    "沙盒在当前来话的独立授权回执为 no_permission。历史委托仍用于理解同一目标，当前来话没有授予沙盒的写入范围。整轮只执行一次查局；没有提交建局、找人、包间或邀约操作。独立时间核验在第三步失败，也没有选出固定开场。",
+    "审查三次都按委托未推进驳回。第一稿还有独立的「到没问题」断言，仍须证据。第二稿「八点过一点之后人齐就开」涉及能否避免提前开场，现有无固定时刻的方案不能保证。第三稿有真实查局空结果，但可改为直接询问这桌几点开。已送达的最终稿如实说明没有办成，且没有问出仍缺的开场条件。",
+    "适用的澄清是正常 waiting_user，保留原委托和到店下界。已确认的可行开场、可相容的普通人齐开和具备当前授权的业务推进沿用原有核验。假设的开场、预约、席位和未来通知均不从澄清推出。"
+  ],
+  "grounded_reply_without_lookup": "你最早八点过一点到。这桌几点开合适？",
+  "grounded_reply_after_executed_empty_lookup": "八点过一点以后没有能搭的现成杭麻桌。你想这桌几点开？",
+  "change": "共同委托合同、发前独立审查和沙盒前置授权的校对提示共同明确这一类真实缺项。工具权限、时间核验和发前事实核对不变。",
+  "offline_verification": {
+    "test": "tests/simulation/test_venue_write_guard.py::test_v7_0402_opening_clarification_uses_delivered_delegation_and_actual_scope",
+    "controls": "复制同一顾客实际送达的前四条消息，使用静态审查回执验证直接等答和真实查空后的等答，两路均不写。已确认开场且独立权限有效时，条件不再追问，真实建局和按局号查候选后送达回执。原生未来人齐开测试继续独立验证。",
+    "live_replay": "pending",
+    "focused_suite_passed": 763
+  }
+}

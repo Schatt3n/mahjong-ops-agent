@@ -964,6 +964,9 @@ def build_reply_self_review_payload(
                 "找局策略遵守 game_query_strategy_contract，结合原话、上下文和真实工具证据判断是否合理，不以固定追问或唯一语义路径拒绝；未知个人适配仍不得伪造。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
                 "empty_personal_matching_default 是主 Agent 的服务规划策略。审查空结果正文时核对真实查询范围和事实。仅未附加服务提议不构成 semantic_fact_loss。用户明确要求的答复、待决事项或实际已获委托仍按各自证据和完成要求审查。",
                 "先按 request_scope_contract 核对本人原话、限制及同目标委托，再按 delegation_acceptance.progress_review 核验实际执行阶段，最后判断剩余提议或承诺。action_boundary.request_scope仅是有来源的模型解释，新goal、reply_scope或空查询不能撤销既有委托。有效完整委托且事实足够，但尚无相应持久承接及实际推进，却停在重新询问是否开始同一服务，以 delegation_not_advanced 拒绝并要求重新规划；短确认也不能掩盖缺执行。已建立同目标待组局并完成当前可执行找人步骤是真实进展，候选为空不撤销执行；工具允许本轮结束时，另征询持续复查或个人通知且整句仍待客户接受，不是重置原委托，不要求预先调度。实际承担未来责任仍须有效对应机制，不得借提议放过无条件通知、独立已发送声明、未完成的明确要求或工具续办义务。真正缺项、具体局参加确认、只找现成或明确撤销仍保留；看板未配置不能谎称已安排发布。",
+                "判断是否真正缺开场，先应用 delegation_acceptance.progress_review.opening_clarification。"
+                "可到店的最早点已说清，不代表开场已说清。只问仍缺的可行开场属有效承接，不能仅因同轮未建局判 delegation_not_advanced。"
+                "真实独立的开场、到店可赶上或已登记等承诺仍需对应证据。",
                 *(("通过 game_availability_evidence.latest_search.options_requiring_timing_confirmation 逐桌对照原定开场。"
                    "若介绍这些临近桌，须保留顾客赶不赶得上的未知；已有空席不代表会晚开或同桌愿意等候。"
                    "可直接省略这些备选；无真实本人或同桌确认的肯定保证，以 unsupported_conclusion 拒绝。",)
