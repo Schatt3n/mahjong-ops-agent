@@ -1,0 +1,98 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "customer_case": "0038",
+  "trace_id": "trace_488f8c12def0d347339915f9",
+  "message": {
+    "source_message_id": "customer:role-event:57625a244c70e0ec081b333707bbac72399e473880179f9c6e4442ef88768b93",
+    "sent_at": "2026-11-25T19:00:00+08:00",
+    "text": "老板 371那桌七点半的 我那会儿能到 一块的杭麻有吗 还有位吗",
+    "quoted_message": null
+  },
+  "opening_verification": {
+    "clock_count": 1,
+    "clock_text": "七点半",
+    "local_candidate_at": "2026-11-25T19:30:00+08:00",
+    "initial_call": {
+      "call_id": "llm_call_b23f81be72f64aeaaa758aa366603361",
+      "terminal_attempt_id": "llm_attempt_28625005d5074613bc2ce4fd6952749e",
+      "raw_response_sha256": "3e6fd316fdaa6462536a5c33d20ca41fad7e05a710ce7ac72e6609ed322a57c2"
+    },
+    "independent_personal_recheck": {
+      "call_id": "llm_call_079d3db878f843c7b063ac41826141d7",
+      "terminal_attempt_id": "llm_attempt_d3d09464734c448abde64970eabec2ea",
+      "raw_response_sha256": "2f19770cc95454b46b51370354a0ecadb03316561d348d60d48e5270eb83ff80"
+    },
+    "observed_scope": "specific_table",
+    "observed_role": "arrival_estimate",
+    "personal_clocks_not_opening": ["2026-11-25T19:30:00+08:00"],
+    "also_requests_personal_options_present": false,
+    "has_fixed_opening_authority": false
+  },
+  "lookups": {
+    "rejected_named": [
+      {"step": 2, "call_id": "lookup_original_table", "start_time": "19:30", "called": false},
+      {"step": 8, "call_id": "lookup_table_ref", "start_time": "19:30", "called": false}
+    ],
+    "named_reject_reason": "定位顾客问的原桌时，不能把本人到店、离店或等候的钟点当作该桌开场。请按原桌特征查余位。",
+    "actual_read": {
+      "step": 4,
+      "call_id": "lookup_table_371",
+      "called": true,
+      "allowed": true,
+      "lookup_scope": "specific_table",
+      "applied_filter_fields": ["game_type", "stake"],
+      "game_type": "hangzhou_mahjong",
+      "stake": "1",
+      "matches": [],
+      "alternatives": [],
+      "supports_narrower_empty_claim": true,
+      "available_pool_scope": "same_requester_and_conversation"
+    },
+    "rejected_personal": {"step": 8, "call_id": "lookup_personal", "called": false, "reason": "查局用途与核实的原话不一致"}
+  },
+  "visible_reviews": [
+    {
+      "planner_step": 6,
+      "call_id": "llm_call_bbee9817ec0f49a2be397193c9457415",
+      "terminal_attempt_id": "llm_attempt_ba022786bed74595b6d975fc4dcf309a",
+      "http_status": 200,
+      "review_user_payload_sha256": "add8f48e9cf883522eb31eacde72c8c6e74a591058d844c5c5f27f9f496f3944",
+      "raw_response_sha256": "7c034b1de108cf5bca75d69e613b24900850039bd5d5073e8ea2514de87b761a",
+      "submitted_text": "刚按一块底杭麻查了一遍，现在没有能对上那张371的桌诶。七点半这个点我先帮你留意着，有合适的招呼你？",
+      "violations": ["unsupported_conclusion", "unsupported_follow_up_commitment"],
+      "suggested_safe_text": "刚按一块底杭麻查了一下，暂时没查到能搭的现成桌。你说的那张371，我这边暂时辨不出来，能不能再说说那桌还有啥特征？"
+    },
+    {
+      "planner_step": 7,
+      "call_id": "llm_call_e89100afa11247fd87b4ad6cf546c37c",
+      "terminal_attempt_id": "llm_attempt_c177aa6de59a47e4acb4b5a7063934e7",
+      "http_status": 200,
+      "review_user_payload_sha256": "7bfe8a75398feedad918261b82d5b1256d76318a1ac760e94fe5f1f4aef4df13",
+      "raw_response_sha256": "9a0b89794a5a643a55c01878fd6b65918b582ab27cac297d11acf68784f8bae2",
+      "submitted_text_and_source_text": "刚按一块底杭麻查了一下，暂时没查到能搭的现成桌。你说的那张371，我这边暂时辨不出来，能不能再说说那桌还有啥特征？",
+      "violations": ["unsupported_conclusion"],
+      "reason": "原稿把一次按玩法档位的空查询说成「没有能对上371的桌」，超出证据范围，需改为只说明本次查询结果并追问原桌特征。",
+      "suggested_safe_text": "刚按一块底杭麻查了一下，暂时没查到能搭的现成桌。你说的371那桌，我这边暂时辨不出来，能不能再说说那桌还有啥特征？"
+    }
+  ],
+  "final_output": {
+    "message_id": "outbound:trace_488f8c12def0d347339915f9:1",
+    "text": "稍等一下",
+    "runtime_status": "needs_help",
+    "runtime_reason": "max_steps_exceeded",
+    "writes_observed": false
+  },
+  "analysis": [
+    "『371那桌七点半的』把七点半用作原桌线索。『我那会儿能到』又借用同一时间说明顾客到店。旧核验只保留到店用途，阻断按原桌真实线索提交的查询。没有证据支持另查一桌或建立新的固定开场。",
+    "实际查询只带已提交的玩法和档位。空回执可用于如实说明没有查到可拼桌，不能证明一张身份未核实的桌不存在，也不能保证到店有位。进一步澄清时可问原桌来自群看板还是此前私聊。",
+    "第二次送审拿到完整原稿，原稿与上次建议逐字相同。审查仍沿用前次确定性断言而拒绝不确定的原桌回复。该差异单独保留，本次修改不覆盖或跳过送审结果。"
+  ],
+  "change": "明确紧贴当前来话唯一桌称的开场钟点，可以用于那张桌的只读定位。保留独立模型的本人到店语义。纯到店、不同原桌各有钟点、异群原句均不借作原桌时间。不会因此增加个人另查、建局或任何写入授权。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v6_0038_same_clock_can_locate_the_original_table_only_with_attached_words",
+    "focused_tests_passed": 709,
+    "live_replay": "pending"
+  }
+}

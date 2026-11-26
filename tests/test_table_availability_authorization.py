@@ -7,7 +7,8 @@ import json
 import pytest
 
 from mahjong_agent_runtime import (
-    AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage,
+    AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, QuotedMessageRef, SQLiteAgentStore, ToolCall, ToolGateway,
+    UserMessage,
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
@@ -569,6 +570,84 @@ def test_v5_0437_historical_status_requires_an_independent_opening_confirmation(
     assert len(availability.calls) == 1 and not store.room_reservations and not store.invite_drafts
     called = [event.content["call"]["name"] for event in trace.get_trace(message.message_id) if event.step == "tool_called"]
     assert called == (["create_game"] if writes else ["search_current_games"])
+    store._connection.close()
+
+
+@pytest.mark.parametrize("case,text,admitted", [
+    ("archived", "老板 371那桌七点半的 我那会儿能到 一块的杭麻有吗 还有位吗", True),
+    ("preposed", "老板 七点半开那桌杭麻还有位吗，我那会儿能到", True),
+    ("arrival", "371那桌还有位吗 我七点半能到", False),
+    ("multiple", "371那桌七点半的还有位吗，173那桌八点的也能搭吗", False),
+    ("other_room_quote", "这桌还有位吗 我七点半能到", False),
+])
+def test_v6_0038_same_clock_can_locate_the_original_table_only_with_attached_words(tmp_path, case, text, admitted):
+    """词面确实修饰原桌时允许只读定位，纯到店、两桌歧义和异群引用均不得代替。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    opening = "2026-11-25T19:30:00+08:00"
+    store = SQLiteAgentStore(tmp_path / "v6-named-clock.sqlite3")
+    trace = InMemoryTraceRecorder()
+    decision = _decision(lookup_scope="specific_table", clock_role="arrival_estimate", opening_window=None,
+                         accepted_stake_range=None, clock_roles=None)
+    if case == "multiple":
+        decision["clock_role"] = "other"
+        decision["clock_roles"] = [{"clock_ref": ref, "role": "arrival_estimate"} for ref in (1, 2)]
+    verifier = ReviewClient([decision, decision])
+    creation = ReviewClient([{"scope": "inquire", "customer_ref": None, "shop_offer_ref": None}])
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=verifier,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1}
+    message = _incoming(text, sent=at)
+
+    def submit(call, step):
+        action = AgentAction("核对顾客提到的原桌", "needs_tool", "区分桌的开场和顾客到店", tool_calls=[call])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="v6-named-clock",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    with using_clock(lambda: at - timedelta(minutes=10)):
+        target, _ = store.create_game(conversation_id="separate-host", organizer_id="other-host", organizer_name="牌友",
+            requirement={**terms, "planned_start_at": opening, "start_time_kind": "scheduled"},
+            known_players=[{"customer_id": "player-2"}, {"customer_id": "player-3"}], trace_id="seed-original")
+        if case == "other_room_quote":
+            group = UserMessage("unrelated-room", "other-speaker", "另一个群成员", "川麻371那桌七点半的，有一位。",
+                                message_id="other-group-original", sent_at=at - timedelta(minutes=10),
+                                metadata={"source": "group"})
+            _persist(store, group)
+            message = replace(message, quoted_message=QuotedMessageRef(group.message_id, sender_id=group.sender_id,
+                text=group.text, conversation_id=group.conversation_id))
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        exact = submit(ToolCall("search_current_games", {"lookup_scope": "specific_table", "requirement": {
+            **terms, "start_time": "19:30", "start_time_kind": "scheduled", "needed_seats": 1}}, call_id="named"), 1)
+        assert exact.allowed is admitted and exact.called is admitted
+        if admitted:
+            assert exact.result["requirement"]["start_time"] == "19:30"
+            matched, = exact.result["matches"]
+            assert matched["game"]["game_id"] == target.game_id and matched["game"]["planned_start_at"] == opening
+        else:
+            assert "不能把本人到店" in exact.error and "matches" not in exact.result
+            assert opening in exact.result["table_availability_evidence"]["personal_clocks_not_opening"]
+
+        personal = submit(ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": terms},
+                                   call_id="another-query"), 2)
+        assert not personal.called and "查局用途与核实的原话不一致" in personal.error
+        proof = personal.result["table_availability_evidence"]
+        assert proof["has_fixed_opening_authority"] is False and proof["opening_window"] is None
+        assert "also_requests_personal_options" not in proof
+        if admitted:
+            assert proof["clock_role"] == "arrival_estimate" and proof["personal_clocks_not_opening"] == []
+
+        proposed = submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+            "requirement": terms | {"planned_start_at": opening, "start_time_kind": "scheduled"}}, call_id="write"), 3)
+        assert not proposed.allowed and not proposed.called
+
+    assert len(verifier.calls) == 2 and set(store.games) == {target.game_id}
+    assert not store.room_reservations and not store.invite_drafts
+    read_calls = [event.content["call"]["call_id"] for event in trace.get_trace(message.message_id)
+                  if event.step == "tool_called" and event.content["call"]["name"] == "search_current_games"]
+    assert read_calls == (["named"] if admitted else [])
     store._connection.close()
 
 

@@ -96,6 +96,10 @@ _REFERENCED_TABLE_STATUS = re.compile(
 _EXPLICIT_POINT_OPENING = re.compile(
     r"^\s*(?:(?:就|准时)\s*)?开(?:场|打|局)?\s*(?:(?:吧|就行|就好|定了|可以)(?![吗么嘛呢])|$)"
 )
+_NAMED_TABLE_TERM = r"(?:那|这)(?:一?张|一)?(?:桌|局)"
+_TABLE_BEFORE_OPENING = re.compile(rf"{_NAMED_TABLE_TERM}\s*$")
+_TABLE_AFTER_OPENING = re.compile(rf"^\s*(?:开(?:场|局|打)?\s*)?(?:的\s*)?{_NAMED_TABLE_TERM}")
+_TABLE_OPENING_DESCRIPTOR = re.compile(r"^\s*(?:的(?=\s|\?|$)|开(?:场|局|打)?(?=的|\s|\?|$))")
 _PLAY_UNTIL_CLOCK_PREFIX = re.compile(
     r"[打玩](?:到|至)(?:\s*(?:约|大概|大约|差不多|今晚上?|今天|早上|上午|中午|下午|傍晚|晚上|晚间|凌晨))*\s*$"
 )
@@ -116,7 +120,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 10
+_DECISION_NORMALIZATION_VERSION = 11
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -594,6 +598,19 @@ def _historical_status_does_not_select_opening(
                    for before, after in cited_mentions)
 
 
+def _named_table_clock_in_current_text(
+    text: str, local_at: datetime, role_times: list[tuple[str, datetime | None]],
+) -> datetime | None:
+    """原桌开场只能取当前本人来话紧贴桌称的唯一钟点。"""
+    candidates = {at for _, at in role_times if at is not None}
+    attached = [
+        at for at in candidates for before, after in _opening_point_mentions(text, local_at, at)
+        if (_TABLE_BEFORE_OPENING.search(before) and _TABLE_OPENING_DESCRIPTOR.match(after))
+        or _TABLE_AFTER_OPENING.match(after)
+    ]
+    return attached[0] if len(attached) == 1 else None
+
+
 def _carry_prior_play_until(
     decision: dict[str, Any], citation: Any, *, customer_rows: dict[int, str],
     sources: dict[int, tuple[datetime, str]], window: tuple[datetime, datetime] | None,
@@ -783,6 +800,10 @@ def _parse_decision(
         # 排除同时被单独指明为原桌开场的等值钟点，保留能合法定位原桌的时间。
         role_times = [(role, _supported_role_time(item, current_text, local_at)) for item, role in bound]
         openings = {at for role, at in role_times if role == "opening"}
+        # 「原桌七点半的，我那会儿能到」共用一个钟点。到店用途不能否定它仍能定位原桌。
+        named_clock = _named_table_clock_in_current_text(current_text, local_at, role_times)
+        if named_clock is not None:
+            openings.add(named_clock)
         decision["personal_clocks_not_opening"] = sorted({at.isoformat() for role, at in role_times
                                                           if role in _PERSONAL_CLOCK_ROLES and at and at not in openings})
     decision["clock_role"] = clock_role
