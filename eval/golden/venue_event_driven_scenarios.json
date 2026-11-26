@@ -34,6 +34,14 @@
       "assertions": ["老板加四名已接纳顾客", "已知席与匿名席之和四", "不虚构同行 ID 或私聊地址", "大群旁观者无权收发或引发模型反应"]
     },
     {
+      "id": "negotiate_full_table_asap_opening",
+      "initial": "四席已确认，组局约定人齐开，尚无固定开场。模拟建群保存店家与四位的实际成员。",
+      "trigger": {"kind": "table_group_ready", "at": "18:05", "visible_to": ["shop", "table_members"]},
+      "actor_branches": ["先提议19:00，有人最早19:30到", "另提19:30后四位均同意", "有人只说最晚23:00走或保持沉默"],
+      "expected_chain": ["店家询问本人可达时间", "本群实际收到具体开场提议", "独立角色接受、拒绝或附条件", "需要时另提时间", "四位本人对同一提议同意", "同局写入开场时间", "实际到齐后开打"],
+      "assertions": ["每次提议只送四位同桌", "旧回复和沉默不成为新提议的同意", "无共同时间保持待定", "四席归属保持且实际开打不会提前"]
+    },
+    {
       "id": "silent_confirmation_and_standby",
       "initial": "小群已建，开场协商后的最新提议待 D 确认。E 仅为潜在备选。",
       "trigger": {"kind": "confirmation_deadline", "at": "18:48", "visible_to": ["shop"]},
