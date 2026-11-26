@@ -1,0 +1,51 @@
+{
+  "readiness_assessment_commit": "a5b8168",
+  "scenario_asset": "eval/golden/venue_event_driven_scenarios.json",
+  "integrated_code": "8db2382",
+  "mode": "offline",
+  "status": "passed",
+  "scope": "受控沙盒事件、消息和正式 SQLite 业务事务。真实角色和店家的桌群端到端协商另行验收。",
+  "stages": {
+    "existing_domain_baseline": {"passed": 120},
+    "overtime_private_roles": {
+      "isolated_passed": 133,
+      "integrated_focused_passed": 11,
+      "checks": ["本人可见", "沉默保留", "晚到保留原开场", "明确退出一席", "中断恢复不重复"]
+    },
+    "table_group": {
+      "isolated_passed": 73,
+      "integrated_focused_passed": 13,
+      "checks": ["绑定四席", "同行由对应联系人邀请", "收件时冻结受众", "新成员和旁观者收件隔离", "恢复原回执"]
+    },
+    "same_game_standby": {
+      "new_controls": 11,
+      "isolated_passed": 80,
+      "checks": ["候补不是席位", "授权退出或到期", "当前条款重新确认", "并发最后一席限制", "回滚与重试"]
+    }
+  },
+  "integrated_regression": {
+    "passed": 144,
+    "elapsed_seconds": 20.13,
+    "tests": [
+      "tests/simulation/test_venue_standby.py",
+      "tests/simulation/test_venue_table_group.py",
+      "tests/simulation/test_venue_rolling_roster_changes.py",
+      "tests/simulation/test_venue_rolling_resume.py",
+      "tests/simulation/test_venue_world.py",
+      "tests/test_temporary_recruitment_execution.py",
+      "tests/test_late_arrival.py",
+      "tests/test_waiting_list_match.py",
+      "tests/test_operational_waiting.py",
+      "tests/simulation/test_venue_rolling_known_relationship.py",
+      "tests/simulation/test_venue_rolling_world.py",
+      "tests/test_board_candidate_confirmation.py"
+    ]
+  },
+  "pending_integration": [
+    "桌群实际收件衔接滚动角色和店家业务，完成加班后多人协商",
+    "匿名同行对应四人签到身份，席位与入群记录各自验真",
+    "在同一个事件场景跑两档招募、第五人和变化后四小时营业",
+    "电子烟和新手条件的可信来源、硬软约束及未知分支",
+    "微信小群创建、拉人及朋友圈适配"
+  ]
+}
