@@ -1,0 +1,51 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "source_code_commit": "bf3428d",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev4_20261127/2026-11-25-real-270ac8a1b6",
+  "customer_case": "0151",
+  "trace_id": "trace_a14137eba7f1bc009e168c8f",
+  "message": {
+    "message_id": "customer:role-event:e9dbe2c9db565b2d018efea3ee69e2cbde8df217bc8225caa2178b8424f60200",
+    "sent_at": "2026-11-26T09:39:30+08:00",
+    "chat_sequence": 68,
+    "text": "老板 那桌人齐开的杭麻1块底还有位吗 我六点半到能打到十一点半 烟都行"
+  },
+  "confirmed_tool_history": {
+    "name": "search_current_games",
+    "call_id": "lookup_table",
+    "lookup_scope": "specific_table",
+    "match_count": 1,
+    "match_kind": "exact",
+    "game_id": "game_b828f129230d",
+    "status_during_lookup": "inviting",
+    "remaining_seats": 3,
+    "start_time_kind": "asap_when_full",
+    "planned_start_at": null,
+    "planned_end_at": null,
+    "agreed_duration_hours": null,
+    "operational_recruitment_expiry": "2026-11-26T13:37:00+08:00"
+  },
+  "source_of_approval": {
+    "call_id": "llm_call_fe5b914012e94eb0b86a6a8d368d1a10",
+    "terminal_attempt_id": "llm_attempt_e840cbe31b1a4eeabb6aa1260ac0e1d7",
+    "http_status": 200,
+    "body_complete": true,
+    "raw_response_sha256": "42cf0edbc7a598eb712f2f9d3d255b26c59fe29bf8eddcd42812e74b87760f4a",
+    "approved": true
+  },
+  "delivery": {
+    "chat_sequence": 69,
+    "message_id": "outbound:trace_a14137eba7f1bc009e168c8f:1",
+    "text": "那桌现在1个人，还差3个，人齐就开。你六点半到、打到十一点半这个时长没问题，不过这桌是人齐开，不保证会等你到六点半，也没有固定开局时间——你到时候来能不能正好赶上我得看当时凑没凑齐。要来的话尽早过来呗？",
+    "participation_written": false,
+    "runtime_status": "completed"
+  },
+  "analysis": "该桌真实的余位与人齐开表述正确。后半句坦诚未定开场，却没有消除前句对时长适配的肯定。工具只知顾客自己的时段和当前桌况，未查到同桌约定的时长或散场，模型审查仍批准了原句。桌后续因未凑齐过期，无成桌或占席证据。",
+  "change": "把本轮唯一查实桌的当前时长证据送入独立审查。发送前仅为有两个可辨钟点且明确肯定时长相容的句式复核同桌已约时长。证据未知时把原稿退回主模型，保留顾客时间、已知余位及可待确认的表述；条件句、询问和引语不由该窄规则拒绝。",
+  "offline_verification": {
+    "test": "tests/test_direct_main_reply_contract.py::test_live_0151_duration_fit_requires_same_table_agreement",
+    "controls": "SQLite和模拟通道真实查到唯一待组桌。审查放行或关闭时，旧句均不进入收发账本，实际仅送达时长未约的改写。已约18:30开、23:30结束的五小时桌保留同一肯定句。询问、条件、原时间承接和引语不被该规则拒绝。",
+    "live_replay": "pending",
+    "focused_tests_passed": 414
+  }
+}

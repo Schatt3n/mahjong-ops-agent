@@ -17,6 +17,7 @@ from mahjong_agent_runtime.customer_visible_contract import (
     compact_customer_visible_text,
     customer_visible_action_claim_violations,
     customer_visible_contract_snapshot,
+    customer_visible_duration_fit_violations,
     customer_visible_seat_claim_evidence,
     customer_visible_seat_claim_violations,
     customer_visible_text_contract_violations,
@@ -28,6 +29,18 @@ from mahjong_agent_runtime.models import AgentAction, UserMessage
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "verify_customer_visible_contract.py"
+
+
+@pytest.mark.parametrize("text", [
+    "你六点半到、打到十一点半，我知道了。这桌还没约多久。",
+    "你六点半到、打到十一点半这个时长没问题吗？",
+    "要是大家同意，你六点半到、打到十一点半这个时长没问题。",
+    "你六点半到、打到十一点半这个时长没问题的话，等桌上确认再说。",
+    "他说「你六点半到、打到十一点半这个时长没问题」，桌上还得核实。",
+])
+def test_duration_fit_boundary_preserves_acknowledgments_conditions_and_quotes(text):
+    """确定性检查只拦截直接肯定，按句保留讨论条件和顾客本人的时间。"""
+    assert customer_visible_duration_fit_violations(text, {"agreed_duration_hours": None}) == []
 
 
 @pytest.mark.parametrize("text", [

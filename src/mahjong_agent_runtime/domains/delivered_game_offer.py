@@ -7,6 +7,9 @@ from typing import Any
 
 from ..models import DEFAULT_TZ, AgentAction, ConversationRole, ConversationTaskContext, Game, GameStatus, UserMessage, now
 from ..stores import AgentStore
+from .model_context import has_agreed_game_duration
+from .stake_values import parse_number
+from .value_utils import first_present_value
 
 
 DELIVERED_GAME_OFFER = "delivered_game_offer"
@@ -99,6 +102,25 @@ def game_offer_for_review(
     if game is None or _offer_terms(observed) != _offer_terms(game.to_dict()):
         return None
     return {"game_id": game_id, "terms": _offer_terms(observed)}
+
+
+def table_duration_facts_for_private_reply(store: AgentStore, table_facts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """只给当前唯一查实的一桌提供约定时长，不把内部预计散场或招募失效算作约定。"""
+    if len(table_facts) != 1:
+        return None
+    table, = table_facts
+    try:
+        game = store.require_game(table["game_id"])
+    except ValueError:
+        return None
+    if game.status not in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY} or game.actual_started_at:
+        return None
+    agreed = has_agreed_game_duration(game.requirement)
+    duration = parse_number(first_present_value(game.requirement, "duration_hours", "duration")) if agreed else None
+    return {"game_id": game.game_id,
+            "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None, "agreed_duration_hours": duration,
+            "agreed_end_at": game.planned_end_at.isoformat() if agreed and game.planned_end_at else None}
+
 
 def delivered_offer_matches_game(offer: Any, *, game: Game, recipient_id: str) -> bool:
     """正式推荐才可作为本人接受提议的证据；调用方仍须核实送达与报名权限。"""

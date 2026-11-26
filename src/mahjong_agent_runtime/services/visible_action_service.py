@@ -9,11 +9,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..customer_visible_contract import (
-    CUSTOMER_EXECUTION_FAILURE_REPLY, customer_visible_seat_claim_violations, customer_visible_table_start_violations,
+    CUSTOMER_EXECUTION_FAILURE_REPLY, customer_visible_duration_fit_violations, customer_visible_seat_claim_violations,
+    customer_visible_table_start_violations,
 )
 
 from ..copywriting import action_with_customer_visible_rewrites
-from ..domains.delivered_game_offer import DELIVERED_GAME_OFFER, game_offer_for_review, seat_facts_for_private_reply
+from ..domains.delivered_game_offer import (
+    DELIVERED_GAME_OFFER, game_offer_for_review, seat_facts_for_private_reply, table_duration_facts_for_private_reply,
+)
 from ..hooks import HookManager
 from ..models import AgentAction, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult, TurnBudgets
@@ -260,6 +263,7 @@ class CustomerVisibleActionService:
         tool_evidence = list(context_payload.get("turn_tool_evidence") or context_payload.get("previous_tool_results") or [])
         offer = game_offer_for_review(self.store, message, action, tool_evidence)
         seat_facts = seat_facts_for_private_reply(self.store, message, tool_evidence)
+        table_duration = table_duration_facts_for_private_reply(self.store, seat_facts)
         review_item = {
             "item_id": "reply_to_user",
             "source": "reply_to_user",
@@ -270,6 +274,7 @@ class CustomerVisibleActionService:
             "action_evidence": external_action_evidence_from_tool_results(tool_evidence),
             **({"game_offer_candidate": offer} if offer else {}),
             **({"seat_claim_evidence": seat_facts} if seat_facts else {}),
+            **({"table_duration_fit_evidence": table_duration} if table_duration else {}),
         }
         stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
                                       tool_results=collected_results)
@@ -321,16 +326,21 @@ class CustomerVisibleActionService:
 
         # 审查可能关闭，也可能在另一个会话补位或开打后才返回。发送前复核与本轮查询绑定的局况。
         fresh_seat_facts = seat_facts_for_private_reply(self.store, message, tool_evidence)
+        fresh_duration = table_duration_facts_for_private_reply(self.store, fresh_seat_facts)
         seat_violations = customer_visible_seat_claim_violations(proposed_reply, fresh_seat_facts)
         start_violations = customer_visible_table_start_violations(proposed_reply, fresh_seat_facts)
-        if seat_violations or start_violations:
+        duration_violations = customer_visible_duration_fit_violations(proposed_reply, fresh_duration)
+        if violations := seat_violations + start_violations + duration_violations:
             rejection = ToolResult(name=CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME, called=True, allowed=True, result={
                 "approved": False, "review_scope": "reply_to_user",
-                "violations": [f"customer_visible_contract:{rule}" for rule in (*seat_violations, *start_violations)],
+                "violations": [f"customer_visible_contract:{rule}" for rule in violations],
                 "seat_claim_evidence": fresh_seat_facts,
+                **({"table_duration_fit_evidence": fresh_duration} if duration_violations else {}),
                 "instruction": (
                     ("按本轮真实核对的同桌余位重写回复，不能重复报名或用旧话术推断余位。" if seat_violations else "")
                     + ("这桌仍在凑人，还未实际开打。按当前局况重写，不把原定开场当成已开打。" if start_violations else "")
+                    + ("这桌没约好打多久。可以承接顾客说的到店和可打时间，但不能保证这些时间与本桌相容。"
+                       if duration_violations else "")
                 ),
             })
             self.trace_recorder.record(trace_id, "tool_result", rejection.to_dict())

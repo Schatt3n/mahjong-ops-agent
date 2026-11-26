@@ -48,6 +48,7 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
     "late_arrival_decision",
     "remaining_play_minutes",
     "seat_claim_evidence",
+    "table_duration_fit_evidence",
     "remaining_seats_display",
     "assigned_room",
     "table_availability_evidence",
@@ -447,6 +448,27 @@ def customer_visible_seat_claim_violations(text: str, facts: list[dict[str, obje
     """继续用同一权威核验拦截已证实错报；无确定结论则交给语义审查。"""
     evidence = customer_visible_seat_claim_evidence(text, facts)
     return ["seat_count.current_table_mismatch"] if evidence["status"] == "mismatch" else []
+
+
+_TABLE_DURATION_FIT_DECLARATION = re.compile(
+    r"(?:^|[。.!！?？\n])\s*你\s*"
+    r"(?P<arrival>[^,，、。;；!！?？\n]{1,20}?)\s*(?:到店|到)\s*[,，、]\s*(?:能|可以)?[打玩](?:到|至)\s*"
+    r"(?P<departure>[^,，、。;；!！?？\n]{1,20}?)\s*(?:这个|这段|这种)\s*(?:时长|时间安排)\s*"
+    r"(?:肯定|当然)?\s*(?:没问题|对得上|合适|可以)(?=\s*(?:[,，。;；!！]|$))"
+)
+
+
+def customer_visible_duration_fit_violations(text: str, facts: dict[str, object] | None) -> list[str]:
+    """未知时长只拦明确肯定的到店至离店搭配；复述、询问、条件句和引用交给语义审查。"""
+    if not facts or "agreed_duration_hours" not in facts or facts["agreed_duration_hours"] is not None:
+        return []
+    content = unicodedata.normalize("NFKC", text.strip())
+    if _SEAT_CLAIM_QUOTE_MARKS.intersection(content):
+        return []
+    for match in _TABLE_DURATION_FIT_DECLARATION.finditer(content):
+        if all(_SEAT_CLAIM_CLOCK.fullmatch(match[field].strip()) for field in ("arrival", "departure")):
+            return ["table_duration.unverified_fit"]
+    return []
 
 
 def customer_visible_table_start_violations(text: str, facts: list[dict[str, object]]) -> list[str]:

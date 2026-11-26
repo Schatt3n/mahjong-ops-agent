@@ -388,6 +388,79 @@ def test_actual_start_survives_search_transport_without_private_attendee_data():
                          "actual_started_at": actual, "requirement": {}}
 
 
+@pytest.mark.parametrize(("agreed", "review_enabled"), [(False, True), (False, False), (True, True)])
+def test_live_0151_duration_fit_requires_same_table_agreement(tmp_path, agreed, review_enabled):
+    """原句下时长不实被重写，已约相同时间及明确待定说法可以真实送达。"""
+    at = datetime.fromisoformat("2026-11-26T09:39:30+08:00")
+    at_table = "2026-11-26T18:30:00+08:00"
+    until = "2026-11-26T23:30:00+08:00"
+    inbound = "老板 那桌人齐开的杭麻1块底还有位吗 我六点半到能打到十一点半 烟都行"
+    wrong = ("那桌现在1个人，还差3个，人齐就开。你六点半到、打到十一点半这个时长没问题，"
+             "不过这桌是人齐开，不保证会等你到六点半，也没有固定开局时间——"
+             "你到时候来能不能正好赶上我得看当时凑没凑齐。要来的话尽早过来呗？")
+    corrected = "那桌现在一人还差三位，人齐就开。你六点半到、能打到十一点半，这桌还没约多久，到时也得看还有没有位。"
+    confirmed = "那桌现在一个，还差三位。你六点半到、打到十一点半这个时长没问题，已经约了五个钟头。"
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1, "start_time_kind": "asap_when_full"}
+    if agreed:
+        inbound = inbound.replace("人齐开的", "六点半开的")
+        terms.update(start_time_kind="scheduled", planned_start_at=at_table)
+    first = confirmed if agreed else wrong
+    delivered = confirmed if agreed else corrected
+    replies = [_reply(first, status="completed")]
+    if not agreed:
+        replies.append(_reply(corrected, status="completed"))
+    main = StaticAgentClient([_call("search_current_games", {"lookup_scope": "specific_table", "requirement": terms}), *replies])
+    reviewer = StaticAgentClient([json.dumps({
+        "approved": True, "needs_human": False, "violations": [], "reasoning_summary": "仍有空位",
+        "item_reviews": [{"item_id": "reply_to_user", "approved": True, "violations": [],
+                          "suggested_safe_text": text, "follow_up_commitments": []}],
+    }, ensure_ascii=False) for text in ([first] if agreed else [first, corrected])])
+    store = SQLiteAgentStore(tmp_path / "table-duration.sqlite3")
+    traces = InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=main, store=store, trace_recorder=traces,
+                           reply_self_review_enabled=review_enabled, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="duration-fit", identities={"host": "牌友", "guest": "顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    message = MessageEnvelope("archived-0151-duration", "guest", inbound, at, "private", AGENT_ID)
+    with using_clock(lambda: at):
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id("host"),
+            organizer_id="host", organizer_name="牌友", requirement=terms | ({"duration_hours": 5} if agreed else {}),
+            known_players=[], trace_id="seed")
+        result = channel.send(message)
+
+    history = traces.get_trace(result["trace_id"])
+    query, = [event.content["result"] for event in history if event.step == "tool_result"
+                and event.content.get("name") == "search_current_games"]
+    option, = query["matches"]
+    assert option["game"]["game_id"] == game.game_id and option["game"]["seat_summary"]["remaining_seats"] == 3
+    expected_evidence = {"game_id": game.game_id, "agreed_duration_hours": 5 if agreed else None,
+                         "agreed_end_at": until if agreed else None, "planned_start_at": at_table if agreed else None}
+    if review_enabled:
+        payload = json.loads(reviewer.calls[0]["messages"][-1]["content"])
+        review_item, = payload["review_items"]
+        assert review_item["table_duration_fit_evidence"] == expected_evidence
+    else:
+        assert not reviewer.calls
+    rule = "customer_visible_contract:table_duration.unverified_fit"
+    rejections = [event.content["result"] for event in history if event.step == "tool_result"
+                  and event.content.get("name") == "customer_visible_content_review"
+                  and rule in event.content.get("result", {}).get("violations", [])]
+    if agreed:
+        assert not rejections
+    else:
+        rejected, = rejections
+        assert rejected["table_duration_fit_evidence"] == expected_evidence
+        replanned = json.loads(main.calls[2]["messages"][-1]["content"])
+        feedback, = [item["result"] for item in replanned["turn_tool_evidence"]
+                     if rule in item.get("result", {}).get("violations", [])]
+        assert feedback["table_duration_fit_evidence"] == expected_evidence
+    receipt, = result["archive_outputs"]
+    assert receipt["text"] == delivered and receipt["source_message_id"] == message.message_id
+    assert [row["text"] for row in channel.events_for("guest")] == [inbound, delivered]
+    assert store.require_game(game.game_id).to_dict() == game.to_dict()
+    store._connection.close()
+
+
 def test_review_treats_only_candidate_search_and_customer_cutoff_as_read_only():
     """零候选是查询结果，顾客指定时刻本身不证明已开始联系或已安排跟进。"""
     _, context = main_context()
