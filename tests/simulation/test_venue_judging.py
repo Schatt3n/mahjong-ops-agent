@@ -312,6 +312,43 @@ def test_rolling_duration_subjects_link_confirmed_join_to_prior_delivered_terms(
         assert result["error"] == "duration review needs linked join and delivered proof"
 
 
+@pytest.mark.parametrize(("before", "previous", "inbound", "confirmation", "decision", "explanation"), [
+    ("这桌还有位吗？", "这桌还差三位，你要算一个吗？", "算我一个吧，七点半左右到。",
+     "好，位置给你留好了。", "pass", "本人无条件报名。"),
+    ("请问这桌打到几点？", "这桌打多久还没定。", "好，先给我留个位，我到时再问你打多久。",
+     "好，位置给你留好了。", "pass", "本人明确将时长询问留到以后。"),
+    ("请问这桌打到几点？", "这桌打多久还没定。", "我最多打三小时，合适才能留。",
+     "这桌打四小时，位置给你留好了。", "fail", "店家把默认四小时说成约定，条件也与三小时上限冲突。"),
+], ids=("unconditional", "deferred", "hard-limit"))
+def test_rolling_duration_distinguishes_a_condition_from_a_normal_confirmation(
+    before, previous, inbound, confirmation, decision, explanation,
+):
+    """源于滚动档 0102、0235 同一桌的两次实际留位，保留已送达文字和时长硬限制对照。"""
+    opening, join = _turn(1), _turn(2, cause="a1")
+    join["tool_results"].append({"name": "join_game", "called": True, "allowed": True,
+        "result": {"recorded_status": "confirmed", "game": {"game_id": "g1", "requirement": {
+            "planned_start_at": "2026-11-26T19:30:00+08:00", "planned_end_at": "2026-11-26T23:30:00+08:00",
+        }}}})
+    rows = [_chat("u1", text=before),
+            _chat("a1", reply_to="u1", text=previous), _chat("u2", text=inbound),
+            _chat("a2", reply_to="u2", text=confirmation)]
+    prepared = prepare_dialogue_review(customer_id="a", turns=[opening, join], records=rows)
+    alias = {key: label for label, key in prepared.aliases.items()}
+    client = _JudgeClient(role_evidence=(alias["u1"], alias["u2"]), agent_evidence=(alias["a2"],), extra_findings=({
+        "check": "duration_at_join", "verdict": decision, "reason": f"「{inbound}」「{confirmation}」{explanation}",
+        "evidence_ids": (alias["u2"], alias["a2"], alias["agent-trace-2"]),
+    },))
+    result = venue_judging.judge_prepared_dialogue(SemanticJudge(client), prepared, trace_id="duration-conditionality",
+                                                  rolling_check_ids=True)
+    assert (result["status"], result["verdict"]) == ("valid", decision)
+    assert result["findings"][-1]["evidence_ids"] == ("u2", "a2", "agent-trace-2")
+    prompt = client.messages[0]["content"]
+    assert "如果时长无关或明确延后，引用正常确认回复" in prompt
+    assert "没有重述旧的硬限制并不等于撤回" in prompt
+    assert "缺少该证据或报错时长不能判通过" in prompt
+    assert "planned_end_at 是计划排期" in prompt
+
+
 def test_wait_is_a_valid_role_action_and_transport_is_preserved():
     """顾客沉默等候可以被评估，供应商超时仍没有语义结论。"""
     wait = _turn(2, cause="a1")
