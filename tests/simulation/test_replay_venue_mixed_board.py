@@ -76,6 +76,7 @@ def test_numbered_board_inquiry_is_default_and_original_ambiguous_text_is_preser
     (True, True, "19:00", "pass", "passed"),
     (True, True, "19:00", "wrong_reference", "failed"),
     (True, False, "19:00", "pass", "passed"),
+    (True, False, "19:00", "unresolved_reference", "passed"),
     (True, False, "19:00", "missing_result", "failed"),
 ])
 def test_mixed_board_replay_keeps_durable_scope_and_semantic_evidence(tmp_path, ambiguous, named, start, semantic, expected):
@@ -87,7 +88,9 @@ def test_mixed_board_replay_keeps_durable_scope_and_semantic_evidence(tmp_path, 
                     "missing_result": _RED_CENTER_RESULT}.get(semantic)
     direct = "1号是川麻，还差三位。"
     clarify = "你问的是群里人齐开的1号川麻桌吗？"
-    if ambiguous:
+    if ambiguous and semantic == "unresolved_reference":
+        board_reply = "群里说的一缺，我没听明白你指哪桌。"
+    elif ambiguous:
         board_reply = "你说的一缺就是那桌川麻，还差三位。" if semantic == "wrong_reference" else clarify
     else:
         board_reply = clarify if semantic == "wrong_reference" else direct

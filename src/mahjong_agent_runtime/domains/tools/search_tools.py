@@ -51,6 +51,7 @@ def canonical_search_customers_arguments(arguments: dict[str, Any]) -> dict[str,
 def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
     """查询实际条件；仅用同请求者作用域的未过滤空池证明子范围也无可用局。"""
     requirement = normalize_current_game_query(dict(call.arguments.get("requirement") or {}))
+    lookup_scope = call.arguments.get("lookup_scope")
     limit = int(call.arguments.get("limit") or 8)
     ranked_games = store.search_current_games(
         requirement,
@@ -75,15 +76,18 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
         unfiltered_available_pool_empty = not requirement or not store.search_current_games(
             {}, limit=1, sender_id=sender_id, conversation_id=conversation_id,
         )
+    reference_evidence = (_named_table_seat_conflicts(requirement.get("needed_seats"), ranked_games)
+                          if lookup_scope == "specific_table" else None)
     return ToolResult(
         name=call.name,
         called=True,
         allowed=True,
         result={
             "requirement": requirement,
-            **({"lookup_scope": call.arguments["lookup_scope"]} if "lookup_scope" in call.arguments else {}),
+            **({"lookup_scope": lookup_scope} if "lookup_scope" in call.arguments else {}),
             "matches": matches,
             "alternatives": alternatives,
+            **({"table_reference_evidence": reference_evidence} if reference_evidence else {}),
             **({"selection_truncated": True} if selection_truncated else {}),
             **({"nearby_options": [_public_current_game_option(item) for item in nearby]} if nearby is not None else {}),
             "customer_reply_contract": current_game_search_reply_contract(
@@ -92,6 +96,19 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
             ),
         },
     )
+
+
+def _named_table_seat_conflicts(requested: Any, options: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """标明查桌用的缺位线索与实际余位冲突，保留候选供顾客确认。"""
+    if type(requested) is not int or requested < 1:
+        return None
+    conflicts = []
+    for option in options:
+        game = option["game"]
+        remaining = (game.get("seat_summary") or {}).get("remaining_seats")
+        if type(remaining) is int and remaining != requested:
+            conflicts.append({"game_id": game["game_id"], "remaining_seats": remaining})
+    return {"requested_remaining_seats": requested, "conflicting_candidates": conflicts} if conflicts else None
 
 
 def _public_current_game_option(option: dict[str, Any]) -> dict[str, Any]:

@@ -6,7 +6,12 @@ from copy import deepcopy
 
 import pytest
 
-from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolCall, ToolGateway
+from mahjong_agent_runtime import (
+    AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage,
+)
+from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
+from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
+from mahjong_agent_runtime.services import ToolExecutionService
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -43,6 +48,56 @@ def _query(store, requirement):
     assert {key: game.to_dict() for key, game in store.games.items()} == games_before
     assert not store.invite_drafts and not store.outbound_message_drafts and not store.scheduled_tasks
     return result.result
+
+
+@pytest.mark.parametrize("seat_hint", [1, 3, None], ids=["conflict", "same-seats", "unknown-seats"])
+def test_table_seat_reference_conflict_is_scoped_to_named_lookup_and_reply_review(capacity_store, seat_hint):
+    """实际候选缺三人不能证明顾客指的缺一桌，同轮另查仍返回自己的检索结果。"""
+    game = _seed_open_game(capacity_store, "board-row", 3)
+    reference = "刚才群里那桌" if seat_hint is None else f"刚才群里差{seat_hint}人那桌"
+    message = UserMessage("request-chat", "requester", "客户", f"{reference}是国标吗？另有国标能打吗？")
+    requirement = {"game_type": "national_standard_mahjong"}
+    if seat_hint is not None:
+        requirement["needed_seats"] = seat_hint
+    service = ToolExecutionService(capacity_store, ToolGateway(capacity_store), InMemoryTraceRecorder())
+    action = AgentAction(goal="分别查原桌和其他可打的桌", objective_status="needs_tool", reasoning_summary="", tool_calls=[
+        ToolCall("search_current_games", {"requirement": requirement, "lookup_scope": scope}, call_id=scope, depends_on=[])
+        for scope in ("specific_table", "personal")
+    ])
+    results = service.execute_tool_calls(action, message=message, trace_id="table-reference",
+        previous_step_tool_results=[], step_index=1, run_id="table-reference",
+        run_version=capacity_store.conversation_version(message.conversation_id)).tool_results
+    named, personal = results
+    for result in results:
+        assert result.called and result.allowed and result.error is None
+        (match,) = result.result["matches"]
+        assert match["game"]["game_id"] == game.game_id
+        assert match["game"]["seat_summary"]["remaining_seats"] == 3
+    assert named.result["requirement"].get("needed_seats") == seat_hint
+    conflict = {"requested_remaining_seats": 1,
+                "conflicting_candidates": [{"game_id": game.game_id, "remaining_seats": 3}]}
+    if seat_hint == 1:
+        assert named.result["table_reference_evidence"] == conflict
+        assert compact_tool_payload(named.result)["table_reference_evidence"] == conflict
+    else:
+        assert "table_reference_evidence" not in named.result
+        assert "table_reference_evidence" not in compact_tool_payload(named.result)
+    assert "table_reference_evidence" not in personal.result
+    assert "table_reference_evidence" not in compact_tool_payload(personal.result)
+
+    reply = "你指的是群里哪一桌？另有国标，还缺三人。"
+    action = AgentAction(goal="核对原桌并告知另查结果", objective_status="waiting_user", reasoning_summary="",
+                         reply_to_user=reply)
+    payload = build_reply_self_review_payload(message=message, action=action, review_scope="reply_to_user",
+        context_payload={"turn_tool_evidence": [result.to_dict() for result in results]},
+        review_items=[{"item_id": "reply_to_user", "recipient_id": message.sender_id, "text": reply}])
+    evidence = payload["semantic_fidelity_contract"]["game_availability_evidence"]
+    assert evidence["searches_by_scope"] == {
+        "specific_table": {"status": "completed", "matched_count": 1, "call_id": "specific_table",
+                           **({"table_reference_evidence": conflict} if seat_hint == 1 else {})},
+        "personal": {"status": "completed", "matched_count": 1, "call_id": "personal"},
+    }
+    assert evidence["latest_search"] == {"status": "completed", "matched_count": 1}
 
 
 @pytest.mark.parametrize("requirement", [

@@ -63,8 +63,9 @@ def game_query_strategy_contract() -> dict[str, Any]:
             "定位条件使用 role=current 的事实断言，以 scope.call_id 只绑定这一条查局调用。"
             "当前用于比较的个人可接受档、希望的烟况、最早到店或最晚离店属于 role=condition，用于解释差异，不当作定位过滤。"
             "原桌人齐开或开场未定时，尤其不要拿顾客个人钟点构造固定开场或查询区间；查到空位也不能保证到店时仍有位或能等。"
-            "顾客还明确要看别的桌时，用不同 call_id 的两次查局：原桌 lookup_scope=specific_table，另查 lookup_scope=personal。"
+            "顾客还明确要看别的桌时，另查用 lookup_scope=personal。若亦有足够线索检索原桌，另用不同 call_id 的 specific_table 查局。"
             "每次只带该目的的条件。原桌线索含糊时，可查当前桌况找可辨认选项，再条件式确认是哪桌；不把猜测的桌号、玩法或缺口写成定位事实。"
+            "若 table_reference_evidence 标明当前候选余位与查桌所用线索冲突，按实际线索试探所指，或直接说目前辨不出哪桌；没有其他可靠锚点时不能直接认桌。"
             "另查的空结果不回答原桌是否存在，原桌有位也不证明另查条件已满足。定位目标桌并不授权更改桌况或占席。"
         ),
         "opening_time_range": (

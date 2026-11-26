@@ -691,6 +691,8 @@ def _review_search_outcome(query: dict[str, Any]) -> dict[str, Any]:
         and isinstance(option.get("game"), dict)
     ]
     return {"status": "completed", "matched_count": len(matches),
+            **({"table_reference_evidence": result["table_reference_evidence"]}
+               if result.get("lookup_scope") == "specific_table" and result.get("table_reference_evidence") else {}),
             **({"options_requiring_timing_confirmation": timing_options} if timing_options else {})}
 
 
@@ -869,6 +871,10 @@ def build_reply_self_review_payload(
             ],
             "rules": [
                 "待审文本不得反转存在/不存在、成功/失败、已确认/未确认、已发送/未发送等事实极性",
+                *(("game_availability_evidence.searches_by_scope.specific_table.table_reference_evidence 显示查桌用的缺位线索与候选余位冲突。"
+                   "没有已核实的同桌引用或其他充分线索时，当前回信不能直接把冲突候选认成顾客所指。"
+                   "即使候选玩法和档位全部属实，也要就所指作条件式说明或追问，同时答复已经查明的其他问题；无条件认桌以 semantic_contradiction 拒绝。",)
+                  if game_availability_evidence.get("searches_by_scope", {}).get("specific_table", {}).get("table_reference_evidence") else ()),
                 "结论强度不能超过证据：局池查询只证明已提交条件下的登记局况；空条件查询且客户需求未知时，不支持有无适合该客户的局，也不支持候选人有无的断言。主 Agent 原稿也可能过度推断，不能因改写忠于原稿就放行",
                 "找局策略遵守 game_query_strategy_contract，结合原话、上下文和真实工具证据判断是否合理，不以固定追问或唯一语义路径拒绝；未知个人适配仍不得伪造。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
                 "empty_personal_matching_default 是主 Agent 的服务规划策略。审查空结果正文时核对真实查询范围和事实。仅未附加服务提议不构成 semantic_fact_loss。用户明确要求的答复、待决事项或实际已获委托仍按各自证据和完成要求审查。",
