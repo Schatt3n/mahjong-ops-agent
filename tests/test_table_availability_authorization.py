@@ -261,6 +261,55 @@ def test_mixed_named_and_personal_reads_keep_separate_verified_conditions_and_re
         assert set(store.games) == {original.game_id} and store.require_game(original.game_id).to_dict() == before
 
 
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("verified_cap", [None, 16])
+def test_verified_single_stake_allows_exact_search_without_widening_or_changing_cap(store_kind, verified_cap, tmp_path):
+    """固定底注和同点区间都能正式查局，区间扩大和封顶偏离仍在执行前被拒。"""
+    at = SENT.replace(hour=18)
+    store = InMemoryAgentStore() if store_kind == "memory" else SQLiteAgentStore(tmp_path / "single-stake.sqlite3")
+    cap_text = "，封顶16" if verified_cap is not None else ""
+    message = _incoming(f"晚上七点半开，有杭麻1块底的现成桌吗{cap_text}？", sent=at)
+    opening = "2026-11-26T19:30:00+08:00"
+    single_stake = {"min": 1, "max": 1}
+    verified = _decision(clock_role="opening", opening_window={"start_at": opening, "end_at": opening},
+                         has_fixed_opening_authority=True, accepted_stake_range=single_stake,
+                         known_cap_score=verified_cap)
+    client, trace = ReviewClient([verified]), InMemoryTraceRecorder()
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                                   table_availability_client=client)
+    cap_terms = {"cap_score": verified_cap} if verified_cap is not None else {}
+    table_terms = {"game_type": "hangzhou_mahjong", "planned_start_at": opening}
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        game, _ = store.create_game(conversation_id="one-stake-host", organizer_id="host", organizer_name="桌主",
+            known_players=[{"customer_id": "host"}], trace_id="one-stake-host",
+            requirement=table_terms | {"stake": "1"} | cap_terms)
+        initial_game = game.to_dict()
+
+        def search(terms, step):
+            action = AgentAction(goal="查同一底注的现成桌", objective_status="needs_tool", reasoning_summary="核实牌桌",
+                                 tool_calls=[ToolCall("search_current_games", {"requirement": table_terms | terms})])
+            return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+                previous_step_tool_results=[], step_index=step, run_id="single-stake-run",
+                run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+        broader = search({"stake_range": {"min": 1, "max": 2}} | cap_terms, 1)
+        changed_cap = search({"stake": "1", "cap_score": 24}, 2)
+        for rejected in (broader, changed_cap):
+            assert not rejected.called and not rejected.allowed
+            assert rejected.result["validation_error"]["code"] == "verified_table_availability_conflict"
+            evidence = rejected.result["table_availability_evidence"]
+            assert evidence["accepted_stake_range"] == single_stake and evidence["known_cap_score"] == verified_cap
+        for step, terms in ((3, {"stake": "1"}), (4, {"stake_range": single_stake})):
+            result = search(terms | cap_terms, step)
+            assert result.called and result.allowed and result.error is None
+            assert [row["game"]["game_id"] for row in result.result["matches"]] == [game.game_id]
+        assert len(client.calls) == 1
+        assert set(store.games) == {game.game_id} and store.require_game(game.game_id).to_dict() == initial_game
+        assert not store.room_reservations
+
+
 def test_verified_personal_departure_is_required_on_executed_read_instead_of_invented_hours():
     """通过正常工具服务核实当前无后缀钟点，保留绝对结束界限并拒绝用统一小时上限替代。"""
     at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")

@@ -109,7 +109,9 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     except (TypeError, ValueError, OverflowError):
         return "拟提交的查局或建局条件无效。"
     stakes = evidence.get("accepted_stake_range")
-    if stakes and (proposed.get("stake_range") != stakes or parse_number(proposed.get("cap_score")) != evidence.get("known_cap_score")):
+    if stakes and not _stake_representations_equivalent(
+        proposed, {"stake_range": stakes, "cap_score": evidence.get("known_cap_score")},
+    ):
         return "请使用核实过的可接受档位区间。封顶是另一件事，不能由区间端点推断。"
     duration_cap = evidence.get("max_duration_hours")
     proposed_cap = parse_number(proposed.get("max_duration_hours"))

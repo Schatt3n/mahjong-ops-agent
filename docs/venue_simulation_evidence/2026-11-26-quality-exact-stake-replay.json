@@ -1,0 +1,146 @@
+{
+  "run": "exact-stake-replay-sw6_vfhx",
+  "source": "2026-11-25-real-4d951e2082",
+  "source_is_frozen_simulated_role": true,
+  "status": "passed",
+  "input_sha256": "cb3934d90616f1c4cbf53dce51ab64a9c43cccc7c944986c8fa172bb173c6f42",
+  "checks": {
+    "one_original_simulated_input": true,
+    "independent_explicit_organize_authority": true,
+    "read_executed_at_verified_one_yuan": true,
+    "no_false_equivalent_stake_rejection": true,
+    "one_persisted_own_new_game": true,
+    "no_room_or_waiting_write": true,
+    "formal_private_reply": true
+  },
+  "tool_outcomes": {
+    "successful_queries": 1,
+    "created": 1
+  },
+  "store_game_statuses": [
+    "forming"
+  ],
+  "runtime_status": "completed",
+  "model_execution": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 7200,
+    "max_concurrency": 1,
+    "retry_attempts": 2,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "none",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 120.0
+  },
+  "write_authorization": {
+    "decisions": {
+      "authorized": 1
+    },
+    "authorized_scopes": {
+      "organize": 1,
+      "participate": 1
+    },
+    "blocked_writes": 0,
+    "blocked_by_tool": {},
+    "blocked_by_reason": {},
+    "audit_errors": 0
+  },
+  "prompt_sha256": {
+    "planner_sha256": "85846369400234df0cf4216074a4d604bdab9722650b648d132d90da2a6c2d29",
+    "reply_review_sha256": "1d345ff22b3e00381023ac3d75a79ac694219f583f6b4bcb728eb1305531cc54"
+  },
+  "judge": {
+    "status": "valid",
+    "verdict": "pass"
+  },
+  "verified_stake_range": {
+    "max": 1.0,
+    "min": 1.0
+  },
+  "verified_cap_score": null,
+  "executed_stake_arguments": [
+    {
+      "tool": "search_current_games",
+      "stake": 1
+    },
+    {
+      "tool": "create_game",
+      "stake": "1"
+    }
+  ],
+  "usage": {
+    "sources": [
+      "events.jsonl",
+      "write_authorization.jsonl",
+      "report.json",
+      "agent_trace.log"
+    ],
+    "unreadable_records_by_source": {},
+    "total": {
+      "observed_attempts": 9,
+      "attempts_with_usage": 8,
+      "missing_usage_attempts": 1,
+      "input_tokens": 194802,
+      "output_tokens": 4617,
+      "cache_hit_input_tokens": 120960,
+      "cache_miss_input_tokens": 73842,
+      "unknown_cache_input_tokens": 0
+    },
+    "stages": {
+      "creation_authorization": {
+        "observed_attempts": 1,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 0,
+        "input_tokens": 1124,
+        "output_tokens": 18,
+        "cache_hit_input_tokens": 0,
+        "cache_miss_input_tokens": 1124,
+        "unknown_cache_input_tokens": 0
+      },
+      "other_runtime": {
+        "observed_attempts": 2,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 1,
+        "input_tokens": 1519,
+        "output_tokens": 161,
+        "cache_hit_input_tokens": 1408,
+        "cache_miss_input_tokens": 111,
+        "unknown_cache_input_tokens": 0
+      },
+      "reply_review": {
+        "observed_attempts": 1,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 0,
+        "input_tokens": 26667,
+        "output_tokens": 657,
+        "cache_hit_input_tokens": 0,
+        "cache_miss_input_tokens": 26667,
+        "unknown_cache_input_tokens": 0
+      },
+      "shop": {
+        "observed_attempts": 4,
+        "attempts_with_usage": 4,
+        "missing_usage_attempts": 0,
+        "input_tokens": 163912,
+        "output_tokens": 3724,
+        "cache_hit_input_tokens": 118016,
+        "cache_miss_input_tokens": 45896,
+        "unknown_cache_input_tokens": 0
+      },
+      "write_guard": {
+        "observed_attempts": 1,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 0,
+        "input_tokens": 1580,
+        "output_tokens": 57,
+        "cache_hit_input_tokens": 1536,
+        "cache_miss_input_tokens": 44,
+        "unknown_cache_input_tokens": 0
+      }
+    },
+    "deduplicated_attempt_records": 0,
+    "unidentified_attempt_records": 0,
+    "conflicting_usage_attempts": 0
+  }
+}
