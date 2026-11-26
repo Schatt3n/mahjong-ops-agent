@@ -195,3 +195,105 @@ def test_table_rounds_deliver_a_revised_proposal_after_shop_inquiry(tmp_path, di
     assert VenueTableOpening(group).current()["accepted_count"] == 4
     assert shop_ids[-1] == f"table-opening-confirm|{revised}"
     assert not channel.events_for(_BYSTANDER)
+
+
+def test_confirmed_replacement_resumes_the_same_table_with_four_new_votes(tmp_path):
+    """旧版已有三票才换人，重开账本后新阵容重谈且四人各自重新确认。"""
+    fresh_availability = "我七点半以后有空，大家呢？"
+    replacements = (_PLAYERS - {_DECLINER}) | {_BYSTANDER}
+    class _ReplacementActor(_InquiryActor):
+        def _choose(self, context, projected, event, rng):
+            delivery = projected["delivery"] or {}
+            identifier = delivery.get("message_id", "")
+            if identifier == "previous-roster-inflight":
+                return ActorAction("send", "我按原话回一下。", "group", delivery["recipient_id"], identifier)
+            action = super()._choose(context, projected, event, rng)
+            if action.action != "send":
+                return action
+            if identifier.startswith(f"table-opening-offer|{_FIRST.isoformat()}|") and context.persona.sender_id == _DECLINER:
+                return ActorAction("wait")
+            if identifier.startswith("table-opening-inquiry:") and "|table-roster:" in identifier:
+                if context.persona.sender_id != _BYSTANDER:
+                    return ActorAction("wait")
+                return ActorAction("send", fresh_availability, "group", delivery["recipient_id"], identifier)
+            return action
+
+    class _ReplacementClient(_AttestedShopClient):
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            payload = json.loads(messages[-1]["content"])
+            if payload["current"]["text"] == fresh_availability:
+                assert payload["current"]["sender_id"] == _BYSTANDER and payload["active_proposal"] is None
+                assert len(payload["history"]) == 2
+                return json.dumps({"vote": "other", "proposed_start": _SECOND.isoformat()})
+            return super().complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+
+    shop = VenueTableShop(_ReplacementClient(), tmp_path / "table_shop.jsonl")
+    interrupted = False
+    replaced = False
+
+    def replace_after_three_votes(group, reply, at):
+        nonlocal interrupted, replaced
+        if reply is None and group.roster_revision(at=at) and not interrupted:
+            interrupted = True
+            raise RuntimeError("interrupt after durable roster reconciliation")
+        message = shop(group, reply, at)
+        active = VenueTableOpening(group).current()
+        if not replaced and active and not active["committed"] and active["accepted_count"] == 3:
+            replaced = True
+            old_message = group.send(MessageEnvelope("previous-roster-inflight", AGENT_ID, "等会儿我再确认一下。",
+                                                      at, "group", group.room_id)).message
+            scenario.journal.enqueue(actor_id=_HOST, kind="table_receipt", origin_id=old_message.message_id,
+                due_at=at + timedelta(seconds=5), caused_by=old_message.message_id,
+                details={"table_room_id": group.room_id, "table_shop_delivery": True, "table_roster_revision": None,
+                         "depth": 3})
+            group.store.record_candidate_reply(game_id=group.game_id, customer_id=_DECLINER, display_name=_DECLINER,
+                                               status="declined", trace_id="fourth-seat-withdrawn")
+            group.store.join_game(game_id=group.game_id, customer_id=_BYSTANDER, display_name=_BYSTANDER,
+                                  trace_id="named-replacement-confirmed")
+            assert VenueTableOpening(group).current() is None
+        return message
+
+    scenario, initial = _rolling_fixture(tmp_path, actor=_ReplacementActor(seed=42), shop=replace_after_three_votes,
+                                        dialogue_turns=2)
+    with pytest.raises(RuntimeError, match="interrupt after durable roster reconciliation"):
+        scenario.run()
+    assert replaced and interrupted
+    archive = SQLiteAgentStore(scenario.channel.runtime.store.path)
+    runtime, _ = build_runtime(archive, "mock")
+    scenario.channel = SandboxChannel(runtime, room_id="rolling-opening-public", archive_path=tmp_path / "chat.sqlite3",
+                                      identities={person.sender_id: person.name for person in _PEOPLE})
+    room_id = VenueTableGroup.room_id_for_game(initial.game_id)
+    group = scenario.channel.table_group(room_id)
+    assert group.member_ids() == replacements | {AGENT_ID}
+    old = group.delivered_receipts()
+    assert all(row.roster_revision is None for row in old)
+    assert all(group.received(_BYSTANDER, row.message.message_id) is None for row in old)
+    assert any(group.received(_DECLINER, row.message.message_id) for row in old)
+    assert archive.require_game(initial.game_id).planned_start_at is None
+
+    report = scenario.run()
+    assert all(report["checks"].values())
+    (superseded,) = [row.result for row in scenario.journal.events() if row.origin_id == "previous-roster-inflight"]
+    assert superseded["runtime_status"] == "table_roster_superseded"
+    assert "message_id" not in superseded and superseded["superseded_message_id"]
+    assert report["rolling_roles"]["superseded_table_sends"] == 1
+    assert not any(row["text"] == "我按原话回一下。" for row in scenario.channel.events())
+    result = report["rolling_table_groups"]
+    assert result["opened"] == 1
+    roster, = result["roster_reconciliations"]
+    assert roster["admitted"] == [_BYSTANDER] and roster["removed"] == [_DECLINER]
+    assert set(roster["member_ids"]) == replacements | {AGENT_ID}
+    assert group.member_ids(at=_AT) == _PLAYERS | {AGENT_ID}
+    assert group.delivered_receipts()[:len(old)] == old
+    fresh = group.delivered_receipts()[len(old):]
+    assert all(row.roster_revision == roster["revision_id"] and _DECLINER not in row.recipient_ids for row in fresh)
+    offer, = [row for row in fresh if row.message.message_id.startswith("table-opening-offer|")]
+    assert set(offer.recipient_ids) == replacements
+    votes = [row for row in fresh if row.message.quoted_message_id == offer.message.message_id]
+    assert len(votes) == len(replacements) == 4 and {row.message.sender_id for row in votes} == replacements
+    assert all(row.message.text == _LATE_YES for row in votes)
+    assert VenueTableOpening(group).current()["accepted_count"] == 4
+    committed = archive.require_game(initial.game_id)
+    assert committed.planned_start_at == _SECOND and committed.seat_summary()["claimed_seats"] == 4
+    assert sum(row.reason == "venue_table_opening_confirmed" for row in archive.transitions) == 1
+    assert scenario.run()["rolling_table_groups"] == result

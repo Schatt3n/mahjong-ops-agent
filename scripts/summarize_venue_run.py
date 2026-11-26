@@ -50,7 +50,10 @@ def summary(report: dict) -> dict:
     if peers := report.get("rolling_peers"):
         evidence["rolling_peers"] = peers
     if table_groups := report.get("rolling_table_groups"):
-        evidence["rolling_table_groups"] = table_groups
+        evidence["rolling_table_groups"] = {key: value for key, value in table_groups.items()
+                                             if key != "roster_reconciliations"}
+        if reconciliations := table_groups.get("roster_reconciliations"):
+            evidence["rolling_table_groups"]["roster_reconciliation_count"] = len(reconciliations)
     if recovery := report.get("role_transport_recovery"):
         evidence["role_transport_recovery"] = recovery
     if profile_sources := report.get("role_seed_profiles"):

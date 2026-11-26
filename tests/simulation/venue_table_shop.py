@@ -34,22 +34,31 @@ class VenueTableShop:
         if len(seat_ids) != 4 or group.member_ids(at=at) != {AGENT_ID, *seat_ids}:
             return None
         opening = VenueTableOpening(group)
-        records = tuple(row for row in group.delivered_receipts() if row.message.sent_at <= at)
+        revision_id = group.roster_revision(at=at)
+        if reply_to is not None and reply_to.roster_revision != revision_id:
+            return None
+        records = tuple(row for row in group.delivered_receipts()
+                        if row.message.sent_at <= at and row.roster_revision == revision_id)
         proposed = [row for row in records if row.message.sender_id == AGENT_ID
                     and row.message.message_id.startswith(_PROPOSAL_PREFIX)]
         for receipt in proposed:
             start = datetime.fromisoformat(receipt.message.message_id.split("|", 2)[1])
             opening.record_proposal(receipt, start_at=start)
         active = opening.current()
+        positions = {row.message.message_id: index for index, row in enumerate(records)}
+        if active and active["proposal_id"] not in positions:
+            active = None
         if active and active["committed"]:
             return self._confirmation(group, at, active, records)
         if game.planned_start_at is not None or game.requirement.get("start_time_kind") != START_KIND_ASAP_WHEN_FULL:
             return None
         if reply_to is None:
-            return self._message(group, f"table-opening-inquiry:{group.game_id}", at,
+            message_id = f"table-opening-inquiry:{group.game_id}"
+            if revision_id is not None:
+                message_id = f"{message_id}|{revision_id}"
+            return self._message(group, message_id, at,
                                  "人齐了，大家各自几点能到？咱们在这儿定个开场。")
 
-        positions = {row.message.message_id: index for index, row in enumerate(records)}
         source = reply_to.message
         observed = active if (active and positions[active["proposal_id"]] < positions[source.message_id]
                               and source.quoted_message_id in {None, active["proposal_id"]}) else None

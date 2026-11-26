@@ -39,9 +39,11 @@ _BOARD_WAKE = "board_publication"
 _LATE_ARRIVAL_DELIVERY_WAKE = "late_arrival_delivery"
 _TABLE_GROUP_OPEN_WAKE = "table_group_open"
 _TABLE_ROSTER_WAKE = "table_roster_ready"
+_TABLE_RECONCILE_WAKE = "table_roster_reconcile"
 _TABLE_SHOP_WAKE = "table_shop_receipt"
 _MIN_TABLE_DIALOGUE_TURNS = 4
-_TABLE_CONTROLS = {_TABLE_GROUP_OPEN_WAKE, _TABLE_ROSTER_WAKE, _TABLE_SHOP_WAKE}
+_TABLE_FIRST_CONTACTS = {_TABLE_GROUP_OPEN_WAKE, _TABLE_ROSTER_WAKE, _TABLE_RECONCILE_WAKE}
+_TABLE_CONTROLS = {*_TABLE_FIRST_CONTACTS, _TABLE_SHOP_WAKE}
 _CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND, _LATE_ARRIVAL_DELIVERY_WAKE, *_TABLE_CONTROLS}
 
 
@@ -195,6 +197,7 @@ class VenueRollingRoles:
                 report["rolling_play"] = self.play.report()
             if self.table_groups:
                 pauses = sum(bool((item.result or {}).get("table_roster_paused")) for item in journal)
+                reconciled = [item.result["table_roster"] for item in journal if item.result.get("table_roster")]
                 report["rolling_table_groups"] = {
                     "opened": sum(item.kind == _TABLE_GROUP_OPEN_WAKE and item.result.get("opened", False)
                                   for item in journal),
@@ -206,6 +209,8 @@ class VenueRollingRoles:
                 report["checks"]["table_group_roster_no_paused_deliveries"] = not pauses
                 if pauses:
                     report["rolling_table_groups"]["roster_pauses"] = pauses
+                if reconciled:
+                    report["rolling_table_groups"]["roster_reconciliations"] = reconciled
             return report
 
     @staticmethod
@@ -298,7 +303,7 @@ class VenueRollingRoles:
         self.journal.finish(event, {"delivered_ids": [row["message_id"] for row in receipts], "scheduled_wakes": wakes})
 
     def _schedule_table_openings(self) -> None:
-        """四席已满后建群，同行补全身份后再唤醒既有群的店家。"""
+        """四席已满后建群，实名补位或同行绑定时在原群继续。"""
         clock = self.journal.clock() or self.start_at
         cutoff = (self.start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
         store = self.channel.runtime.store
@@ -309,6 +314,8 @@ class VenueRollingRoles:
             group = self.channel.table_group(VenueTableGroup.room_id_for_game(game.game_id))
             if group is None:
                 kind, origin = _TABLE_GROUP_OPEN_WAKE, f"{game.game_id}:{game.updated_at.isoformat()}"
+            elif revision_id := group.pending_roster_revision(at=at):
+                kind, origin = _TABLE_RECONCILE_WAKE, revision_id
             else:
                 if (self.table_shop is None or game.planned_start_at is not None
                         or game.seat_summary()["anonymous_seat_count"] or len(group.member_ids(at=at)) != 5):
@@ -330,7 +337,7 @@ class VenueRollingRoles:
         """实际建群或收件后运行店家处理器，先落盘其原始回复再送达。"""
         at = event.due_at.astimezone(self.start_at.tzinfo)
         opening = event.kind == _TABLE_GROUP_OPEN_WAKE
-        first_contact = opening or event.kind == _TABLE_ROSTER_WAKE
+        first_contact = event.kind in _TABLE_FIRST_CONTACTS
         game_id = event.details["game_id"]
         room_id = VenueTableGroup.room_id_for_game(game_id)
         group = self.channel.table_group(room_id)
@@ -346,10 +353,18 @@ class VenueRollingRoles:
         source = None if first_contact else group.received(AGENT_ID, event.caused_by)
         if not first_contact and source is None:
             raise RuntimeError("桌群店家事件缺少实际收到的消息")
+        roster = None
         with using_clock(lambda: at):
             try:
+                if event.kind == _TABLE_RECONCILE_WAKE:
+                    roster = group.reconcile_roster(event.origin_id, at=at)
+                group.require_current_delivery_roster(at=at)
+                if source is not None and source.roster_revision != group.roster_revision(at=at):
+                    if event.decision is None:
+                        event = self.journal.save_decision(event, {"message": None})
+                    self.journal.finish(event, {"opened": False, "handled": False, "table_roster_superseded": True})
+                    return
                 if event.decision is None:
-                    group.require_current_delivery_roster(at=at)
                     message = self.table_shop(group, source, at) if self.table_shop is not None else None
                     if message is not None and (message.sender_id, message.recipient_id, message.kind, message.sent_at) != (
                         AGENT_ID, room_id, "group", at,
@@ -370,17 +385,20 @@ class VenueRollingRoles:
                 self.journal.finish(event, {"opened": opening, "handled": False, "table_roster_paused": True,
                                             "game_id": game_id, "error": str(exc)})
                 return
-        self.journal.finish(event, {"opened": opening, "handled": not first_contact,
-                                    "message_id": message.message_id if message else None, "scheduled_wakes": wakes})
+        result = {"opened": opening, "handled": not first_contact,
+                  "message_id": message.message_id if message else None, "scheduled_wakes": wakes}
+        if roster is not None:
+            result["table_roster"] = {**asdict(roster), "at": roster.at.isoformat(), "game_id": game_id}
+        self.journal.finish(event, result)
 
     def _day_key(self, actor_id: str, at: datetime) -> tuple:
         """收件预算和天气状态都按本人及门店时区的营业日计算。"""
         return actor_id, at.astimezone(self.start_at.tzinfo).date()
 
     def _receipt_budget(self, actor_id: str, at: datetime, kind: str, room_id: str | None,
-                        *, from_shop: bool = False) -> tuple:
+                        *, from_shop: bool = False, revision_id: str | None = None) -> tuple:
         """每个小群分别给同桌来话和店家来话留额度，避免同桌表态挤掉新版提议。"""
-        table_bucket = (room_id, from_shop) if kind == _TABLE_RECEIPT_WAKE else None
+        table_bucket = (room_id, from_shop, revision_id) if kind == _TABLE_RECEIPT_WAKE else None
         return self._day_key(actor_id, at), kind, table_bucket
 
     def _seed_timers(self) -> None:
@@ -451,8 +469,9 @@ class VenueRollingRoles:
                     from_shop = receipt is not None and receipt.message.sender_id == AGENT_ID
                 self._receipt_counts[self._receipt_budget(
                     event.actor_id, event.due_at, event.kind, room_id, from_shop=bool(from_shop),
+                    revision_id=event.details.get("table_roster_revision"),
                 )] += 1
-            elif event.kind in {_TABLE_GROUP_OPEN_WAKE, _TABLE_ROSTER_WAKE}:
+            elif event.kind in _TABLE_FIRST_CONTACTS:
                 self._table_openings.add(event.origin_id)
 
     def _remember_private_world(self, event: RoleEvent) -> None:
@@ -504,7 +523,7 @@ class VenueRollingRoles:
         else:
             world_change = self._private_world.get(self._day_key(event.actor_id, at))
             private = dict(world_change) if world_change is not None else self.world.role_event(person, "session_open", at)["details"]
-        private.update({key: value for key, value in event.details.items() if key != "depth"})
+        private.update({key: value for key, value in event.details.items() if key not in {"depth", "table_roster_revision"}})
         overtime = event.kind == _OVERTIME_WAKE
         busy_until = (datetime.fromisoformat(event.details["work_busy_until"]) if overtime
                       else self._overtime_until.get(event.actor_id))
@@ -601,6 +620,12 @@ class VenueRollingRoles:
             row["inflight_deliveries_at_start"] = self._inflight_deliveries
         try:
             with using_clock(lambda: at):
+                if (kind == "group" and recipient == event.details.get("table_room_id")
+                        and (group := self.channel.table_group(recipient)) is not None):
+                    group.require_current_delivery_roster(at=at)
+                    if event.details.get("table_roster_revision") != group.roster_revision(at=at):
+                        row["superseded_message_id"] = row.pop("message_id")
+                        return dict(row, runtime_status="table_roster_superseded"), []
                 response = self.channel.send(message)
         except StaleTableGroupRoster as exc:
             return dict(row, error_type="table_roster_paused", error=str(exc), failure_stage="delivery",
@@ -693,6 +718,7 @@ class VenueRollingRoles:
         for item in sorted(messages, key=lambda entry: entry["kind"] != "private"):
             message_id = item["message_id"]
             table_room = item["recipient_id"] if self.table_groups and item.get("table_game_id") else None
+            revision_id = item.get("table_roster_revision")
             if table_room and self.table_shop is not None and item["sender_id"] != AGENT_ID and AGENT_ID in item["visible_to"]:
                 shop = self.journal.enqueue(actor_id=AGENT_ID, kind=_TABLE_SHOP_WAKE, origin_id=message_id,
                     due_at=parent.due_at, caused_by=message_id, details={"game_id": item["table_game_id"], "depth": depth})
@@ -715,13 +741,14 @@ class VenueRollingRoles:
                     scheduled.append(saved)
                     continue
                 from_shop = item["sender_id"] == AGENT_ID
-                budget = self._receipt_budget(actor_id, due, kind, table_room, from_shop=from_shop)
+                budget = self._receipt_budget(actor_id, due, kind, table_room, from_shop=from_shop,
+                                              revision_id=revision_id)
                 if (actor_id not in self.actors or actor_id == item["sender_id"]
                         or self._receipt_counts[budget] >= turns - 1):
                     continue
                 details = {"depth": depth}
                 if table_room:
-                    details.update(table_room_id=table_room, table_shop_delivery=from_shop)
+                    details.update(table_room_id=table_room, table_shop_delivery=from_shop, table_roster_revision=revision_id)
                 wake = self.journal.enqueue(actor_id=actor_id, kind=kind, origin_id=message_id,
                     due_at=due, caused_by=message_id, details=details)
                 self._receipts[key] = wake.event_id
@@ -739,6 +766,7 @@ class VenueRollingRoles:
         decided = Counter((row["decision"].get("action") or {}).get("action", "invalid") for row in rows)
         sent = [row for row in rows if row.get("channel_trace_id")
                 and chat.get(row.get("message_id"), {}).get("trace_id") == row["channel_trace_id"]]
+        superseded = sum(row.get("runtime_status") == "table_roster_superseded" for row in rows)
         venue_sends = [row for row in sent if chat[row["message_id"]].get("direction") != "peer"]
         cross_channel: Counter = Counter()
         for row in venue_sends:
@@ -801,7 +829,7 @@ class VenueRollingRoles:
             "role_events_all_finished": bool(events) and len(events) == len(rows),
             "role_message_sources_were_visible_at_decision": bool(rows) and all(row["visible_cause_verified"] for row in rows),
             "role_context_matches_visible_channel_history": mismatched_visibility == 0,
-            "role_sends_match_delivered_channel_rows": len(sent) == decided["send"] and all(
+            "role_sends_match_delivered_channel_rows": len(sent) + superseded == decided["send"] and all(
                 chat[row["message_id"]]["text"] == row["decision"]["action"]["text"]
                 and chat[row["message_id"]]["sender_id"] == row["actor_id"]
                 and chat[row["message_id"]]["recipient_id"] == row["decision"]["action"].get("recipient_id", AGENT_ID)
@@ -872,6 +900,7 @@ class VenueRollingRoles:
                 "real_decision_actors_with_two_calendar_days": sum(len(day_set) >= 2 for day_set in live_days.values()),
                 "wake_kinds": dict(kinds), "actions": dict(decided),
                 "sent_channels": dict(Counter(row["channel"] for row in venue_sends)),
+                **({"superseded_table_sends": superseded} if superseded else {}),
                 "cross_channel_replies": {"group_to_private": cross_channel["group_to_private"],
                                           "private_to_group": cross_channel["private_to_group"]},
                 "causally_woken_actors": len({item.actor_id for item in events if item.kind in _RECEIPT_WAKES}),

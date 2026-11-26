@@ -67,7 +67,8 @@ class VenueTableOpening:
             game = self.store.require_game(self.game_id)
             seats = active_game_participant_ids(game)
             if (not self._unsettled(game, stamp) or len(seats) != game.seats_total
-                    or set(receipt.recipient_ids) != seats):
+                    or set(receipt.recipient_ids) != seats
+                    or receipt.roster_revision != self.group.roster_revision(at=stamp)):
                 raise ValueError("table opening proposal requires delivery to all four current identified seats")
             latest = self._latest()
             if latest is not None and stamp < datetime.fromisoformat(latest["proposed_at"]):
@@ -90,6 +91,7 @@ class VenueTableOpening:
         order = {row.message.message_id: index for index, row in enumerate(self.group.delivered_receipts())}
         if (offered is None or offered.message.sender_id != AGENT_ID or offered.message.sent_at > message.sent_at
                 or order[proposal_id] >= order[message.message_id]
+                or offered.roster_revision != receipt.roster_revision
                 or message.quoted_message_id not in {None, proposal_id}):
             raise ValueError("table opening vote is missing its visible proposal")
         with self.store._write_transaction():
@@ -112,6 +114,9 @@ class VenueTableOpening:
         with self.store._lock:
             proposal = self._latest()
             if proposal is None:
+                return None
+            game = self.store.require_game(self.game_id)
+            if not proposal["committed"] and self._seat_revision(game) != proposal["seat_revision"]:
                 return None
             votes = self._votes(proposal["proposal_id"]).values()
             return {"proposal_id": proposal["proposal_id"], "start_at": proposal["start_at"],

@@ -5,6 +5,7 @@ from collections.abc import Collection
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
@@ -31,6 +32,7 @@ class TableGroupReceipt:
     recipient_ids: tuple[str, ...]
     sequence: int = 0
     source_message_id: str | None = None
+    roster_revision: str | None = None
 
     def history_row(self) -> dict:
         """使用现有角色上下文的群消息形状，保留送达时而非最新的受众。"""
@@ -58,6 +60,17 @@ class CompanionInvitation:
     invited_at: datetime
     response_at: datetime | None = None
     accepted: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TableGroupRosterReceipt:
+    """名册更新的实际回执，记录席位来源和进退群时间。"""
+
+    revision_id: str
+    at: datetime
+    admitted: tuple[str, ...]
+    removed: tuple[str, ...]
+    member_ids: tuple[str, ...]
 
 
 class VenueTableGroup:
@@ -118,6 +131,11 @@ class VenueTableGroup:
                     game_id TEXT NOT NULL, actor_id TEXT NOT NULL, joined_at TEXT NOT NULL,
                     PRIMARY KEY (game_id, actor_id)
                 );
+                CREATE TABLE IF NOT EXISTS table_group_rosters (
+                    seq INTEGER PRIMARY KEY, game_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+                    applied_at TEXT NOT NULL, previous_json TEXT NOT NULL, members_json TEXT NOT NULL,
+                    UNIQUE (game_id, revision_id)
+                );
                 CREATE TABLE IF NOT EXISTS table_group_invites (
                     game_id TEXT NOT NULL, invitation_id TEXT NOT NULL, inviter_id TEXT NOT NULL,
                     recipient_id TEXT NOT NULL, invited_at TEXT NOT NULL, response_at TEXT, accepted INTEGER,
@@ -126,13 +144,16 @@ class VenueTableGroup:
                 CREATE TABLE IF NOT EXISTS table_group_messages (
                     seq INTEGER PRIMARY KEY, game_id TEXT NOT NULL, message_id TEXT NOT NULL, sender_id TEXT NOT NULL,
                     text TEXT NOT NULL, sent_at TEXT NOT NULL, quoted_message_id TEXT, recipients_json TEXT NOT NULL,
-                    source_message_id TEXT,
+                    source_message_id TEXT, roster_revision TEXT,
                     UNIQUE (game_id, message_id)
                 );
             """)
         with self._database(write=True) as db:
-            if "source_message_id" not in {row["name"] for row in db.execute("PRAGMA table_info(table_group_messages)")}:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(table_group_messages)")}
+            if "source_message_id" not in columns:
                 db.execute("ALTER TABLE table_group_messages ADD COLUMN source_message_id TEXT")
+            if "roster_revision" not in columns:
+                db.execute("ALTER TABLE table_group_messages ADD COLUMN roster_revision TEXT")
 
     def _open(self, opened_at: str) -> None:
         """新建时从权威牌局读取具名和匿名席，重开时复用首次创建及准入结果。"""
@@ -161,8 +182,40 @@ class VenueTableGroup:
         """按指定虚拟时刻读取小群成员，业务席位仍以 Game 为准。"""
         stamp = _stamp(at) if at is not None else None
         with self._database() as db:
-            return frozenset(actor for actor, joined_at in self._members(db).items()
-                             if stamp is None or joined_at <= stamp)
+            return frozenset(self._members(db, stamp))
+
+    def roster_revision(self, *, at: datetime) -> str | None:
+        """返回给定时刻已生效的具名席位准入版本。"""
+        with self._database() as db:
+            row = self._latest_roster(db, _stamp(at))
+            return row["revision_id"] if row else None
+
+    def pending_roster_revision(self, *, at: datetime) -> str | None:
+        """只有已经确认且可定位到模拟角色的四席，才可触发名册对齐。"""
+        with self._database() as db:
+            pending = self._pending_roster(db, _stamp(at))
+            return pending[0] if pending else None
+
+    def reconcile_roster(self, revision_id: str, *, at: datetime) -> TableGroupRosterReceipt:
+        """按正式盘面重对齐现有桌群，原子保存退群及经具名席位准入的回执。"""
+        stamp = _stamp(at)
+        with self._database(write=True) as db:
+            existing = db.execute("SELECT * FROM table_group_rosters WHERE game_id = ? AND revision_id = ?",
+                                  (self.game_id, revision_id)).fetchone()
+            if existing is not None:
+                if existing["applied_at"] != stamp:
+                    raise ValueError("table roster receipt retry changed its time")
+                return _roster_receipt(existing)
+            pending = self._pending_roster(db, stamp)
+            if pending is None or pending[0] != revision_id:
+                raise StaleTableGroupRoster("table roster revision no longer matches the confirmed seats")
+            _, previous, current = pending
+            cursor = db.execute("""
+                INSERT INTO table_group_rosters (game_id, revision_id, applied_at, previous_json, members_json)
+                VALUES (?, ?, ?, ?, ?)
+            """, (self.game_id, revision_id, stamp, json.dumps(previous), json.dumps(current)))
+            return _roster_receipt(db.execute("SELECT * FROM table_group_rosters WHERE seq = ?",
+                                              (cursor.lastrowid,)).fetchone())
 
     def require_current_delivery_roster(self, *, at: datetime) -> None:
         """店家控制先检查当前送达名册，旧回执仍按实际历史受众读取。"""
@@ -183,8 +236,8 @@ class VenueTableGroup:
                 ):
                     raise ValueError("companion invitation ID conflicts with its first delivery")
                 return _invitation(previous)
-            members = self._members(db)
-            if inviter_id not in members or sent_at < members[inviter_id] or recipient_id in members:
+            members = self._members(db, sent_at)
+            if inviter_id not in members or recipient_id in members:
                 raise ValueError("invalid table group invitation membership")
             capacity = self._companion_capacity(inviter_id, at)
             pending = db.execute("""
@@ -229,7 +282,7 @@ class VenueTableGroup:
                 used = db.execute("""
                     SELECT COUNT(*) FROM table_group_invites WHERE game_id = ? AND inviter_id = ? AND accepted = 1
                 """, (self.game_id, invite["inviter_id"])).fetchone()[0]
-                members = self._members(db)
+                members = self._members(db, response_at)
                 if used >= capacity or actor_id in members or len(members) >= _TABLE_SIZE + 1:
                     raise ValueError("companion no longer has a valid anonymous place in this room")
                 db.execute("INSERT INTO table_group_members VALUES (?, ?, ?)", (self.game_id, actor_id, response_at))
@@ -256,25 +309,29 @@ class VenueTableGroup:
                     raise ValueError("table message ID conflicts with its first delivery")
                 return self._receipt(existing)
             members = self._delivery_members(db, sent_at)
+            roster = self._latest_roster(db, sent_at)
+            revision_id = roster["revision_id"] if roster else None
             if message.sender_id not in members:
                 raise ValueError("table group sender is not admitted")
             if message.quoted_message_id:
                 original = self._visible_rows(db, message.sender_id, message_id=message.quoted_message_id).fetchone()
-                if original is None or original["sent_at"] > sent_at:
+                if original is None or original["sent_at"] > sent_at or original["roster_revision"] != revision_id:
                     raise ValueError("table group quote is not visible to the sender")
             if source_message_id is not None:
                 source = self._visible_rows(db, message.sender_id, message_id=source_message_id).fetchone()
                 if not (message.sender_id == AGENT_ID and source is not None
-                        and source["sender_id"] != message.sender_id and source["sent_at"] <= sent_at):
+                        and source["sender_id"] != message.sender_id and source["sent_at"] <= sent_at
+                        and source["roster_revision"] == revision_id):
                     raise ValueError("table group reply requires an actual received message")
             recipients = tuple(sorted(members - {message.sender_id}))
             cursor = db.execute("""
                 INSERT INTO table_group_messages
-                    (game_id, message_id, sender_id, text, sent_at, quoted_message_id, source_message_id, recipients_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (self.game_id, message.message_id, *payload, json.dumps(recipients)))
+                    (game_id, message_id, sender_id, text, sent_at, quoted_message_id, source_message_id, recipients_json,
+                     roster_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (self.game_id, message.message_id, *payload, json.dumps(recipients), revision_id))
             return TableGroupReceipt(replace(message, sent_at=datetime.fromisoformat(sent_at)),
-                                     self.conversation_id, recipients, cursor.lastrowid, source_message_id)
+                                     self.conversation_id, recipients, cursor.lastrowid, source_message_id, revision_id)
 
     def delivered_receipts(self) -> tuple[TableGroupReceipt, ...]:
         """供可信调度器恢复收件唤醒，按账本提交顺序返回首次投递范围。"""
@@ -292,6 +349,7 @@ class VenueTableGroup:
         message = receipt.message
         return {**receipt.history_row(), "sequence": receipt.sequence, "room_id": self.room_id,
                 "table_game_id": self.game_id, "trace_id": f"table:{self.game_id}:{message.message_id}",
+                "table_roster_revision": receipt.roster_revision,
                 "direction": "outbound" if message.sender_id == AGENT_ID else "inbound"}
 
     def received(self, actor_id: str, message_id: str) -> TableGroupReceipt | None:
@@ -308,13 +366,46 @@ class VenueTableGroup:
                 receipt = replace(receipt, source_message_id=None)
             return receipt
 
-    def _members(self, db) -> dict[str, str]:
+    def _latest_roster(self, db, at: str | None):
+        return db.execute("""
+            SELECT * FROM table_group_rosters WHERE game_id = ? AND (? IS NULL OR applied_at <= ?)
+            ORDER BY applied_at DESC, seq DESC LIMIT 1
+        """, (self.game_id, at, at)).fetchone()
+
+    def _members(self, db, at: str | None) -> dict[str, str]:
+        roster = self._latest_roster(db, at)
+        members = json.loads(roster["members_json"]) if roster else {}
         rows = db.execute("SELECT actor_id, joined_at FROM table_group_members WHERE game_id = ?", (self.game_id,))
-        return {row["actor_id"]: row["joined_at"] for row in rows}
+        members.update((row["actor_id"], row["joined_at"]) for row in rows
+                       if (at is None or row["joined_at"] <= at)
+                       and (roster is None or row["joined_at"] > roster["applied_at"]))
+        return members
+
+    def _pending_roster(self, db, stamp: str) -> tuple[str, dict[str, str], dict[str, str]] | None:
+        game = self.store.require_game(self.game_id)
+        try:
+            claims = _confirmed_claims(game, at=datetime.fromisoformat(stamp))
+        except ValueError:
+            return None
+        named = {actor for row in claims for actor in (row["contact_id"], *row["known_member_ids"])}
+        if (any(row["anonymous_seat_count"] for row in claims) or len(named) != _TABLE_SIZE
+                or not named <= self._actors):
+            return None
+        current = named | {AGENT_ID}
+        previous = self._members(db, stamp)
+        if current == set(previous):
+            return None
+        roster = self._latest_roster(db, None)
+        if roster is not None and roster["applied_at"] > stamp:
+            return None
+        # 同一虚拟时刻可能来回换人，以前一份已生效的回执串联不同版本。
+        signature = [self.game_id, _stamp(game.updated_at), sorted(current), roster["revision_id"] if roster else None]
+        revision_id = "table-roster:" + sha256(json.dumps(signature).encode()).hexdigest()
+        return revision_id, previous, {actor: previous.get(actor, stamp) for actor in sorted(current)}
 
     def _delivery_members(self, db, sent_at: str) -> set[str]:
         """当前业务席位改变时暂停新发言，不据新名册推算过去的收件人。"""
-        members = {actor for actor, joined_at in self._members(db).items() if joined_at <= sent_at}
+        members = set(self._members(db, sent_at))
         game = self.store.require_game(self.game_id)
         claims = game.seat_claims()
         expected = {AGENT_ID, *(actor for row in claims for actor in (row["contact_id"], *row["known_member_ids"]))}
@@ -366,7 +457,7 @@ class VenueTableGroup:
         message = MessageEnvelope(row["message_id"], row["sender_id"], row["text"],
                                   datetime.fromisoformat(row["sent_at"]), "group", self.room_id, row["quoted_message_id"])
         return TableGroupReceipt(message, self.conversation_id, tuple(json.loads(row["recipients_json"])),
-                                 row["seq"], row["source_message_id"])
+                                 row["seq"], row["source_message_id"], row["roster_revision"])
 
 
 def _confirmed_claims(game: Game, *, at: datetime) -> list[dict]:
@@ -390,3 +481,10 @@ def _invitation(row) -> CompanionInvitation:
         datetime.fromisoformat(row["response_at"]) if row["response_at"] else None,
         bool(row["accepted"]) if row["accepted"] is not None else None,
     )
+
+
+def _roster_receipt(row) -> TableGroupRosterReceipt:
+    previous, members = set(json.loads(row["previous_json"])), set(json.loads(row["members_json"]))
+    return TableGroupRosterReceipt(row["revision_id"], datetime.fromisoformat(row["applied_at"]),
+                                   tuple(sorted(members - previous)), tuple(sorted(previous - members)),
+                                   tuple(sorted(members)))

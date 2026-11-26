@@ -151,7 +151,7 @@ def test_rolling_table_group_uses_one_shop_ingress_and_exact_recipients(tmp_path
 
 
 def test_rolling_pauses_shop_and_actor_without_rewriting_a_delivered_table_message(tmp_path, monkeypatch):
-    """收件后业务名册换人时不再发话，店家不执行过时收件的处理。"""
+    """有人退席且尚无正式补位时暂停发言，原来确实收到的回执保持可见。"""
     class _FollowupActor(_TableActor):
         """已退出的一位尝试接住退出前确实收过的最后一条消息。"""
 
@@ -173,8 +173,6 @@ def test_rolling_pauses_shop_and_actor_without_rewriting_a_delivered_table_messa
             with using_clock(lambda: parent.due_at):
                 store.record_candidate_reply(game_id=game.game_id, customer_id=_D, display_name=_D,
                                              status="declined", trace_id="old-seat-withdrawn")
-                store.join_game(game_id=game.game_id, customer_id=_BYSTANDER, display_name=_BYSTANDER,
-                                trace_id="new-seat-confirmed")
         return original(parent, receipts)
 
     monkeypatch.setattr(scenario, "_wake_from_deliveries", change_after_receipt)

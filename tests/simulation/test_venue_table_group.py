@@ -204,6 +204,7 @@ def test_changed_business_roster_pauses_new_delivery_but_keeps_actual_history(tm
     with using_clock(lambda: _OPENED + timedelta(minutes=2)):
         store.record_candidate_reply(game_id=game.game_id, customer_id=_D, display_name=_D,
                                      status="declined", trace_id="old-seat-withdrawn")
+    assert table.pending_roster_revision(at=_OPENED + timedelta(minutes=2)) is None
     with using_clock(lambda: _OPENED + timedelta(minutes=3)):
         replaced, _ = store.join_game(game_id=game.game_id, customer_id=_COMPANION, display_name=_COMPANION,
                                       trace_id="new-seat-confirmed")
@@ -216,3 +217,20 @@ def test_changed_business_roster_pauses_new_delivery_but_keeps_actual_history(tm
         reopened.send(_message(reopened, _HOST, "new-after-replacement", 4))
     assert reopened.delivered_receipts() == (original,)
     assert reopened.received(_D, "new-after-replacement") is None
+
+    at = _OPENED + timedelta(minutes=4)
+    revision_id = reopened.pending_roster_revision(at=at)
+    assert revision_id
+    with pytest.raises(StaleTableGroupRoster, match="no longer matches"):
+        reopened.reconcile_roster("unverified-roster", at=at)
+    roster = reopened.reconcile_roster(revision_id, at=at)
+    assert roster.admitted == (_COMPANION,) and roster.removed == (_D,)
+    assert reopened.reconcile_roster(revision_id, at=at) == roster
+    with pytest.raises(ValueError, match="sender is not admitted"):
+        reopened.send(_message(reopened, _D, "already-departed", 4))
+    with pytest.raises(ValueError, match="quote is not visible"):
+        reopened.send(_message(reopened, _HOST, "quote-across-rosters", 4, quote=previous.message_id))
+    fresh = reopened.send(_message(reopened, _HOST, "fresh-visible-message", 4))
+    assert fresh.roster_revision == revision_id
+    assert reopened.received(_COMPANION, fresh.message.message_id) == fresh
+    assert reopened.received(_D, fresh.message.message_id) is None
