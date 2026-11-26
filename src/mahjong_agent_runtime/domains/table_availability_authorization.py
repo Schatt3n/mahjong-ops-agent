@@ -190,7 +190,7 @@ def _verified_opening_daypart_bounds(
 
 def _opening_window_from_dayparts(
     bounds: list[tuple[datetime, datetime]], window: tuple[datetime, datetime] | None, *,
-    local_at: datetime, clock_at: datetime, clock_role: str, clock_resolution: str,
+    local_at: datetime, clock_at: datetime, clock_role: str, clock_resolution: str, clock_qualifier: str | None,
 ) -> tuple[datetime, datetime] | None:
     """合并相邻时段并保留适用的精确区间，避免跨过空档或把到店上界误作开场下界。"""
     if any(previous_end != next_start for (_, previous_end), (next_start, _) in zip(bounds, bounds[1:])):
@@ -206,9 +206,15 @@ def _opening_window_from_dayparts(
         clock_is_usable = clock_resolution in {"explicit_daypart", "explicit_day_or_24h"} or (
             clock_resolution == "nearest_non_past_same_day" and band_start <= clock_at <= band_end
         )
-        if (clock_role in {"arrival_not_before", "arrival_estimate"}
-                and clock_at.date() == band_start.date() and clock_is_usable):
-            start = max(start, clock_at)
+        if clock_at.date() == band_start.date() and clock_is_usable:
+            if clock_role in {"arrival_not_before", "arrival_estimate"}:
+                start = max(start, clock_at)
+            elif clock_role == "opening":
+                # 只有独立核实为开场的钟点才能缩窄这个时段。保留原话中可验证的单侧边界。
+                if clock_qualifier in {"之后", "以后", "后"}:
+                    start = max(start, clock_at)
+                elif clock_qualifier in {"之前", "以前", "前"}:
+                    end = min(end, clock_at)
     return (start, end) if start <= end else None
 
 
@@ -311,7 +317,8 @@ def _parse_decision(
     if dayparts is not None and has_personal_search:
         bounds = _verified_opening_daypart_bounds(dayparts, customer_rows, source_dates, local_at=local_at)
         window = _opening_window_from_dayparts(bounds, window, local_at=local_at, clock_at=clock_at,
-                                              clock_role=clock_role, clock_resolution=selected["resolution"])
+                                              clock_role=clock_role, clock_resolution=selected["resolution"],
+                                              clock_qualifier=selected.get("qualifier"))
     elif dayparts is not None:
         decision["opening_dayparts"] = None
     fixed = decision["has_fixed_opening_authority"]

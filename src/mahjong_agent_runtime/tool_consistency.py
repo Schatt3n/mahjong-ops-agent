@@ -156,10 +156,11 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
                 or (limit and query_window[1] != limit[1])
                 or (not limit and (query_window[1] <= earliest
                                    or query_window[1].astimezone(earliest.tzinfo).date() != earliest.date()))):
+            expected_window = (f"本次已核实的查询范围为 start_at={earliest.isoformat()}，end_at={limit[1].isoformat()}。"
+                               if limit else f"本次直接匹配起点为 {earliest.isoformat()}，结束用同日查询时间。")
             return (
                 "请使用核实过的可开打时段查现成桌。到店时刻、离店时刻和等回复的时刻都不是固定开场。"
-                + (f"本次直接匹配起点为 {earliest.isoformat()}；没有另定上界时用同日查询结束时间。"
-                   if arrival_floor else "")
+                + expected_window
             )
         if arrival_floor and evidence.get("clock_role") == "arrival_not_before" and call.arguments.get("include_nearby") is not False:
             return "顾客给了最早到店的硬界限，请用 include_nearby=false 避免将无法赶上的早场作为备选。"

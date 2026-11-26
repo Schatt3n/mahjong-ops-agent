@@ -262,6 +262,65 @@ def test_mixed_named_and_personal_reads_keep_separate_verified_conditions_and_re
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("qualifier,start,end,expected_match", [
+    ("以后", "19:00:00", "23:59:59.999999", "late"),
+    ("以前", "18:35:00", "19:00:00", "early"),
+])
+def test_mixed_lookup_keeps_qualified_opening_bound_when_verifier_returns_only_daypart(
+    store_kind, qualifier, start, end, expected_match, tmp_path,
+):
+    """原桌能独立查到，另查必须保留明确的开场边界，无窗口的模型判定也不能放宽。"""
+    at = SENT.replace(hour=18, minute=35)
+    store = InMemoryAgentStore() if store_kind == "memory" else SQLiteAgentStore(tmp_path / "mixed-daypart.sqlite3")
+    message = _incoming(f"现在凑人的那桌是川麻？另外晚上七点{qualifier}开的1元红中有没有？", sent=at)
+    dayparts = {"date": "2026-11-26", "parts": ["evening"], "source_ref": 1}
+    decision = _decision(lookup_scope="specific_table", also_requests_personal_options=True,
+                         clock_role="opening", opening_window=None, opening_dayparts=dayparts,
+                         accepted_stake_range={"min": 1, "max": 1})
+    client, trace = ReviewClient([decision]), InMemoryTraceRecorder()
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                                   table_availability_client=client)
+    verified_window = {"start_at": f"2026-11-26T{start}+08:00", "end_at": f"2026-11-26T{end}+08:00"}
+    widened_window = {"start_at": at.isoformat(), "end_at": "2026-11-26T23:59:59.999999+08:00"}
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        games = {}
+        for host, game_type, opening in (("board", "sichuan_mahjong", {"start_time_kind": "asap_when_full"}),
+                                         ("early", "red_center_mahjong", {"planned_start_at": "2026-11-26T18:50:00+08:00"}),
+                                         ("late", "red_center_mahjong", {"planned_start_at": "2026-11-26T19:10:00+08:00"})):
+            games[host], _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name="桌主",
+                requirement={"game_type": game_type, "stake": "1", **opening},
+                known_players=[{"customer_id": host}], trace_id=host)
+        initial_states = {game.game_id: game.to_dict() for game in games.values()}
+
+        def query(scope, terms, step):
+            action = AgentAction(goal="分别核对原桌和另查", objective_status="needs_tool", reasoning_summary="分开查询",
+                tool_calls=[ToolCall("search_current_games", {"requirement": terms, "lookup_scope": scope,
+                                                             "include_nearby": False})])
+            return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+                previous_step_tool_results=[], step_index=step, run_id="mixed-daypart-run",
+                run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+        personal = {"game_type": "red_center_mahjong", "stake": "1"}
+        rejected = query("personal", {**personal, "start_time_range": widened_window}, 1)
+        assert not rejected.called and not rejected.allowed
+        assert rejected.result["validation_error"]["code"] == "verified_table_availability_conflict"
+        assert rejected.result["table_availability_evidence"]["opening_window"] == verified_window
+        assert all(boundary in rejected.error for boundary in verified_window.values())
+        named = query("specific_table", {"game_type": "sichuan_mahjong"}, 2)
+        filtered = query("personal", {**personal, "start_time_range": verified_window}, 3)
+        for actual, expected in ((named, "board"), (filtered, expected_match)):
+            assert actual.called and actual.allowed and actual.error is None
+            assert [row["game"]["game_id"] for row in actual.result["matches"]] == [games[expected].game_id]
+        assert "start_time_range" not in named.result["requirement"]
+        assert filtered.result["requirement"]["start_time_range"] == verified_window
+        assert len(client.calls) == 1
+        assert {game_id: store.require_game(game_id).to_dict() for game_id in store.games} == initial_states
+        assert not store.room_reservations
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
 @pytest.mark.parametrize("verified_cap", [None, 16])
 def test_verified_single_stake_allows_exact_search_without_widening_or_changing_cap(store_kind, verified_cap, tmp_path):
     """固定底注和同点区间都能正式查局，区间扩大和封顶偏离仍在执行前被拒。"""

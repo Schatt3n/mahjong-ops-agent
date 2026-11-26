@@ -1,0 +1,131 @@
+{
+  "run": "replay-49cdaf2eaf",
+  "base": "741b03f",
+  "kind": "synthetic_mixed_board_seq87_sibling",
+  "status": "failed",
+  "model_execution": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 7200,
+    "max_concurrency": 1,
+    "retry_attempts": 2,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "none",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 120.0
+  },
+  "reply_self_review": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 16384,
+    "max_concurrency": 1,
+    "retry_attempts": 3,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "low",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 75.0
+  },
+  "checks": {
+    "board_delivered": true,
+    "private_reply_delivered": true,
+    "only_original_customer_received_the_reply": true,
+    "same_table_found_without_personal_window": true,
+    "separate_red_center_evening_search_found_no_match": true,
+    "queries_have_separate_scoped_call_ids": true,
+    "no_successful_write_tools": true,
+    "game_room_waiting_and_invite_state_unchanged": true
+  },
+  "hard_checks_passed": true,
+  "semantic_judgment": {
+    "status": "valid",
+    "verdict": "fail",
+    "citations_valid": true,
+    "findings": {
+      "原桌答复与正式看板及同桌查询事实一致": "pass",
+      "单独回答七点后的一元红中查询且与实际空结果一致": "pass",
+      "用具体看板特征或追问澄清一缺指代，不直接把歧义绑定到当前桌": "fail"
+    }
+  },
+  "fixture_source": {
+    "kind": "synthetic_sibling",
+    "reference_run": "2026-11-25-real-34fa8e9813",
+    "reference_inbound_sequence": 87
+  },
+  "verified_clock": {
+    "clock_role": "other",
+    "opening_dayparts": null,
+    "opening_window": null,
+    "lookup_scope": "specific_table",
+    "also_requests_personal_options": true
+  },
+  "executed_scoped_queries": [
+    {
+      "lookup_scope": "specific_table",
+      "game_type": null,
+      "start_time_range": null
+    },
+    {
+      "lookup_scope": "personal",
+      "game_type": "red_center_mahjong",
+      "start_time_range": {
+        "end_at": "2026-11-26T23:59:59+08:00",
+        "start_at": "2026-11-26T19:00:00+08:00"
+      }
+    }
+  ],
+  "usage": {
+    "sources": [
+      "events.jsonl",
+      "report.json",
+      "agent_trace.log"
+    ],
+    "unreadable_records_by_source": {},
+    "total": {
+      "observed_attempts": 6,
+      "attempts_with_usage": 6,
+      "missing_usage_attempts": 0,
+      "input_tokens": 162701,
+      "output_tokens": 3701,
+      "cache_hit_input_tokens": 71552,
+      "cache_miss_input_tokens": 91149,
+      "unknown_cache_input_tokens": 0
+    },
+    "stages": {
+      "other_runtime": {
+        "observed_attempts": 1,
+        "attempts_with_usage": 1,
+        "missing_usage_attempts": 0,
+        "input_tokens": 1518,
+        "output_tokens": 109,
+        "cache_hit_input_tokens": 1408,
+        "cache_miss_input_tokens": 110,
+        "unknown_cache_input_tokens": 0
+      },
+      "reply_review": {
+        "observed_attempts": 2,
+        "attempts_with_usage": 2,
+        "missing_usage_attempts": 0,
+        "input_tokens": 41685,
+        "output_tokens": 1420,
+        "cache_hit_input_tokens": 0,
+        "cache_miss_input_tokens": 41685,
+        "unknown_cache_input_tokens": 0
+      },
+      "shop": {
+        "observed_attempts": 3,
+        "attempts_with_usage": 3,
+        "missing_usage_attempts": 0,
+        "input_tokens": 119498,
+        "output_tokens": 2172,
+        "cache_hit_input_tokens": 70144,
+        "cache_miss_input_tokens": 49354,
+        "unknown_cache_input_tokens": 0
+      }
+    },
+    "deduplicated_attempt_records": 0,
+    "unidentified_attempt_records": 0,
+    "conflicting_usage_attempts": 0
+  }
+}
