@@ -643,6 +643,60 @@ def test_actor_may_communicate_a_rounded_estimate_consistent_with_new_world_even
     assert result.availability_reviews[0]["conflict"] is None
 
 
+@pytest.mark.parametrize("board_id", ["outbound:board:actual", "ordinary-group-message"])
+def test_recent_shop_confirmation_and_public_board_stay_in_the_same_actor_context(board_id):
+    """刚获组局回执后的公开发布可供识别新桌，不把时钟重算或每条群信当成新的委托。"""
+    person = generate_personas(43, count=1)[0]
+    history = (
+        {"message_id": "my-commission", "kind": "private", "sender_id": person.sender_id, "recipient_id": OWNER,
+         "sent_at": "2026-11-25T17:55:00+08:00", "text": "麻烦帮我组一桌吧，我六点四十一能到。"},
+        {"message_id": "my-shop-receipt", "kind": "private", "sender_id": OWNER, "recipient_id": person.sender_id,
+         "sent_at": "2026-11-25T17:56:00+08:00", "text": "给你记上了，还差三个人。"},
+        {"message_id": board_id, "kind": "group", "sender_id": OWNER, "recipient_id": ROOM,
+         "sent_at": "2026-11-25T17:58:00+08:00", "text": "当前缺人局：人齐开 杭麻 173"},
+    )
+    event = _event("delivered", can_arrive=True, earliest_arrival="2026-11-25T18:43:00+08:00",
+                   free_from="2026-11-25T17:00:00+08:00", free_until="2026-11-25T23:00:00+08:00") | {"caused_by": board_id}
+    captured = []
+    context = ActorContext(person, NOW, history=history, events=(event,), group_targets=(ROOM,))
+    result = ModelActor(_client('{"action":"wait"}', captured)).decide(context, trace_id="own-commission-board")
+    messages = captured[0]["messages"]
+    projected = json.loads(messages[1]["content"])
+    assert result.action.action == "wait" and projected["delivery"]["message_id"] == board_id
+    assert [row["message_id"] for row in projected["history"]] == [row["message_id"] for row in history]
+    assert projected["travel_update"]["previous_shop_message_id"] == "my-commission"
+    if board_id.startswith("outbound:board:"):
+        assert messages[0]["content"].startswith("刚收到的是群里看板更新")
+        assert projected["travel_update"]["earliest_possible_if_leaving_now"] == "2026-11-25T18:43:00+08:00"
+        assert "earliest_arrival" not in projected["events"][0]["details"]
+    else:
+        assert messages[0]["content"].startswith("你是麻将馆的一位模拟顾客")
+        assert projected["events"][0]["details"]["earliest_arrival"] == "2026-11-25T18:43:00+08:00"
+
+
+def test_availability_replan_keeps_infeasible_rounding_out_of_the_delivered_action():
+    """重现开场下界 12:06，拒绝向下取整的估计，独立核验回应模型重新选择的说法。"""
+    now = "2026-11-26T11:35:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("activity",
+        can_arrive=True, earliest_arrival="2026-11-26T12:06:00+08:00",
+        free_from="2026-11-26T11:00:00+08:00", free_until="2026-11-26T21:00:00+08:00"),))
+
+    def proposal(raw_text, clock):
+        action = json.dumps({"action": "send", "text": raw_text}, ensure_ascii=False)
+        claim = json.dumps({"claims": [{"local_date": "2026-11-26", "kind": "arrival", "quote": raw_text,
+            "local_at": f"2026-11-26T{clock}:00+08:00", "approximate": True}]}, ensure_ascii=False)
+        return action, claim
+
+    first = proposal("我最早十二点出头能到", "12:00")
+    corrected = proposal("我十二点十分左右才能到", "12:10")
+    captured = []
+    result = ModelActor(_client(first + corrected, captured)).decide(context, trace_id="archived-early-rounded-floor")
+    assert result.status == "valid" and result.action.text == "我十二点十分左右才能到"
+    assert result.prior_attempts[0]["raw"] == first[0] and "12:06" in result.prior_attempts[0]["error"]
+    assert [review["raw"] for review in result.availability_reviews] == [first[1], corrected[1]]
+    assert "别把下界向下取整" in captured[2]["messages"][-2]["content"]
+
+
 def test_physical_arrival_requires_current_world_and_uses_one_bounded_correction():
     captured = []
     context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("arrival",

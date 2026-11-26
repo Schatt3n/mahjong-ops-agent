@@ -535,6 +535,13 @@ _RECENT_TRAVEL_CONTINUATION = (
     "店家在问你要不要采用哪种帮法时，直接说你要不要。没有问到店时间时可以不提时间；"
     "若时间正是这个选择的关键，就用你上一条的估计和真实可达限制。是否回、怎么说，由你来决定。"
 )
+_RECENT_BOARD_CONTINUATION = (
+    "刚收到的是群里看板更新。先读 `travel_update.previous_shop_message_id` 对应的本人私聊及随后实际收到的答复。"
+    "看板若给了另一个可选桌、或改变了你在意的余位、时间或烟况，可以问那个新信息。"
+    "如果店家已接下你的委托，看板只是公开同样的局况，不能因此当成店家没有收到；无需再发同样的委托。"
+    "没有新的行程事件时，不把 `earliest_possible_if_leaving_now` 的重算值当成到店计划变化。"
+    "要不要继续说、说什么，由你决定。"
+)
 
 
 def _last_shop_contact(projected: Mapping[str, Any]) -> tuple[dict[str, Any] | None, datetime | None, datetime]:
@@ -604,14 +611,17 @@ class ModelActor:
         if travel := _travel_update(event, previous, previous_at, now):
             projected["travel_update"] = travel
         delivery = projected.get("delivery") or {}
-        if (travel and not travel["new_travel_event"] and travel.get("previous_shop_message_id")
-                and delivery.get("kind") == "private" and delivery.get("sender_id") == SIMULATION_AGENT):
-            # 物理下限仍提供给模型校验可达性，但不能以本轮最新计划的名义与本人刚说的话竞争。
+        shop_reply = delivery.get("kind") == "private" and delivery.get("sender_id") == SIMULATION_AGENT
+        public_board = delivery.get("kind") == "group" and delivery.get("sender_id") == SIMULATION_AGENT and (
+            delivery.get("message_id") or "").startswith("outbound:board:")
+        if travel and not travel["new_travel_event"] and travel.get("previous_shop_message_id") and (shop_reply or public_board):
+            # 物理下限仍供校验可达性。公开看板与私聊回复都不构成新的出行事件。
             details = dict(event.get("details") or {})
             if earliest := details.pop("earliest_arrival", None):
                 travel["earliest_possible_if_leaving_now"] = earliest
                 projected["events"][-1] = {**event, "details": details}
-            prompt = _RECENT_TRAVEL_CONTINUATION + "\n\n" + prompt
+            continuation = _RECENT_BOARD_CONTINUATION if public_board else _RECENT_TRAVEL_CONTINUATION
+            prompt = continuation + "\n\n" + prompt
         elif (event.get("kind") == "session_open" and not delivery and projected.get("familiar_shop")
                 and tendency == "main_need_first"):
             prompt = _FAMILIAR_SHORT_OPENING + "\n\n" + prompt
@@ -662,7 +672,11 @@ class ModelActor:
         if remaining <= 0:
             return blocked
         correction = messages + [
-            {"role": "system", "content": "上一份动作与本轮你本人知道的真实日程不相容，未发送或签到。根据现在的原话和日程重新决定一次。可以选择等、询问将来或解释变动，仍由你决定。"},
+            {"role": "system", "content": (
+                "上一份动作与本人实际日程不相容，未发送或签到。根据来话和失败原因重新决定一次。"
+                "若仍要说最早到店或开场时刻，选可达时段内更稳妥的钟点；别把下界向下取整后加‘出头’或‘左右’。"
+                "如果具体时刻对当前问题没用，可以只问相关信息，也可以等、询问将来或解释变动。由你决定是否发送。"
+            )},
             {"role": "user", "content": json.dumps({"previous_output": decision.raw, "availability_conflict": conflict},
                                                  ensure_ascii=False)},
         ]
