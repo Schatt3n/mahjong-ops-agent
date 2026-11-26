@@ -55,6 +55,8 @@
 
 营业证据还确认了三个边界。顾客报最晚到店与下午查局可同时成立，两三个钟头的柔性偏好不能改成三小时硬上限。已经确定七点半开、十点前走时，仍须确认必要的玩法才能新建。固定开场的答复保留原时间，晚到征询已经从同桌实际查证排入并送达。 [下午查局和时长](venue_simulation_evidence/2026-11-27-v6-0038-arrival-by-soft-duration.json) [玩法澄清](venue_simulation_evidence/2026-11-27-v6-0437-private-create-missing-gameplay.json) [固定局回复](venue_simulation_evidence/2026-11-27-v6-0178-scheduled-opening-language.json) [实际晚到征询](venue_simulation_evidence/2026-11-27-v6-real-late-arrival-delivery.json)
 
+使用第六轮 0402 的实际前文和组局来话分别对照店家主模型关闭推理与低推理。两份都实际问了缺失的玩法，没有建局或订房。前者四次完整主模型响应中有一次动作格式错误，主模型合计约 36 秒；低推理一次完整返回，约 22 秒。控制脚本最初漏识别「打什么玩法」，原报告保留并回查实际收件。下一档只在沙盒主模型试低推理，扩容门槛照旧。 [两份原话复放和耗时](venue_simulation_evidence/2026-11-27-v6-planner-reasoning-0402.json)
+
 当前从 `codex/venue-customer-quality` 接续，早期营业仿真记录来自 `codex/venue-simulation`。架构、最终能力和分阶段验收见 [实施路径与验收](venue_simulation.md)。每个阶段先跑专项验收，再提交和推送。主 Agent 在沙盒中使用独立实例、业务库、档案和模型客户端。优先在副本中复现时间问题，先改场景时间或仿真时钟，再判断是否有可独立复现的领域缺陷。
 
 **当前没有需要你拍板的事项。** 两日 12 人 OpenCode 第六轮已归档。下一步按实际交付和后端回执复放剩余案例，修订后沿原门槛复验。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。

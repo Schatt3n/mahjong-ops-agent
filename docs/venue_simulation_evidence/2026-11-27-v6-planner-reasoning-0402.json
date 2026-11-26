@@ -1,0 +1,34 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "candidate_commit": "cd186e8",
+  "case": "trace_4b84e1633c4b01139ba1ec18",
+  "unchanged_input": "老板，一底到三底都行，你帮我组一桌吧。我七点四十能到。",
+  "source_chat_sequences": [22, 24, 38],
+  "settings": "两次使用相同的私聊前文和原消息、虚拟 19:02、空局池、独立写权限、单路 OpenCode。只切换本次主模型推理档位，发前审查均沿用定向回放的 low。没有替换原整轮验收。",
+  "controls": [
+    {
+      "archive": "quality_real_12_gate_rev6_20261127/planner-0402-none-20261127",
+      "main_reasoning": "none",
+      "main_http_complete_attempts": 4,
+      "main_elapsed_ms": [6357, 14967, 7504, 7045],
+      "invalid_main_actions": 1,
+      "status": "waiting_user",
+      "delivered": "七点四十以后现在没有1到3底能搭的现成桌，我给你组一桌。打什么玩法？",
+      "successful_business_tools": ["search_current_games"],
+      "game_or_room_writes": 0
+    },
+    {
+      "archive": "quality_real_12_gate_rev6_20261127/planner-0402-low-20261127",
+      "main_reasoning": "low",
+      "main_http_complete_attempts": 1,
+      "main_elapsed_ms": [22188],
+      "invalid_main_actions": 0,
+      "status": "waiting_user",
+      "delivered": "行，给你组一桌。打什么玩法？我按七点四十开场凑人，行不？",
+      "successful_business_tools": [],
+      "game_or_room_writes": 0
+    }
+  ],
+  "first_probe_reporting_issue": "控制脚本起初只认「麻将」和「开」，因此把已实际送达的「打什么玩法」记为未通过。核对原始账本和 waiting_user 后两份都符合缺玩法时澄清且零写入。原报告保留。",
+  "decision": "此单例支持在下一轮小规模对照里为店家主模型开启低推理，继续观察格式、用时和实际业务，不据此判断全体稳定性或放宽门槛。"
+}
