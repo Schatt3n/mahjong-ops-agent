@@ -16,6 +16,7 @@ from mahjong_agent_runtime import (
     StaticAgentClient,
     TokenBudget,
     ToolGateway,
+    ToolResult,
     UserMessage,
 )
 from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder, BuiltContext
@@ -817,6 +818,57 @@ def test_budget_summary_keeps_bounded_exact_customer_sources_from_the_current_ta
     assert payload["current_message"]["message_id"] == current.message_id
     assert payload["context_budget"]["checkpoint_customer_sources_retained"] == 3
     assert [(turn["metadata"]["source_message_id"], turn["content"]) for turn in payload["recent_conversation"]] == inputs[-3:]
+
+
+@pytest.mark.parametrize("gameplay_source", ["none", "retained_customer", "profile"])
+def test_v5_0405_checkpoint_does_not_promote_guessed_gameplay(tmp_path, gameplay_source):
+    """同轮模型摘要与查局筛项都不是顾客的玩法证据，本人原话和画像仍有自己的来源。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    store = SQLiteAgentStore(tmp_path / "checkpoint.sqlite3")
+    customer = "customer-0405"
+    conversation = "0405-private"
+    old = UserMessage(conversation_id=conversation, sender_id=customer, sender_name="客人",
+        text="我上次打的杭麻。", message_id="different-task", sent_at=at - timedelta(minutes=20))
+    earlier_text = "老板晚上好 想问下今晚还有局能搭一桌吗 无烟的 档位2到3 我大概八点前能到"
+    earlier = UserMessage(conversation_id=conversation, sender_id=customer, sender_name="客人",
+        text=earlier_text + (" 想打红中" if gameplay_source == "retained_customer" else ""),
+        message_id="earlier-customer", sent_at=at)
+    current = UserMessage(conversation_id=conversation, sender_id=customer, sender_name="客人",
+        text="老板我这边现在最早也要七点四十一才能到 要是组局时间能往七点五十左右挪一下的话 无烟2到3档我就能打 大概能打三个小时 你看能行吗",
+        message_id="current-customer", sent_at=at)
+    saved_facts = {"game_type": "hangzhou_mahjong", "requested_game": "hangzhou_mahjong",
+                   "game_variant": "variant-from-summary", "smoke_preference": "no_smoke"}
+    with using_clock(lambda: old.sent_at):
+        TaskContextManager(store).prepare(old, trace_id="different-task")
+        store.append_user_turn(old, "different-task")
+    with using_clock(lambda: at):
+        task, _ = store.activate_task_context(conversation_id=conversation, customer_id=customer,
+            trace_id="new-task", activity_at=at, started_at=at, reason="new_goal", force_new=True, archive_previous=True)
+        store.append_user_turn(earlier, "earlier-trace")
+        if gameplay_source == "profile":
+            store.upsert_customer(CustomerProfile(customer_id=customer, display_name="客人",
+                                                 preferred_games=["sichuan_mahjong"]))
+        store.upsert_conversation_checkpoint(conversation_id=conversation, task_context_id=task.task_context_id,
+            summary="客人想打无烟杭州麻将。", facts=saved_facts, open_questions=[], trace_id="synthetic-summary")
+        search = ToolResult(name="search_current_games", called=True, allowed=True, call_id="search_5",
+            result={"requirement": {"game_type": "hangzhou_mahjong"}, "matches": [], "lookup_scope": "personal"})
+        built = AgentContextBuilder(store, ToolGateway(store)).build(current, trace_id="current-trace",
+                                                                     turn_tool_evidence=[search])
+    payload = json.loads(built.messages[-1]["content"])
+    assert payload["conversation_checkpoint"]["facts"] == {"smoke_preference": "no_smoke"}
+    assert payload["conversation_checkpoint"]["summary"] == "客人想打无烟杭州麻将。"
+    assert store.get_task_context_checkpoint(task.task_context_id).facts == saved_facts
+    assert payload["turn_tool_evidence"][0]["result"]["requirement"]["game_type"] == "hangzhou_mahjong"
+    assert [turn["metadata"]["source_message_id"] for turn in payload["recent_conversation"]] == ["earlier-customer"]
+    facts = payload["explicit_task_facts"]
+    assert facts["binding_fields"] == []
+    if gameplay_source == "retained_customer":
+        assert facts["candidates"]["game_type"] == "red_center_mahjong"
+        assert facts["evidence"]["game_type"] == "recent_user_turn"
+    else:
+        assert "game_type" not in facts["candidates"] and "game_type" not in facts["evidence"]
+    if gameplay_source == "profile":
+        assert payload["sender_profile"]["preferred_games"] == ["sichuan_mahjong"]
 
 
 def agent_action(*, objective_status: str, reasoning_summary: str, reply_to_user: str) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...group_chat.parsing import parse_explicit_need
+from ...models import ConversationCheckpoint
 from ..temporal import parse_context_datetime
 
 
@@ -26,6 +27,16 @@ FACT_FIELD_ORDER = (
     "seat_format",
 )
 _START_FIELDS = ("start_time_kind", "start_time", "planned_start_at")
+_CHECKPOINT_GAMEPLAY_FIELDS = frozenset({"game_type", "game_variant", "requested_game"})
+
+
+def checkpoint_for_model_context(checkpoint: ConversationCheckpoint | None) -> dict[str, Any] | None:
+    """保留摘要和待办，将玩法留给本人原话、可靠画像与核实过的指名桌。"""
+    if checkpoint is None:
+        return None
+    payload = checkpoint.to_dict()
+    payload["facts"] = _checkpoint_facts(checkpoint)
+    return payload
 
 
 def project_explicit_task_facts(
@@ -42,8 +53,7 @@ def project_explicit_task_facts(
     values: dict[str, Any] = {}
     evidence: dict[str, str] = {}
     clock_observation: dict[str, Any] | None = None
-    checkpoint_facts = _checkpoint_facts(checkpoint)
-    _merge_canonical(values, checkpoint_facts)
+    _merge_canonical(values, _checkpoint_facts(checkpoint))
     for field in FACT_FIELD_ORDER:
         if field in values:
             evidence[field] = "conversation_checkpoint"
@@ -99,13 +109,14 @@ def project_explicit_task_facts(
 
 
 def _checkpoint_facts(checkpoint: Any) -> dict[str, Any]:
-    if checkpoint is None:
-        return {}
+    """摘要玩法无法自证，避免经过结构投影变成看似已确认的槽位。"""
     if isinstance(checkpoint, dict):
-        payload = checkpoint.get("facts") if isinstance(checkpoint.get("facts"), dict) else checkpoint
-        return dict(payload)
-    facts = getattr(checkpoint, "facts", None)
-    return dict(facts) if isinstance(facts, dict) else {}
+        facts = checkpoint.get("facts") if isinstance(checkpoint.get("facts"), dict) else checkpoint
+    else:
+        facts = getattr(checkpoint, "facts", None)
+    if not isinstance(facts, dict):
+        return {}
+    return {field: value for field, value in facts.items() if field not in _CHECKPOINT_GAMEPLAY_FIELDS}
 
 
 def _merge_canonical(target: dict[str, Any], incoming: dict[str, Any]) -> None:
@@ -115,4 +126,4 @@ def _merge_canonical(target: dict[str, Any], incoming: dict[str, Any]) -> None:
             target[field] = value
 
 
-__all__ = ["FACT_FIELD_ORDER", "project_explicit_task_facts"]
+__all__ = ["FACT_FIELD_ORDER", "checkpoint_for_model_context", "project_explicit_task_facts"]

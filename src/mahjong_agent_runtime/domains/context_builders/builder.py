@@ -36,7 +36,7 @@ from .relationship_context import build_relationship_context
 from .sanitization import project_verified_input_window, sanitize_current_message_for_context
 from .tool_results import tool_result_for_context
 from .task_recovery import recover_referenced_task_contexts
-from .task_facts import project_explicit_task_facts
+from .task_facts import checkpoint_for_model_context, project_explicit_task_facts
 
 
 DEFAULT_PROMPT_PATH = Path(__file__).resolve().parents[2].joinpath("prompts", "agent_runtime_system.md")
@@ -321,7 +321,7 @@ class AgentContextBuilder:
             "recent_conversation": conversation.recent_conversation,
             **({"owner_conversation_context": conversation.owner_conversation_context}
                if conversation.owner_conversation_context else {}),
-            "conversation_checkpoint": checkpoint.to_dict() if checkpoint else None,
+            "conversation_checkpoint": checkpoint_for_model_context(checkpoint),
             "recovered_task_contexts": recovered_tasks.items,
             "context_budget": audit,
             "sender_profile": customer.profile,

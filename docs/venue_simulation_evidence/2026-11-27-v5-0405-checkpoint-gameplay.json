@@ -1,0 +1,59 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "source_code_commit": "5e8fcc5",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev5_20261127/2026-11-25-real-5a053cce0d",
+  "customer_case": "0405",
+  "trace_id": "trace_3584355c9c1591e7a9aa4ea6",
+  "sent_at": "2026-11-25T19:00:00+08:00",
+  "ledger": [
+    {"sequence": 11, "direction": "inbound", "text": "老板晚上好 想问下今晚还有局能搭一桌吗 无烟的 档位2到3 我大概八点前能到"},
+    {"sequence": 13, "direction": "outbound", "text": "今晚这会儿没有能搭的无烟2-3档桌诶，要不我帮你组一桌？"},
+    {"sequence": 22, "direction": "inbound", "text": "老板我这边现在最早也要七点四十一才能到 要是组局时间能往七点五十左右挪一下的话 无烟2到3档我就能打 大概能打三个小时 你看能行吗"},
+    {"sequence": 24, "direction": "outbound", "text": "稍等一下"}
+  ],
+  "write_authorization": {
+    "response_call_id": "llm_call_3dd5335acbe14169af770d207e2bd390",
+    "http_response_complete": true,
+    "status": "no_permission",
+    "verified_scopes": [],
+    "present_in_actual_planner_and_reviewer_system_prompts": true
+  },
+  "gameplay_provenance": {
+    "customer_profile_preferred_games": [],
+    "customer_profile_facts": [],
+    "named_game_or_open_game_membership": false,
+    "first_inventory_query_has_game_type_filter": false,
+    "second_round_step_2_proposed_game_type": "hangzhou_mahjong",
+    "checkpoint_saved_before_step_5": {
+      "response_call_id": "llm_call_ecf84af6ed04475b901709b7875d9d4e",
+      "summary_fragment": "想打无烟杭州麻将",
+      "facts_game_type": "hangzhou_mahjong"
+    },
+    "step_8_main_request": {"game_type_candidate": "hangzhou_mahjong", "source": "conversation_checkpoint", "binding_fields": []},
+    "step_8_model_claim": {"known_facts_game_type": "hangzhou_mahjong", "missing_facts": [], "source_bound_game_type_assertion": false}
+  },
+  "search_and_review": {
+    "first_successful_current_search_step": 5,
+    "call_id": "search_5",
+    "actual_window": {"start_at": "2026-11-25T19:41:00+08:00", "end_at": "2026-11-25T23:59:59.999999+08:00"},
+    "personal_query_game_type": "hangzhou_mahjong",
+    "matched_count": 0,
+    "supports_narrower_empty_claim": true,
+    "invalid_main_action_envelope_steps": [6, 7],
+    "reviewed_step": 8,
+    "draft": "现在这个点没有现成的无烟2到3档桌能搭诶。要是按七点五十开场、打三个小时左右，我帮你组一桌无烟2到3档的，可以吗？",
+    "approved": false,
+    "violations": ["delegation_not_advanced", "unsupported_availability_claim"],
+    "review_suggested_text": "现在这个点没有现成的无烟2到3档桌能搭诶。按你七点五十左右开场、无烟2到3档这个条件，我先帮你组一桌看看，有进展再跟你说。",
+    "follow_up_commitment_evidence": []
+  },
+  "analysis": "本轮原话只有到店、约略开场、烟况、档位和约略时长。两轮顾客原话、画像和实际桌号都未支持杭麻。主模型先猜杭麻，预算摘要把猜测写成事实，重建请求再把它加入候选。查空及未筛选可用局池为空足以解释当前同请求者范围没有现成桌。原审查认可空结果，但要求直接推进组桌的反馈与已送达的前置无授权证据冲突，建议也新增无安排的进展通知。原稿固定约略钟点并绕过真实缺项，适合重写后再审。",
+  "reference_reply": "七点五十左右目前没有能搭的无烟两三块桌。你想打哪种麻将？",
+  "change": "模型请求的摘要结构事实和词法候选均不再从摘要派生玩法。原始摘要、既有本人原话、可靠画像、当前工具与桌况证据独立保留，历史查询筛项只证明实际查了什么。",
+  "offline_verification": {
+    "test": "tests/test_context_summary.py::test_v5_0405_checkpoint_does_not_promote_guessed_gameplay",
+    "scope": "真实 SQLite 任务与上下文组装，保留原始摘要和已执行筛项。控制组覆盖未知玩法、同任务顾客确切说红中、已有川麻画像及不同任务的杭麻原话。",
+    "targeted_tests_passed": 334,
+    "live_replay": "pending"
+  }
+}
