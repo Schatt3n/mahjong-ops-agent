@@ -178,6 +178,15 @@ _SEAT_CLAIM_CLOCK = re.compile(
     rf"(?:(?P<part>半|一刻|三刻)|(?P<spoken_minute>[0-5]?\d)分|"
     rf"(?P<bare_minute>[0-5]\d)(?=\s*(?:{_SEAT_LIST_TABLE}|{_SEAT_LIST_OPEN}|的|$)))?)"
 )
+# 只拦已绑定同桌且独立陈述开打的语法。问句、转述、其他桌及未来推测留给语义审查。
+_DEFINITE_TABLE_START = re.compile(
+    r"(?:^|[,。;!\n])\s*(?:这桌|那桌|人家|他们)\s*(?:已经|已)\s*"
+    r"(?:开打|开始打|开局)(?:了)?\s*(?=[,。;!\n]|$)"
+)
+_START_CLAIM_OTHER_SCOPE = re.compile(
+    r"如果|假如|万一|假设|可能|估计|恐怕|说不定|到时|届时|等你到|另一桌|别桌|隔壁|其他桌|"
+    r"听说|据说|你说|他说|你是说|不能说|不代表"
+)
 # 玩法只允许按已有核验术语精确绑定，不用子串推断另一桌或门店自定义玩法。
 _SEAT_GAME_TYPES = {
     alias: term.canonical["requested_game"]
@@ -438,6 +447,36 @@ def customer_visible_seat_claim_violations(text: str, facts: list[dict[str, obje
     """继续用同一权威核验拦截已证实错报；无确定结论则交给语义审查。"""
     evidence = customer_visible_seat_claim_evidence(text, facts)
     return ["seat_count.current_table_mismatch"] if evidence["status"] == "mismatch" else []
+
+
+def customer_visible_table_start_violations(text: str, facts: list[dict[str, object]]) -> list[str]:
+    """仅用本轮唯一候选的实时局况拦错误开打声明，原定钟点从不证明实际开打。"""
+    if len(facts) != 1:
+        return []
+    fact = facts[0]
+    if (fact.get("status") not in {"forming", "inviting"}
+            or "actual_started_at" not in fact or fact["actual_started_at"] is not None):
+        return []
+    content = unicodedata.normalize("NFKC", text).strip()
+    if _SEAT_CLAIM_QUOTE_MARKS.intersection(content):
+        return []
+    # 省略桌名的断言须紧接本轮候选的开场钟点；开头直接说「那桌」是唯一候选的私聊指代。
+    named_table = content.removeprefix("有一桌").lstrip()
+    clock = _SEAT_CLAIM_CLOCK.match(named_table)
+    clock_tail = named_table[clock.end():].lstrip() if clock else ""
+    bound_by_clock = bool(clock and clock_tail.startswith(("开的", "开场的", "这桌", "那桌"))
+                          and _seat_fact_for_clock(clock, facts) is not None)
+    if bound_by_clock:
+        content = clock_tail
+    claim = _DEFINITE_TABLE_START.search(content)
+    if claim is None:
+        return []
+    prefix = content[:claim.start()]
+    if (_START_CLAIM_OTHER_SCOPE.search(prefix)
+            or re.match(r"[,;]\s*(?:还是|是不是|对不对|是吗)", content[claim.end():])):
+        return []
+    bound_by_reference = not prefix and content.startswith(("这桌", "那桌"))
+    return ["game_start.current_table_not_started"] if bound_by_clock or bound_by_reference else []
 
 
 def _current_listed_seat_declarations(

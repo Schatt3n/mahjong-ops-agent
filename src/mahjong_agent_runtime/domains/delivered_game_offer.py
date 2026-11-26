@@ -19,7 +19,7 @@ _OFFER_REQUIREMENT_FIELDS = (
 
 def seat_facts_for_private_reply(store: AgentStore, message: UserMessage,
                                  tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """只从本轮末次成功查局和当前库读出可核对的同桌席位，不继承旧查询或模型摘要。"""
+    """只从本轮末次成功查局和当前库读出可核对的同桌局况，不继承旧查询或模型摘要。"""
     if not _ordinary_private_message(message):
         return []
     query_index = next((index for index in range(len(tool_results) - 1, -1, -1)
@@ -59,7 +59,8 @@ def seat_facts_for_private_reply(store: AgentStore, message: UserMessage,
         if (game.status not in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY} or game.actual_started_at
                 or _time_anchor(observed.get("planned_start_at")) != start):
             return []
-        facts[game_id] = {"game_id": game_id, "planned_start_at": start,
+        facts[game_id] = {"game_id": game_id, "status": game.status.value,
+                          "planned_start_at": start, "actual_started_at": None,
                           "game_type": game.requirement.get("game_type") or game.requirement.get("requested_game"),
                           "remaining_seats": game.remaining_seats(), "seats_total": game.seats_total}
     return list(facts.values())

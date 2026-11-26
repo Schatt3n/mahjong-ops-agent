@@ -10,8 +10,11 @@ from mahjong_agent_runtime import (
     AgentAction, AgentContextBuilder, AgentRuntime, CustomerProfile, InMemoryAgentStore, InMemoryTraceRecorder,
     SQLiteAgentStore, StaticAgentClient, ToolGateway, UserMessage,
 )
-from mahjong_agent_runtime.customer_visible_contract import PREFERRED_OPERATION_ACK_PHRASES
+from mahjong_agent_runtime.customer_visible_contract import (
+    PREFERRED_OPERATION_ACK_PHRASES, customer_visible_table_start_violations,
+)
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
+from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
 from mahjong_agent_runtime.models import using_clock
 from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
@@ -289,6 +292,100 @@ def test_live_seats_override_erroneous_review_approval_before_customer_delivery(
     assert receipt["source_message_id"] == message.message_id and receipt["trace_id"] == result["trace_id"]
     assert [row["text"] for row in channel.events_for("guest")] == [inbound, corrected]
     assert store.require_game(game.game_id).to_dict() == game.to_dict()
+
+
+@pytest.mark.parametrize("review_enabled", [True, False])
+def test_expired_planned_opening_cannot_be_delivered_as_actual_start(tmp_path, review_enabled):
+    """真实查询和私聊收件复现原局仍在凑人，错误的模型批准或关闭审查均不放行。"""
+    at = datetime.fromisoformat("2026-11-25T19:35:00+08:00")
+    opening_at = "2026-11-25T19:30:00+08:00"
+    inbound = "老板，那桌杭麻1到3档、烟都行的，现在还在凑人吗？我最早八点过一点能到，能留位吗？"
+    wrong = "有一桌19:30开的，1到3档、烟都行，现在就一个人，还差三位。不过你八点过才到，人家已经开打了，要不我先帮你问问桌上能不能等你到？"
+    corrected = "原定19:30那桌杭麻还在凑，差三位。你八点过才到，这桌能不能等还不确定，要我先帮你问问吗？"
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3}, "smoke_preference": "any"}
+    lookup = _call("search_current_games", {"requirement": {"game_type": "hangzhou_mahjong",
+        "stake_range": {"min": 1, "max": 3}, "start_time_kind": "asap_when_full"}, "lookup_scope": "specific_table"})
+    model = StaticAgentClient([lookup, _reply(wrong, status="waiting_user"), _reply(corrected, status="waiting_user")])
+    reviewer = StaticAgentClient([
+        json.dumps({"approved": True, "needs_human": False, "violations": [], "reasoning_summary": "同意",
+                    "item_reviews": [{"item_id": "reply_to_user", "approved": True, "violations": [],
+                        "reasoning_summary": "同意", "suggested_safe_text": text, "follow_up_commitments": []}]},
+                   ensure_ascii=False)
+        for text in (wrong, corrected)
+    ])
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    traces = InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=model, store=store, trace_recorder=traces,
+                           reply_self_review_enabled=review_enabled, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="archived-v4-opening", identities={"host": "牌友", "guest": "顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    message = MessageEnvelope("archived-v4-opening", "guest", inbound, at, "private", AGENT_ID)
+
+    with using_clock(lambda: at):
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id("host"), organizer_id="host",
+            organizer_name="牌友", requirement={**terms, "start_time_kind": "scheduled", "planned_start_at": opening_at,
+                "max_duration_hours": 2.5}, known_players=[{"customer_id": "host", "seat_count": 1}], trace_id="seed")
+        result = channel.send(message)
+
+    history = traces.get_trace(result["trace_id"])
+    lookup_result, = [event.content for event in history
+                      if event.step == "tool_result" and event.content.get("name") == "search_current_games"]
+    observed, = lookup_result["result"]["matches"]
+    assert observed["game"]["status"] == "forming" and observed["game"]["planned_start_at"] == opening_at
+    assert observed["game"]["seat_summary"]["remaining_seats"] == 3
+    reviews = [event.content for event in history if event.step == "customer_visible_content_review_result"]
+    assert [review["approved"] for review in reviews] == ([True, True] if review_enabled else [])
+    if review_enabled:
+        review_payload = json.loads(reviewer.calls[0]["messages"][-1]["content"])
+        evidence, = review_payload["review_items"][0]["seat_claim_evidence"]
+        assert evidence["status"] == "forming" and evidence["actual_started_at"] is None
+    retry = json.loads(model.calls[2]["messages"][-1]["content"])
+    rule = "customer_visible_contract:game_start.current_table_not_started"
+    feedback, = [item["result"] for item in retry["turn_tool_evidence"]
+                 if rule in item.get("result", {}).get("violations", [])]
+    assert feedback["seat_claim_evidence"] == [{"game_id": game.game_id, "status": "forming",
+        "actual_started_at": None, "planned_start_at": opening_at, "game_type": "hangzhou_mahjong",
+        "remaining_seats": 3, "seats_total": 4}]
+    receipt, = result["archive_outputs"]
+    assert receipt["text"] == corrected and receipt["recipient_id"] == "guest"
+    assert receipt["source_message_id"] == message.message_id and receipt["trace_id"] == result["trace_id"]
+    assert [row["text"] for row in channel.events_for("guest")] == [inbound, corrected]
+    assert store.require_game(game.game_id).to_dict() == game.to_dict()
+
+
+def test_start_state_guard_preserves_questions_uncertainty_and_other_table_scope():
+    """到店后的不确定推测、别桌和没有实时来源的局况不由本规则代判。"""
+    fact = {"game_id": "table", "status": "forming", "actual_started_at": None,
+            "planned_start_at": "2026-11-25T19:30:00+08:00"}
+    assert customer_visible_table_start_violations("那桌已经开打了。", [fact])
+    assert customer_visible_table_start_violations("19:30那桌已经开打了。", [fact])
+    for text in ("这桌已经开打了吗？", "19:30那桌还在凑，没实际开打。",
+                 "19:30那桌，你是说，人家已经开打了，还是还在凑？",
+                 "19:30那桌还在凑，到时候人家可能已经开打了。",
+                 "19:30那桌还在凑，等你到的时候人家已经开打了。",
+                 "19:30那桌还在凑，隔壁那桌已经开打了。", "20:30那桌，他说那桌已经开打了。",
+                 "20:30那桌已经开打了。",
+                 "19:30那桌，听说，人家已经开打了。",
+                 "19:30那桌，牌友问‘那桌已经开打了’是不是真的。"):
+        assert not customer_visible_table_start_violations(text, [fact]), text
+    assert not customer_visible_table_start_violations("那桌已经开打了。", [{
+        **fact, "status": "ready", "actual_started_at": "2026-11-25T19:34:00+08:00"}])
+    assert not customer_visible_table_start_violations("那桌已经开打了。", [
+        {key: value for key, value in fact.items() if key != "actual_started_at"}])
+    assert not customer_visible_table_start_violations("那桌已经开打了。", [fact, {**fact, "game_id": "other"}])
+
+
+def test_actual_start_survives_search_transport_without_private_attendee_data():
+    """压缩查询只保留计划和实际两个时间证据，屏蔽到店名单及订房身份。"""
+    actual = "2026-11-25T19:34:00+08:00"
+    planned = "2026-11-25T19:30:00+08:00"
+    raw = {"name": "search_current_games", "called": True, "allowed": True, "result": {"matches": [{"game": {
+        "game_id": "table", "status": "ready", "planned_start_at": planned, "actual_started_at": actual,
+        "actual_attendee_ids": ["private-attendee"], "play_reservation_id": "private-reservation",
+    }}]}}
+    projected = compact_tool_result_dict(raw)["result"]["matches"][0]["game"]
+    assert projected == {"game_id": "table", "status": "ready", "planned_start_at": planned,
+                         "actual_started_at": actual, "requirement": {}}
 
 
 def test_review_treats_only_candidate_search_and_customer_cutoff_as_read_only():

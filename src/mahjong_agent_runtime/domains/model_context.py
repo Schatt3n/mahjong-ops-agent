@@ -68,6 +68,8 @@ def public_game_lookup_projection(game: dict[str, Any], *, retain_operational_fi
         result["seat_summary"] = {key: seats[key] for key in _PUBLIC_SEAT_COUNTS if type(seats.get(key)) is int}
     if type(game.get("remaining_seats")) is int:
         result["remaining_seats"] = game["remaining_seats"]
+    if isinstance(game.get("actual_started_at"), str):
+        result["actual_started_at"] = game["actual_started_at"]
     # 工具原始回执用于比较版本及日期；模型只能用明确约定的时长解释结束时间。
     if "planned_end_at" in game and (retain_operational_fields or has_agreed_game_duration(public)):
         result["planned_end_at"] = game["planned_end_at"]

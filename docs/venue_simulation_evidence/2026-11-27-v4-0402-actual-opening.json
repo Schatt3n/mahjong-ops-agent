@@ -1,0 +1,54 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "source_code_commit": "bf3428d",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev4_20261127/2026-11-25-real-270ac8a1b6",
+  "customer_case": "0402",
+  "trace_id": "trace_68b5c8e3f35af0516156a264",
+  "related_board_line": {
+    "archive_sequence": 54,
+    "text": "2、2026-11-25 19:30 杭麻 1～3元 烟都可 173 原定开场时间已过 仍在凑人，晚到需先确认"
+  },
+  "message": {
+    "archive_sequence": 55,
+    "message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+    "sent_at": "2026-11-25T19:35:00+08:00",
+    "text": "老板，那桌杭麻1到3档、烟都行的，现在还在凑人吗？我最早八点过一点能到，能留位吗？"
+  },
+  "tool_and_delivery": {
+    "tool": "search_current_games",
+    "call_id": "lookup_named_table",
+    "lookup_scope": "specific_table",
+    "called": true,
+    "allowed": true,
+    "query_start_time_kind": "asap_when_full",
+    "match_count": 1,
+    "game_id": "game_89625744e97c",
+    "matched_start_time_kind": "scheduled",
+    "status": "forming",
+    "recruitment_status": "open",
+    "seat_summary": {"claimed_seats": 1, "remaining_seats": 3, "seats_total": 4},
+    "planned_start_at": "2026-11-25T19:30:00+08:00",
+    "actual_started_at_in_original_receipt": "absent",
+    "review_approved": true,
+    "review_reason": "回复如实报出19:30定时开局、1～3档、烟不限、现有一人还差三位的桌况，并恰当地就晚到能否等候提出征询；没有泄露内部信息，也没有未经证实的外发声明。",
+    "archive_sequence": 58,
+    "delivered_reply": "有一桌19:30开的，1到3档、烟都行，现在就一个人，还差三位。不过你八点过才到，人家已经开打了，要不我先帮你问问桌上能不能等你到？"
+  },
+  "same_time_control": {
+    "trace_id": "trace_4eb1c9dc883b3b1a52920dc2",
+    "message_sequence": 56,
+    "reply_sequence": 57,
+    "message": "老板好 19:30那桌杭麻的还有位吗 我最早19:52能到 可以晚点开吗",
+    "game_id_from_separate_lookup": "game_89625744e97c",
+    "status_from_separate_lookup": "forming",
+    "delivered_reply": "19:30那桌杭麻还在凑，1～3元、烟不限，现在就一个人，还缺三位。你19:52到比开场晚二十来分钟，这桌现在还没定能不能等。要不要我去问问这桌能不能等你到？"
+  },
+  "analysis": "19:35的实际回执与此前看板均证明这桌还在凑。店家一句话先报对余位，随后把计划时间说成已经开打。即使把后半句读成对顾客到店时的预测，回执也不支持必然开打。同一表同一时刻的另一个私聊答复说明仍在凑、可能要提前征询，可以作为对照。原来的语义审查放行了错误断言，属于实际店家送达错误。",
+  "change": "传递实际开场记录中可公开的时间。对本轮唯一且送达前仍经实际库确认在凑的候选，阻挡与该桌明确绑定的已开打断言，保留审查原件并要求主要模型重写。确定性规则只处理明确的现在或过去时断言；别桌、引语、疑问和未来条件仍交语义核对。",
+  "offline_verification": {
+    "test": "tests/test_direct_main_reply_contract.py::test_expired_planned_opening_cannot_be_delivered_as_actual_start",
+    "scope": "真实 SQLite 店况、真实查局工具与模拟私聊收件。店家模型和审查响应脚本化，错误批准和关闭审查两条路径均测试。",
+    "targeted_tests_passed": 324,
+    "live_replay": "pending"
+  }
+}
