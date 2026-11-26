@@ -1,0 +1,29 @@
+{
+  "run": "2026-11-25-real-f16f5ddc00",
+  "start_commit": "0e96d31",
+  "game_id": "game_10aa56103b9e",
+  "customer": {
+    "sequence": 31,
+    "trace_id": "trace_19fdece86f1d64e1b13359a1",
+    "message_id": "customer:role-event:d83417789e6f3d5d8c24e1f1cfb285c09d2051da9d2e50d4620e009bf657772c",
+    "text": "就是群看板那条 19点半 0.5 无烟 173 我最早19点43才能到 这桌能晚点开吗 能搭一桌吗"
+  },
+  "same_turn_successful_business_tools": ["search_current_games", "request_late_arrival"],
+  "queued_request": {
+    "planned_start_at": "2026-11-25T19:30:00+08:00",
+    "arrival_at": "2026-11-25T19:43:00+08:00",
+    "status": "queued"
+  },
+  "actual_customer_receipt": {
+    "sequence": 33,
+    "message_id": "outbound:trace_19fdece86f1d64e1b13359a1:1",
+    "text": "找到这桌了：19点半定时开，0.5无烟，现在还缺三个人。你19点43到的话开场肯定赶不上，这桌愿不愿意等你到，目前还没确定，暂时没法保证。你还想搭这桌吗？"
+  },
+  "actual_table_contact_receipt": {
+    "sequence": 34,
+    "trace_id": "trace_scheduled_e887429808ca",
+    "message_id": "outbound:late-arrival:9cd1c090f034b22ad483f62a187839c7a1249491761724e6d62ab3dec0e34b9d:question:1634c10a81c1a21d7ced294d",
+    "text": "这桌有个人要到19:43才来，原定19:30开场，能等吗？"
+  },
+  "findings": "两条私聊均以本次顾客来话为账本来源。同一原桌的实际查询后，征询工具成功，联络人实际收到按原开场询问的消息。此段没有留位、改变开场或替同桌答应等待。店家正式回复的「开场肯定赶不上」按原计划理解，19:30 当时仍在未来，不能证明已经开打。"
+}
