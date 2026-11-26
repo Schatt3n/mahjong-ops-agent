@@ -87,7 +87,9 @@ class VenueTableOpening:
                 or self.group.received(AGENT_ID, message.message_id) != receipt):
             raise ValueError("table opening vote needs a completed delivery from the voting customer")
         offered = self.group.received(message.sender_id, proposal_id)
+        order = {row.message.message_id: index for index, row in enumerate(self.group.delivered_receipts())}
         if (offered is None or offered.message.sender_id != AGENT_ID or offered.message.sent_at > message.sent_at
+                or order[proposal_id] >= order[message.message_id]
                 or message.quoted_message_id not in {None, proposal_id}):
             raise ValueError("table opening vote is missing its visible proposal")
         with self.store._write_transaction():

@@ -138,3 +138,69 @@ def test_same_roster_after_withdrawal_requires_new_proposal(tmp_path):
     assert opening.record_vote(_vote(group, "d", "old-d", 5, "行。", "old"),
                                proposal_id="old", accepts=True) == "seats_changed"
     assert store.require_game(game_id).planned_start_at is None
+
+
+def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path):
+    """店家处理器只看桌群实际消息，拒绝旧回应并在第四票后才通告。"""
+    import json
+
+    from .venue_table_shop import VenueTableShop
+
+    store, game_id, group, opening = _table(tmp_path)
+    trace = tmp_path / "table_shop.jsonl"
+    outcomes = {
+        "suggest": ("other", _EARLY.isoformat()),
+        "cant-at-seven": ("decline", _LATE.isoformat()),
+        "late-old-agreement": ("accept", None),
+        **{f"yes-{actor}": ("accept", None) for actor in _MEMBERS},
+    }
+
+    class Reviewer:
+        """受控结构输出验证送达和落库路径，真实发言使用独立运行。"""
+
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            """只用这一条实际来话命中受控对照。"""
+            payload = json.loads(messages[-1]["content"])
+            source = payload["current"]["message_id"]
+            assert payload["current"]["text"] == next(
+                row["text"] for row in group.events_for(AGENT_ID) if row["message_id"] == source)
+            vote, start = outcomes[source]
+            return json.dumps({"vote": vote, "proposed_start": start})
+
+    shop = VenueTableShop(Reviewer(), trace)
+    inquiry = group.send(shop(group, None, _OPEN))
+    assert "各自几点能到" in inquiry.message.text
+
+    def react(receipt):
+        return shop(group, receipt, receipt.message.sent_at.astimezone(DEFAULT_TZ))
+
+    suggestion = _vote(group, "a", "suggest", 1, "七点好像合适。", inquiry.message.message_id)
+    unattached = react(suggestion)
+    assert opening.current() is None
+    first = group.send(unattached)
+    deny = _vote(group, "d", "cant-at-seven", 2, "七点不行，我最早七点半。", first.message.message_id)
+    second = group.send(react(deny))
+    stale = _vote(group, "a", "late-old-agreement", 3, "我接受原来七点。", first.message.message_id)
+    assert react(stale) is None
+    assert opening.current()["accepted_count"] == 0
+    for index, actor in enumerate(_MEMBERS, 4):
+        receipt = _vote(group, actor, f"yes-{actor}", index, "七点半可以。", second.message.message_id)
+        response = react(receipt)
+        if actor != "d":
+            assert response is None and store.require_game(game_id).planned_start_at is None
+    assert store.require_game(game_id).planned_start_at == _LATE
+    assert response.text == "那就 19:30 开，大家按这个时间到哈。"
+    confirmation = group.send(response)
+    assert confirmation.recipient_ids == _MEMBERS
+    assert react(receipt) is None
+    assert len(trace.read_text().splitlines()) == 7
+
+
+def test_unquoted_message_sent_before_proposal_in_same_clock_tick_cannot_vote(tmp_path):
+    """相同虚拟时刻也按实际送达顺序区分先前话题与本次同意。"""
+    store, game_id, group, opening = _table(tmp_path)
+    early_message = _vote(group, "a", "previous-discussion", 1, "可以。")
+    _propose(opening, group, "not-visible-before-message", 1, _EARLY)
+    with pytest.raises(ValueError, match="visible proposal"):
+        opening.record_vote(early_message, proposal_id="not-visible-before-message", accepts=True)
+    assert store.require_game(game_id).planned_start_at is None

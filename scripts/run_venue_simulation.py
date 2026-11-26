@@ -51,6 +51,7 @@ from tests.simulation.venue_role_journal import RoleSchedulerBusyError, VenueRol
 from tests.simulation.venue_role_traits import blend_venue_role_traits, load_reviewed_venue_role_traits  # noqa: E402
 from tests.simulation.venue_rolling_roles import RollingRoleTransportPaused, VenueRollingRoles  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
+from tests.simulation.venue_table_shop import VenueTableShop  # noqa: E402
 from tests.simulation.venue_timeout_recovery import verified_runtime_timeout_recoveries  # noqa: E402
 from tests.simulation.venue_world import VenueWorld  # noqa: E402
 from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
@@ -215,6 +216,7 @@ def run_simulation(
     rolling_board: bool = False, rolling_history: bool = False, rolling_play: bool = False, rolling_peers: bool = False,
     show_verified_write_scope: bool = False, align_write_reviews: bool = False, resume: bool = False,
     customer_model_source: str = "auto", reply_review_no_reasoning: bool = False,
+    rolling_table_groups: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -246,6 +248,8 @@ def run_simulation(
             raise ValueError("规划模型对照只适用于真实模型沙盒")
         if reply_review_no_reasoning and (mode != "real" or model_source != "opencode-go"):
             raise ValueError("关闭回复审查推理只适用于指定 OpenCode Go 的真实沙盒")
+        if rolling_table_groups and scenario_name != "rolling-roles":
+            raise ValueError("模拟桌群须在持续角色运行中启用")
         if show_verified_write_scope and not guard_writes:
             raise ValueError("规划器写入范围对照要求独立授权检查")
         if align_write_reviews and not show_verified_write_scope:
@@ -414,10 +418,12 @@ def run_simulation(
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
         elif scenario_name == "rolling-roles":
+            table_shop = VenueTableShop(actor.client, run_dir / "table_shop.jsonl") if rolling_table_groups and mode == "real" else None
             scenario = VenueRollingRoles(people=people, actor=actor, judge=judge, channel=channel,
                 run_dir=run_dir, start_at=start_at, seed=seed, active_users=active_users,
                 workers=workers, dialogue_turns=dialogue_turns, judge_users=judge_users, publish_boards=rolling_board,
-                seed_public_history=rolling_history, physical_play=rolling_play, peer_dialogues=rolling_peers)
+                seed_public_history=rolling_history, physical_play=rolling_play, peer_dialogues=rolling_peers,
+                table_groups=rolling_table_groups, table_shop=table_shop)
             if not resume:
                 # 角色账本已经创建。此后才公开可续跑的起点，避免中断时留下残缺归档。
                 snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles,
@@ -430,6 +436,7 @@ def run_simulation(
                     "rolling_board": rolling_board, "rolling_history": rolling_history, "rolling_play": rolling_play,
                     "rolling_peers": rolling_peers, "show_verified_write_scope": show_verified_write_scope,
                     "align_write_reviews": align_write_reviews, "reply_review_no_reasoning": reply_review_no_reasoning,
+                    "rolling_table_groups": rolling_table_groups,
                 }}
                 temporary = run_dir / f".{_ROLLING_STATE}.tmp"
                 temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -439,6 +446,9 @@ def run_simulation(
         scenario_started = True
         try:
             report.update(scenario.run())
+            if rolling_table_groups:
+                report["rolling_table_groups"]["agreed_openings"] = sum(
+                    row.reason == "venue_table_opening_confirmed" for row in store.transitions)
         finally:
             report["profile_evidence"] = _profile_evidence(store, initial_profiles, report.get("checks", {}))
         report["checks"]["identity_only_at_start"] = (
@@ -558,6 +568,7 @@ def main() -> int:
     parser.add_argument("--rolling-history", action="store_true", help="用已审核的真人群聊前缀唤醒持续角色")
     parser.add_argument("--rolling-play", action="store_true", help="用已确认四席和真实角色到离场决定推进四小时房态")
     parser.add_argument("--rolling-peers", action="store_true", help="让有关系的活跃顾客自行发起搭子私聊并接收回执唤醒")
+    parser.add_argument("--rolling-table-groups", action="store_true", help="四席确认后建模拟桌群，真实档在群内协商人齐开时间")
     parser.add_argument("--show-verified-write-scope", action="store_true", help="只向沙盒私聊规划器列出本轮已有独立授权的专用写工具")
     parser.add_argument("--align-write-reviews", action="store_true", help="在沙盒私聊规划和回复审查中同时提供本轮授权边界")
     args = parser.parse_args()
@@ -583,6 +594,8 @@ def main() -> int:
             parser.error("历史出行事件只能用于新开的历史私聊续演")
         if args.reply_review_no_reasoning:
             parser.error("续跑时从原始运行读取回复审查配置")
+        if args.rolling_table_groups:
+            parser.error("续跑时从原始运行读取桌群配置")
         run_dir = args.resume_run.resolve()
         try:
             report = resume_rolling_simulation(run_dir)
@@ -603,6 +616,7 @@ def main() -> int:
             rolling_play=args.rolling_play, rolling_peers=args.rolling_peers,
             show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews,
             reply_review_no_reasoning=args.reply_review_no_reasoning,
+            rolling_table_groups=args.rolling_table_groups,
             customer_model_source=args.customer_model_source or (
                 "opencode-go" if args.mode == "real" and args.model_source == "project" else "auto"))
     paused = report.get("provider_pause")
