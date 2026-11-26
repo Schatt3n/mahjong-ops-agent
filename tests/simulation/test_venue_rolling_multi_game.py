@@ -268,6 +268,11 @@ def test_board_clock_refresh_omits_expired_table_without_an_intervening_chat(tmp
     reopened = SQLiteAgentStore(store.path)
     assert reopened.require_game(game_id).closed_reason == "expired_without_full_table"
     assert reopened.get_board_snapshot_by_message_id(channel.room_id, first_board).items[0].game_id == game_id
+    expiry, = board.published_item_expirations(channel.events())[first_board]
+    original = store.get_board_snapshot_by_message_id(channel.room_id, first_board)
+    assert expiry == {"item_no": 1, "published_text": original.items[0].rendered_text,
+                      "cancelled_at": deadline.isoformat()}
+    assert board.published_item_expirations([]) == {}
 
 
 def test_board_clock_republishes_unstarted_table_after_planned_time_without_chat(tmp_path):

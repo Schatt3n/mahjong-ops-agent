@@ -60,6 +60,7 @@ owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是�
 店家项单独核对对歧义的处理。指代、授权或事实确实无法判断，针对性追问、说明已核实的范围并回答能答的部分，或确实需店员查证权限或现场事实时说明要人工确认，都可通过。根据时间、玩法或群看板线索说“你说的是这桌吗”属于有依据的试探。评审须区分试探、澄清和当成事实肯定，不能因为猜中了就放过无依据的肯定。两件事中一件不清楚，另一件能独立安全查答时，应正常推进；只说“稍等”或泛泛请重述、转人工，不能代替可回答的部分。已明确、可查的普通问题被反复追问或直接推给人工也属于店家处理问题。真实人工交接或承诺已有谁在处理须有相应执行及交付证据；仅建议人工确认不等于已交接。工具或模型执行不通时以记录说明阻塞来源，不能归成顾客问法，也不能因为顾客说得含糊就判定店家处理失败。
 确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。若 persisted_game_state 核实顾客来话前后都已确认席位，只告知位置照旧不需要重新写席位；该证据不能证明同桌已同意等待或店家已经转达。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
 核对店家所说的现成桌时，看同轮 agent_execution 中查到的那桌。seat_summary 的 claimed_seats、remaining_seats 和 seats_total 分别是已占座位、剩余座位和座位总数，terms.stake_range 是档位范围，terms.start_time_kind=asap_when_full 表示人齐开。不要从查询参数反推某张结果桌的条件，烟况没有核实时也不能猜已确认。
+prior_board_expirations 是评审独立查到、来话前已发生的看板原条目取消。旧看板证明曾经招募，即使消息仍看得见，同条已取消也不再是实时现成桌。按来话的桌况线索核对是哪一条，另评店家有没有解释原桌。这份后台证据不等于店家当轮实际查询或说明过取消。
 顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
 如果 checks 有“确认现成局席位时”项，单列时长核对，不以已写入的席位当作时长通过。引用真正决定留位的 customer_message 和 agent_execution。此项 pass 还须引用实际送达的 agent_reply，并在 reason 用一对「」逐字分别引用该轮完整顾客来话和说明时长的完整店家回复（时长无关时引用正常确认回复，并说明为何无关）。如果顾客本次表示“打三个钟头左右”，店家邀约只给开局点，后来也只有“留好了”，即使后台这桌正好三小时，本项仍 fail。否则，若顾客只做无条件报名且全程没提及或依赖时长，可以通过，无须追问或主动补报时长。
 沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。顾客明确接受一个连续范围时，单个钟点的查询不能证明整段无局；即使结果为空，店家用范围首点替代全区间后直接答无局，也必须判店家项 fail。能涵盖整个时段的查局证据（或明确只报子范围结果并继续核对其余条件）才支持对应结论。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
@@ -69,7 +70,7 @@ _PEER_CITATION_RULES = (
     "顾客项通过须逐条引用实际发送的 peer_message。店家和首次联系店家项均不能引用这两类证据。"
 )
 _EVIDENCE_ID_FIELDS = ("event_id", "trace_id", "message_id")
-_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to", "input_batch", "quoted_message_id")
+_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to", "input_batch", "quoted_message_id", "board_receipt")
 
 
 @dataclass(slots=True)
@@ -235,7 +236,8 @@ def _same_visible_message(archived: Row, visible: Row) -> bool:
 
 
 def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[Row], outcome: Row | None,
-                      *, first_contact: bool, delivered_history: bool = False) -> _Evidence:
+                      *, first_contact: bool, delivered_history: bool = False,
+                      board_expirations: Mapping[str, Sequence[Row]] | None = None) -> _Evidence:
     """根据同一顾客的实际来话和投递建立最小可审计证据。"""
     evidence = _Evidence([], {check: set() for check in _CHECKS}, {check: set() for check in _CHECKS})
     ledger = {row["message_id"]: row for row in records}
@@ -256,6 +258,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
         peer_turn = bool(inbound and _is_peer_message(inbound[0]))
         cause = turn.get("caused_by")
         peer_cause = False
+        latest_board = None
         if inbound or delivered_history:
             history = (turn.get("decision", {}).get("context") or {}).get("history", ())
             first_input_position = positions[inbound[0]["message_id"]] if inbound else None
@@ -356,6 +359,14 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                             and tool.get("result", {}).get("recorded_status") == "confirmed" for tool in tools)
             execution = {"kind": "agent_execution", "responds_to": message_id, "tools": tools,
                          **_pick(turn, ("runtime_status", "error_type", "failure_stage"))}
+            if latest_board in history_ids and board_expirations:
+                before = datetime.fromisoformat(inbound[0]["sent_at"])
+                published = datetime.fromisoformat(ledger[latest_board]["sent_at"])
+                ended = [_pick(row, ("item_no", "published_text", "cancelled_at"))
+                         for row in board_expirations.get(latest_board, ())
+                         if published <= before and datetime.fromisoformat(row["cancelled_at"]) < before]
+                if ended:
+                    execution.update(board_receipt=latest_board, prior_board_expirations=ended)
             if persisted := _pick(turn.get("persisted_game_state") or {}, _PERSISTED_FIELDS):
                 execution["persisted_game_state"] = persisted
             if trace_id not in evidence.allowed[AGENT_CHECK]:
@@ -460,10 +471,11 @@ class PreparedDialogueReview:
 
 def prepare_dialogue_review(*, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                             outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
-                            delivered_history: bool = False) -> PreparedDialogueReview:
+                            delivered_history: bool = False,
+                            board_expirations: Mapping[str, Sequence[Row]] | None = None) -> PreparedDialogueReview:
     """从本地归档构造判决证据，无需客户端或任何外部请求。"""
     projected = _project_dialogue(customer_id, turns, records, outcome, first_contact=first_contact,
-                                  delivered_history=delivered_history)
+                                  delivered_history=delivered_history, board_expirations=board_expirations)
     checks = [ROLE_CHECK]
     if not role_only or any(row["kind"] in {"agent_reply", "agent_execution", "agent_initiative"} for row in projected.rows):
         checks.append(AGENT_CHECK)
@@ -518,7 +530,7 @@ def _validate_dialogue_judgment(judgment: JudgeResult, prepared: PreparedDialogu
     result = judgment.to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
-        "version": 8, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
+        "version": 9, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
         "source_turn_bytes": prepared.source_turn_bytes,
     }
     if rolling_check_ids:
@@ -547,10 +559,11 @@ def _validate_dialogue_judgment(judgment: JudgeResult, prepared: PreparedDialogu
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                     outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
                     additional_instructions: str = "", delivered_history: bool = False,
-                    rolling_check_ids: bool = False, retry_invalid: bool = False) -> dict[str, Any]:
+                    rolling_check_ids: bool = False, retry_invalid: bool = False,
+                    board_expirations: Mapping[str, Sequence[Row]] | None = None) -> dict[str, Any]:
     """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
     prepared = prepare_dialogue_review(customer_id=customer_id, turns=turns, records=records, outcome=outcome,
-        first_contact=first_contact, role_only=role_only, delivered_history=delivered_history)
+        first_contact=first_contact, role_only=role_only, delivered_history=delivered_history, board_expirations=board_expirations)
     return judge_prepared_dialogue(judge, prepared, trace_id=f"judge:{customer_id}",
         additional_instructions=additional_instructions, rolling_check_ids=rolling_check_ids, retry_invalid=retry_invalid)
 

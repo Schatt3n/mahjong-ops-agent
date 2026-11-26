@@ -45,6 +45,16 @@ class VenueRollingBoard:
         verified = self._verified_boards(records)
         return [message for message, _ in verified]
 
+    def published_item_expirations(self, records: list[dict]) -> dict[str, list[dict]]:
+        """保留真实送达的看板条目及其到期证据，由评审按每条来话的时点筛选。"""
+        expired = {row.entity_id: row.occurred_at for row in self.store.transitions
+                   if row.entity_type == "game" and row.to_status == "cancelled"
+                   and row.reason == "expired_without_full_table"}
+        return {message["message_id"]: items for message, snapshot in self._verified_boards(records)
+                if (items := [{"item_no": item.item_no, "published_text": item.rendered_text,
+                               "cancelled_at": expired[item.game_id].isoformat()}
+                              for item in snapshot.items if item.game_id in expired])}
+
     def audit(self, rows: list[dict], records: list[dict]) -> dict:
         """按建局工具、看板消息、席位事务及真实回执交叉核对。"""
         chat = {row["message_id"]: row for row in records}

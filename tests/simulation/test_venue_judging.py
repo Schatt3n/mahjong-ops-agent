@@ -654,7 +654,7 @@ def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
     client = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E03", "E04", "E05"))
     result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn], records=records,
                              rolling_check_ids=True)
-    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 8)
+    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 9)
     assert json.dumps(turn, sort_keys=True) == raw_before
     system, payload = client.messages
     assert "不要从查询参数反推某张结果桌的条件" in system["content"]
@@ -725,6 +725,32 @@ def _peer_case():
     turn["virtual_at"] = outgoing["sent_at"]
     turn["decision"]["context"]["history"] = [dict(incoming)]
     return turn, incoming, outgoing
+
+
+@pytest.mark.parametrize("case", ["expired", "after_inquiry", "same_tick", "unseen", "future_board", "mismatched_text"])
+def test_rolling_board_expiry_uses_original_receipt_and_pre_inquiry_change(case):
+    """失效证明仅绑定实际看过的旧看板及早于来话的该桌变化。"""
+    board_id = "outbound:board:historical"
+    published_text = "2、人齐开 杭麻 1～3元 无烟 173"
+    board = {"message_id": board_id, "sender_id": "simulation-agent", "recipient_id": "public-room",
+             "direction": "outbound", "kind": "group", "text": published_text,
+             "sent_at": "2026-11-26T19:00:00+08:00" if case == "future_board" else "2026-11-26T11:37:30+08:00"}
+    incoming = dict(_chat("u1", text="看板上那桌无烟杭麻还缺人吗？"), sent_at="2026-11-26T18:35:00+08:00")
+    turn = _turn(1)
+    turn["decision"]["context"]["history"] = [] if case == "unseen" else [dict(board)]
+    if case == "mismatched_text":
+        turn["decision"]["context"]["history"][0]["text"] = "另一桌"
+    hour = {"after_inquiry": "18:40", "same_tick": "18:35"}.get(case, "17:05")
+    expired = {"item_no": 2, "published_text": published_text, "cancelled_at": f"2026-11-26T{hour}:00+08:00"}
+    prepared = prepare_dialogue_review(customer_id="a", turns=[turn], records=[board, incoming],
+        delivered_history=True, board_expirations={board_id: [expired]})
+    evidence = next(row for row in prepared.request if row["kind"] == "agent_execution")
+    if case == "expired":
+        assert prepared.aliases[evidence["board_receipt"]] == board_id
+        assert evidence["prior_board_expirations"] == [expired]
+        assert prepared.projected.allowed[AGENT_CHECK] >= {"agent-trace-1"}
+    else:
+        assert "prior_board_expirations" not in evidence
 
 
 @pytest.mark.parametrize("mismatch", [None, "foreign_recipient", "unseen", "wrong_sender", "future"])

@@ -944,10 +944,11 @@ class VenueRollingRoles:
                 remaining.remove(actor_id)
                 selected.append(actor_id)
                 covered.update(strata[actor_id])
+        board_expirations = self.board.published_item_expirations(records) if self.board and selected else None
         samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id],
                     records=[row for row in records if not row.get("table_game_id") or actor_id in row["visible_to"]],
                     role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS,
-                    rolling_check_ids=True, retry_invalid=True)
+                    rolling_check_ids=True, retry_invalid=True, board_expirations=board_expirations)
                    for actor_id in selected]
         valid = [actor_id for actor_id, sample in zip(selected, samples, strict=True) if sample["status"] == "valid"]
         valid_coverage = Counter(tag for actor_id in valid for tag in strata[actor_id])
