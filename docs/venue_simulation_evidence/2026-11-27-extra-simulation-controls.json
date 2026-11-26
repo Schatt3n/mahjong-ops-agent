@@ -149,5 +149,47 @@
   "simulation_test_suite": {
     "passed": 598,
     "path": "tests/simulation"
+  },
+  "live_regular_partner_control": {
+    "seed": 72,
+    "provider": "opencode_go",
+    "model": "deepseek-v4.1-flash",
+    "transport_attempts": 0,
+    "active_roles": 2,
+    "max_concurrency": 1,
+    "private_messages": 2,
+    "causal_replies": 1,
+    "private_conversations": 1,
+    "private_isolation_verified": true,
+    "operator_inbound": 0,
+    "no_agent_conversation_turns": true,
+    "mode": "live_role_only",
+    "status": "passed",
+    "archive_group": "peer_opencode_control_20261127",
+    "base": "8d48215",
+    "initial_role_roster": 500,
+    "inactive_roster_observers": 1,
+    "source_persona_fixture": "2026-11-25-mock-cb2b03e5cc",
+    "run_scope": "仅对固定搭子私聊的发起和真实收件续话，店家未进入流程",
+    "decisions": [
+      {
+        "trigger": "timer",
+        "action": "send",
+        "real_http_response_complete": true,
+        "world_extractions": 1,
+        "final_world_conflict": null
+      },
+      {
+        "trigger": "peer_receipt",
+        "action": "send",
+        "real_http_response_complete": true,
+        "world_extractions": 2,
+        "final_world_conflict": null
+      }
+    ],
+    "conversation_summary": [
+      "傍晚后找人打川麻，底注 0.5 至 1，最多玩三个小时，询问搭子有没有空",
+      "主要打红中，川麻不熟，个人档位 1 至 2，傍晚后能到，追问目前人数"
+    ]
   }
 }
