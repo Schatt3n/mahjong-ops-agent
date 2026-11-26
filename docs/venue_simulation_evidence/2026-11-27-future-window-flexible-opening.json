@@ -1,0 +1,49 @@
+{
+  "source_run": "2026-11-25-real-85ac9eba42",
+  "source_artifacts": ["agent_trace.log", "chat.sqlite3"],
+  "role_suffix": "0038",
+  "trace_id": "trace_5295fa21fef851c9899f654c",
+  "local_received_at": "2026-11-26T09:37:00+08:00",
+  "conversation": [
+    {"ref": 1, "speaker": "customer", "text": "老板 昨天说组的那桌一点底杭麻后来组成了吗 现在还有位吗"},
+    {"ref": 2, "speaker": "shop", "text": "我这边没查到昨天那桌一点底杭麻还在组，眼下也没有余位可报。要不我帮你重新凑一桌？"},
+    {"ref": 3, "speaker": "customer", "text": "老板 那重新凑一桌吧 杭州麻将一点底 午后能到 还有位吗"},
+    {"ref": 4, "speaker": "shop", "text": "午后一点底杭麻现在没有能搭的桌诶，我给你凑一桌的话，你说个开场时间吧，还是人齐了就开？"},
+    {"ref": 5, "speaker": "customer", "text": "老板 那就人齐了开吧 午后都行 一点底杭麻"}
+  ],
+  "verified_scope": {
+    "lookup_scope": "personal",
+    "game_type": "hangzhou_mahjong",
+    "stake": 1,
+    "opening_window": {"start_at": "2026-11-26T12:00:00+08:00", "end_at": "2026-11-26T18:00:00+08:00"},
+    "has_fixed_opening_authority": false,
+    "supporting_customer_refs": [3, 5]
+  },
+  "observed": {
+    "successful_empty_lookups": [{"call_id": "lookup_pm", "step": 2}, {"call_id": "lookup_pm2", "step": 6}],
+    "rejected_create_calls": ["create1", "create2", "create_asap1"],
+    "rejected_create_reason": "flexible game can start before the searched opening window starting at 2026-11-26T12:00:00+08:00; it has no enforceable earliest start",
+    "runtime_end": "max_steps_exceeded",
+    "only_delivered_reply": "稍等一下"
+  },
+  "concrete_current_limit": {
+    "lookup": "search_current_games supports start_time_range for existing games.",
+    "create": "create_game accepts additional requirement keys, but the current lifecycle does not enforce earliest_start_at or a start_time_range for asap_when_full. Its derived latest_start_at is creation plus four hours, with no earliest opening guard represented by those fields.",
+    "follow_up": "schedule_follow_up can persist a limited re-evaluation of the current goal. It does not schedule or constrain a game opening, guarantee that recruitment will succeed, or authorize a downstream write."
+  },
+  "verified_offline_handoff": {
+    "test": "tests/test_direct_main_reply_contract.py::test_future_flexible_opening_handoff_preserves_delegation_and_does_not_place_early",
+    "path": "Actual Runtime, SQLite and sandbox private delivery with deterministic model responses. The same scoped search ran, the unsupported flexible create was blocked, and a substantive clarification was delivered with zero game, invitation or room writes.",
+    "clarification": "午后暂时没找到能搭的现成桌。人齐开可能提前，你愿意定个午后的开场时间吗？",
+    "positive_controls": [
+      "A new customer message explicitly selects 13:00. The existing fixed-time path verifies and creates one correct scheduled game, then delivers confirmation.",
+      "An independent immediate fill request with no future start constraints still creates an asap_when_full game, completes a real candidate lookup and delivers a receipt."
+    ],
+    "real_model_retest": false
+  },
+  "separate_feature": {
+    "need": "Support recruiting for a fill-based game whose actual opening is bounded by a durable earliest and latest local time.",
+    "product_decisions": "Decide when recruitment may start, how to handle a roster filled before the earliest opening, and how to handle a roster incomplete at the latest opening.",
+    "future_acceptance": "Later work should verify those invariants across synchronous create, join, actual play-start, scheduling and restart, without exposing an exact scheduled clock that the customer never agreed."
+  }
+}

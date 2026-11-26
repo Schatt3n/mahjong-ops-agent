@@ -319,6 +319,97 @@ def test_main_and_review_prompts_share_direct_reply_and_nonfixed_confirmation_ru
     assert "无具体局选项的服务提议可省去" not in review
 
 
+def test_future_flexible_opening_handoff_preserves_delegation_and_does_not_place_early(tmp_path):
+    """有未来时段的人齐开暂不落库，实际送达澄清，明确约定后再建；普通人齐开继续可用。"""
+    at = datetime.fromisoformat("2026-11-26T09:37:00+08:00")
+    fixed_at = "2026-11-26T13:00:00+08:00"
+    window = {"start_at": "2026-11-26T12:00:00+08:00", "end_at": "2026-11-26T18:00:00+08:00"}
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1}
+    first = "老板 那就人齐了开吧 午后都行 一点底杭麻"
+    handoff = "午后暂时没找到能搭的现成桌。人齐开可能提前，你愿意定个午后的开场时间吗？"
+    confirmation = "那下午一点开吧，帮我组一桌。"
+    receipt = "好，下午一点这桌记上了，还差三位。"
+    now_request = "老板帮我组一桌一块底杭麻，人齐就开。"
+    now_receipt = "好，给你记上了，人齐开，还差三位。"
+
+    def create_args(customer, name, requirement):
+        return {"organizer_id": customer, "organizer_name": name, "known_players": [], "requirement": requirement}
+
+    class ShopClient(StaticAgentClient):
+        """普通人齐开沿用真实回执的局号完成当下招募查询。"""
+
+        def complete(self, messages, **options):
+            context = json.loads(messages[-1]["content"])
+            if context["current_message"]["text"] == now_request:
+                tools = context["turn_tool_evidence"]
+                if tools and tools[-1]["name"] == "create_game" and tools[-1]["allowed"]:
+                    game_id = tools[-1]["result"]["game"]["game_id"]
+                    self.outputs.insert(0, _call("search_customers", {"game_id": game_id}))
+            return super().complete(messages, **options)
+
+    main = ShopClient([
+        _call("search_current_games", {"lookup_scope": "personal", "requirement": terms | {"start_time_range": window}}),
+        _call("create_game", create_args("guest", "顾客", terms | {"start_time_kind": "asap_when_full",
+              "start_time_range": window, "earliest_start_at": window["start_at"]})),
+        _reply(handoff, status="waiting_user"),
+        _call("create_game", create_args("guest", "顾客", terms | {"start_time_kind": "scheduled",
+              "start_time": "13:00", "planned_start_at": fixed_at})),
+        _reply(receipt),
+        _call("create_game", create_args("walkin", "另一顾客", terms | {"start_time_kind": "asap_when_full"})),
+        _reply(now_receipt),
+    ])
+    availability = StaticAgentClient([json.dumps({
+        "clock_role": "other", "lookup_scope": "personal", "opening_window": window,
+        "opening_dayparts": {"date": "2026-11-26", "parts": ["afternoon"], "source_ref": 1},
+        "accepted_stake_range": {"min": 1, "max": 1}, "known_cap_score": None,
+        "has_fixed_opening_authority": False, "opening_customer_ref": None,
+        "current_ref": 1, "supporting_customer_refs": [1],
+    }), json.dumps({
+        "clock_role": "opening", "lookup_scope": "personal",
+        "opening_window": {"start_at": fixed_at, "end_at": fixed_at},
+        "accepted_stake_range": {"min": 1, "max": 1}, "known_cap_score": None,
+        "has_fixed_opening_authority": True, "opening_customer_ref": 3,
+        "current_ref": 3, "supporting_customer_refs": [1, 3],
+    })])
+    authority = StaticAgentClient([json.dumps({"scope": "create", "customer_ref": ref, "shop_offer_ref": None})
+                                   for ref in (3, 1)])
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    traces = InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=main, store=store, trace_recorder=traces,
+                           table_availability_client=availability, creation_authorization_client=authority)
+    channel = SandboxChannel(runtime, room_id="afternoon-window", identities={"guest": "顾客", "walkin": "另一顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    with using_clock(lambda: at):
+        before = channel.send(MessageEnvelope("afternoon-inbound", "guest", first, at, "private", AGENT_ID))
+        assert before["final_reply"] == handoff
+        outbound, = before["archive_outputs"]
+        assert outbound["source_message_id"] == "afternoon-inbound" and outbound["text"] == handoff
+        assert not store.games and not store.invite_drafts and not store.room_reservations and not authority.calls
+        business_tools = [event.content for event in traces.get_trace(before["trace_id"]) if event.step == "tool_result"]
+        read, denied = [tool for tool in business_tools if tool["name"] in {"search_current_games", "create_game"}]
+        assert read["called"] and read["allowed"] and read["result"]["matches"] == []
+        assert read["result"]["requirement"]["start_time_range"] == window
+        assert not denied["called"] and "no enforceable earliest start" in denied["error"]
+        assert json.loads(main.calls[2]["messages"][-1]["content"])["current_message"]["text"] == first
+
+    next_at = at.replace(minute=38)
+    with using_clock(lambda: next_at):
+        after = channel.send(MessageEnvelope("confirmed-inbound", "guest", confirmation, next_at, "private", AGENT_ID))
+        assert after["final_reply"] == receipt
+        scheduled, = store.games.values()
+        assert scheduled.planned_start_at.isoformat() == fixed_at
+        assert scheduled.organizer_id == "guest"
+
+        unbounded = channel.send(MessageEnvelope("unbounded-inbound", "walkin", now_request, next_at, "private", AGENT_ID))
+        assert unbounded["final_reply"] == now_receipt
+        flexible = next(game for game in store.games.values() if game.organizer_id == "walkin")
+        assert flexible.planned_start_at is None and flexible.requirement["start_time_kind"] == "asap_when_full"
+        assert flexible.requirement["latest_start_at"] == "2026-11-26T13:38:00+08:00"
+    assert len(availability.calls) == 2 and len(authority.calls) == 2
+    assert not store.room_reservations and not store.invite_drafts
+    store._connection.close()
+
+
 def test_main_prompt_grounds_organizer_receipt_in_table_state_and_delivery():
     """待组桌和待审批邀约只能支持实际进展，回执不得扩大成已联系或未来通知。"""
     prompts = ROOT / "src/mahjong_agent_runtime/prompts"
