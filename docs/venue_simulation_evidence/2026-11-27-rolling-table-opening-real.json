@@ -156,6 +156,69 @@
         ],
         "note": "顾客原稿引用归属均合格。程序计为四票，但店家把明确只能打两三小时的两条原话都分类为同意，整桌原已设四小时。不能把开场能到当成接受全部条件，原程序结果和实际错误外发都保留。"
       }
+    },
+    {
+      "run": "rolling-actual-shop-duration-fix-20261127",
+      "start_commit": "c249f36",
+      "status": "passed",
+      "checks": {
+        "actual_rolling_has_one_opened_group": true,
+        "all_four_roles_sent_in_table_group": true,
+        "every_table_decision_is_a_valid_actual_model_output": true,
+        "not_seen_by_fifth_role": true,
+        "agreed_after_four_votes": true,
+        "actual_final_group_confirmation": true
+      },
+      "counts": {
+        "opened": 1,
+        "durable_group_messages": 14,
+        "role_receipts": 24,
+        "shop_receipts": 11
+      },
+      "fixture": "四位本来能接受一块底且偏好四小时的真实角色，均看到本次主动报名并同意四小时的事前回执。到店时刻分别不同。",
+      "opening": {
+        "proposal_id": "table-opening-offer|2026-11-27T19:30:00+08:00|customer:role-event:d95cdf3aacd9cbb258bf95e5302226d267d37b30fc93f2c5f423d1336300b8ce",
+        "start_at": "2026-11-27T19:30:00+08:00",
+        "accepted_count": 4,
+        "declined_count": 0,
+        "committed": true
+      },
+      "actual_store_start_at": "2026-11-27T19:30:00+08:00",
+      "real_shop_outputs": [
+        "人齐了，这桌打 4 小时。大家各自几点能到？咱们在这儿定个开场。",
+        "19:30 开大家能到吗？都行的话就定这个时间。",
+        "那就 19:30 开，大家按这个时间到哈。"
+      ],
+      "distinct_current_votes": [
+        {
+          "actor_suffix": "0005",
+          "receipt": "19:30 我能赶上，一块底那桌可以，打四小时没问题。",
+          "message_id": "customer:role-event:e23ac55ede8a16665760d09c6654eac698b0c5bd145bc7ba52deaf1073a6aaaa",
+          "vote_result": "waiting"
+        },
+        {
+          "actor_suffix": "0013",
+          "receipt": "19:30 这个点我能赶上 一块底无烟那桌没问题 打四小时可以",
+          "message_id": "customer:role-event:f35bc65640a1da822d855939a1a6505b18eaae42bfe73e8c57923a19b320b42e",
+          "vote_result": "waiting"
+        },
+        {
+          "actor_suffix": "0017",
+          "receipt": "19:30 我这边正好能赶上，一块底那桌就这么定行吗。",
+          "message_id": "customer:role-event:0a875c4bd05890e4236b25dca596e39b52579fa15789e8156db8257c5ce4a6a3",
+          "vote_result": "waiting"
+        },
+        {
+          "actor_suffix": "0003",
+          "receipt": "19:30 我能到，一块底无烟那桌就这个点，打四小时行。",
+          "message_id": "customer:role-event:758c2ed7ff0456b5f14efa18d76ee1f5bd4fe37452e165c389edc2864423c05d",
+          "vote_result": "committed"
+        }
+      ],
+      "semantic_reassessment": {
+        "status": "passed",
+        "note": "店家入群时说明约定四小时。三位在本轮明确说可打四小时，另一位沿先前已接纳条件提议就按此时点定。该版没有附加条件或更短硬上限。"
+      }
     }
   ]
 }
