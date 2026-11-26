@@ -1,0 +1,47 @@
+{
+  "source_run": "2026-11-25-real-e36b335fcc",
+  "status": "offline_verified",
+  "old_shop_failures": [
+    {
+      "sequence": 21,
+      "trace_id": "trace_488f8c12def0d347339915f9",
+      "cause": "独立核验漏掉晚间时段。已有定向实查复验，整轮回复待重跑。"
+    },
+    {
+      "sequence": 68,
+      "trace_id": "trace_e550f59f11a352d5a2a146a4",
+      "cause": "来话用晚间有空承接个人查桌，独立核验只有到店下界。五次查询未执行。"
+    },
+    {
+      "sequence": 76,
+      "trace_id": "trace_f7dc88b5b8dc9352c9dfcfa6",
+      "cause": "本人今晚到店并另找杭麻，独立核验只有到店下界。八次查询未执行。"
+    },
+    {
+      "sequence": 49,
+      "trace_id": "trace_68b5c8e3f35af0516156a264",
+      "store_result": "20:15 组局已登记。客户随后只收到稍等一下。",
+      "review": {
+        "provider": "opencode_go",
+        "model": "deepseek-v4.1-flash",
+        "reasoning_effort": "low",
+        "http_header_timeouts": 2,
+        "retry_http_status": 200,
+        "retry_response_status": "incomplete",
+        "retry_incomplete_reason": "max_output_tokens",
+        "retry_reasoning_tokens": 16384,
+        "retry_output_text_blocks": 0
+      }
+    }
+  ],
+  "candidate": {
+    "personal_evening_scope": "独立核验区分晚间可到和同时提出的晚间个人查局，保留问候及另有明确开场时段的边界。",
+    "review_control": "--reply-review-no-reasoning",
+    "review_request": "显式试用 reasoning.effort=none，原回复、原审查合同及独立检查继续执行。",
+    "next": "用原失败来话及真实送达证据逐项复验，重点核对是否实际收到正式答复。"
+  },
+  "offline_evidence": {
+    "passed": 238,
+    "scope": ["tests/simulation/test_venue_models.py", "tests/test_table_availability_authorization.py", "tests/test_tool_consistency_times.py", "tests/test_reply_review_config.py"]
+  }
+}

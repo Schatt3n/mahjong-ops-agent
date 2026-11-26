@@ -44,7 +44,7 @@ from tests.simulation.venue_history_seed import (  # noqa: E402
 from tests.simulation.venue_history_variants import HISTORY_GROUP_VARIANTS, load_group_history_variant  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
-    opencode_auxiliary, opencode_config, venue_planner_config,
+    opencode_auxiliary, opencode_config, venue_planner_config, venue_reply_review_no_reasoning,
 )
 from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
 from tests.simulation.venue_role_journal import RoleSchedulerBusyError, VenueRoleJournal  # noqa: E402
@@ -214,7 +214,7 @@ def run_simulation(
     history_world_event: str | None = None,
     rolling_board: bool = False, rolling_history: bool = False, rolling_play: bool = False, rolling_peers: bool = False,
     show_verified_write_scope: bool = False, align_write_reviews: bool = False, resume: bool = False,
-    customer_model_source: str = "auto",
+    customer_model_source: str = "auto", reply_review_no_reasoning: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -226,10 +226,11 @@ def run_simulation(
     report = {"mode": mode, "scenario": scenario_name, "seed": seed,
               "scenario_date": scenario_date.isoformat(), "status": "failed",
               "channel": {"adapter": "sandbox", "live_wechat_enabled": False}}
-    controls = [name for name, enabled in (
+    private_controls = [name for name, enabled in (
         ("planner_low", planner_low), ("clarify_consent", clarify_consent), ("guard_writes", guard_writes),
         ("show_verified_write_scope", show_verified_write_scope), ("align_write_reviews", align_write_reviews),
     ) if enabled]
+    controls = private_controls + (["reply_review_no_reasoning"] if reply_review_no_reasoning else [])
     write_guard = None
     scenario_started = False
     try:
@@ -243,6 +244,8 @@ def run_simulation(
             raise ValueError("角色来源必须为 generated 或 history")
         if mode != "real" and (planner_low or clarify_consent or guard_writes):
             raise ValueError("规划模型对照只适用于真实模型沙盒")
+        if reply_review_no_reasoning and (mode != "real" or model_source != "opencode-go"):
+            raise ValueError("关闭回复审查推理只适用于指定 OpenCode Go 的真实沙盒")
         if show_verified_write_scope and not guard_writes:
             raise ValueError("规划器写入范围对照要求独立授权检查")
         if align_write_reviews and not show_verified_write_scope:
@@ -326,6 +329,8 @@ def run_simulation(
                     if role_config is not None else _real_roles())
             if selected is not None:
                 main_override = OpenAICompatibleAgentClient(venue_planner_config(selected, reasoning_low=planner_low))
+                if reply_review_no_reasoning:
+                    review_override = venue_reply_review_no_reasoning(selected)
                 if guard_writes:
                     write_guard = VenueWriteGuard(opencode_auxiliary(selected, max_tokens=700, workers=min(workers, 4)),
                         run_dir / "write_authorization.jsonl", repair_stale_citation=True, resume_audit=resume)
@@ -371,7 +376,7 @@ def run_simulation(
             channel = SandboxChannel(runtime, room_id="venue-group",
                 identities=nicknames, archive_path=run_dir / "chat.sqlite3",
                 write_guard=write_guard, show_verified_write_scope=show_verified_write_scope,
-                production_private_routing=mode == "real" and not controls)
+                production_private_routing=mode == "real" and not private_controls)
             if show_verified_write_scope:
                 report["show_verified_write_scope"] = True
             report["initial_contacts"] = contacts = (starting["contacts"] if starting else
@@ -424,7 +429,7 @@ def run_simulation(
                     "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes, "role_source": role_source,
                     "rolling_board": rolling_board, "rolling_history": rolling_history, "rolling_play": rolling_play,
                     "rolling_peers": rolling_peers, "show_verified_write_scope": show_verified_write_scope,
-                    "align_write_reviews": align_write_reviews,
+                    "align_write_reviews": align_write_reviews, "reply_review_no_reasoning": reply_review_no_reasoning,
                 }}
                 temporary = run_dir / f".{_ROLLING_STATE}.tmp"
                 temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -546,6 +551,7 @@ def main() -> int:
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     parser.add_argument("--resume-run", type=Path, help="继续已有持续角色运行，复用该目录中的起始配置")
     parser.add_argument("--planner-low", action="store_true", help="仅在沙盒主模型开启显式低推理")
+    parser.add_argument("--reply-review-no-reasoning", action="store_true", help="仅在 OpenCode Go DeepSeek 沙盒独立话术审查关闭推理")
     parser.add_argument("--clarify-consent", action="store_true", help="加载独立副本报名授权对照提示")
     parser.add_argument("--guard-writes", action="store_true", help="启用独立私聊写入授权检查")
     parser.add_argument("--rolling-board", action="store_true", help="在持续角色虚拟时钟执行正式群看板发布，并审计同局报名")
@@ -575,6 +581,8 @@ def main() -> int:
     if args.resume_run:
         if args.history_world_event is not None:
             parser.error("历史出行事件只能用于新开的历史私聊续演")
+        if args.reply_review_no_reasoning:
+            parser.error("续跑时从原始运行读取回复审查配置")
         run_dir = args.resume_run.resolve()
         try:
             report = resume_rolling_simulation(run_dir)
@@ -594,6 +602,7 @@ def main() -> int:
             role_source=args.role_source, rolling_board=args.rolling_board, rolling_history=args.rolling_history,
             rolling_play=args.rolling_play, rolling_peers=args.rolling_peers,
             show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews,
+            reply_review_no_reasoning=args.reply_review_no_reasoning,
             customer_model_source=args.customer_model_source or (
                 "opencode-go" if args.mode == "real" and args.model_source == "project" else "auto"))
     paused = report.get("provider_pause")

@@ -11,9 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL, StaticAgentClient
+from mahjong_agent_runtime.review_config import build_reply_review_client
 
 from .venue_models import (configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
-                           opencode_auxiliary, opencode_config, venue_planner_config)
+                           opencode_auxiliary, opencode_config, venue_planner_config, venue_reply_review_no_reasoning)
 from .venue_write_guard import VenueWriteGuard, WriteAuthorization, WritePermission
 
 
@@ -157,6 +158,30 @@ def test_launcher_keeps_planner_consent_changes_inside_the_sandbox(tmp_path, mon
     projected = runtime.context_builder.prompt_path.read_text(encoding="utf-8")
     assert len(digest) == 64 and original.read_text(encoding="utf-8") == "原生规划提示"
     assert projected.startswith("原生规划提示") and "明确授权" in projected
+
+
+def test_sandbox_review_reasoning_control_preserves_the_independent_reply_review_budget(tmp_path, monkeypatch):
+    """只有实验审查客户端显式发送无推理，原审查 JSON、预算和主规划不变。"""
+    for variable in tuple(os.environ):
+        if variable.startswith("MAHJONG_REPLY_REVIEW_LLM_"):
+            monkeypatch.delenv(variable)
+    _profile(tmp_path, model="deepseek-v4.1-flash")
+    monkeypatch.setenv("TEST_VENUE_PROVIDER_KEY", "fixture-key")
+    monkeypatch.setenv("OPENCODE_GO_RESPONSE_REASONING", "high")
+    base = opencode_config(tmp_path, max_concurrency=3)
+    default = build_reply_review_client(base).config
+    experimental = venue_reply_review_no_reasoning(base).config
+    assert base.request_diagnostics()["reasoning_effort"] == "high"
+    assert default.request_diagnostics()["reasoning_effort"] == "low"
+    assert experimental.request_diagnostics()["reasoning_effort"] == "none"
+    assert (experimental.max_tokens, experimental.retry_attempts, experimental.max_concurrency) == (16384, 3, 3)
+    endpoint, payload = experimental._request_payload([{"role": "user", "content": "检查原回复"}])
+    assert endpoint == f"{OPENCODE_GO_BASE_URL}/responses"
+    assert payload["reasoning"] == {"effort": "none"} and payload["text"]["format"] == {"type": "json_object"}
+
+    monkeypatch.setenv("MAHJONG_REPLY_REVIEW_LLM_MODEL", "unrelated-review-model")
+    with pytest.raises(ValueError, match="需要 OpenCode Go DeepSeek Responses 审查模型"):
+        venue_reply_review_no_reasoning(base)
 
 
 @pytest.mark.parametrize("status", ["authorized", "no_permission", "invalid", "unavailable"])

@@ -10,6 +10,7 @@ from pathlib import Path
 import tomllib
 
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient, OPENCODE_GO_BASE_URL
+from mahjong_agent_runtime.review_config import build_reply_review_client
 
 from .venue_write_guard import VenueWriteGuard
 
@@ -97,6 +98,18 @@ def opencode_auxiliary(config: AgentLLMConfig, *, max_tokens: int, workers: int)
 def venue_planner_config(config: AgentLLMConfig, *, reasoning_low: bool) -> AgentLLMConfig:
     """仅对仿真的规划客户端做低推理对照，角色与独立判定沿用原连接。"""
     return replace(config, thinking_mode="enabled", reasoning_effort="low") if reasoning_low else config
+
+
+def venue_reply_review_no_reasoning(config: AgentLLMConfig) -> OpenAICompatibleAgentClient:
+    """保留完整的独立审查及预算，只为沙盒 OpenCode Go DeepSeek Responses 关闭推理。"""
+    client = build_reply_review_client(config)
+    review = client.config if client is not None else None
+    if (not isinstance(review, VenueDeepSeekResponsesConfig) or review.provider != "opencode_go"
+            or review.api_protocol != "responses" or not review.model.rsplit("/", 1)[-1].startswith("deepseek-")):
+        raise ValueError("关闭沙盒回复审查推理需要 OpenCode Go DeepSeek Responses 审查模型")
+    return OpenAICompatibleAgentClient(replace(
+        review, thinking_mode="disabled", reasoning_effort=None, responses_no_reasoning=True,
+    ))
 
 
 _CONSENT_CLARIFICATION = """

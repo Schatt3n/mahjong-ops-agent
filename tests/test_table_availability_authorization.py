@@ -877,6 +877,61 @@ def test_source_bound_evening_arrival_estimate_and_maximum_are_distinct_from_ope
     }
 
 
+@pytest.mark.parametrize(("text", "role", "floor", "game_type", "stakes", "explicit_evening"), [
+    ("老板好，晚上六点半后有空，想打四川麻将，2到3元底，无烟的，能搭一桌吗？",
+     "arrival_not_before", "18:30", "sichuan_mahjong", {"min": 2, "max": 3}, True),
+    ("老板好 看板上红中那桌烟况待定 我今晚七点半能到 想打杭麻 有没有0.5档或1档的杭麻桌",
+     "arrival_estimate", "19:30", "hangzhou_mahjong", {"min": 0.5, "max": 1}, True),
+    ("老板晚上好，杭麻0.5档或1档有吗，我七点半能到",
+     "arrival_estimate", "19:30", "hangzhou_mahjong", {"min": 0.5, "max": 1}, False),
+])
+def test_personal_evening_request_can_read_matching_stock_after_midnight(text, role, floor, game_type, stakes,
+                                                                  explicit_evening, tmp_path):
+    """复现两条滚动原话和问候对照，只有独立核实为晚间查局才能查次日清晨。"""
+    at = SENT.replace(minute=9, second=30)
+    store = SQLiteAgentStore(tmp_path / "overnight-personal.sqlite3")
+    message = _incoming(text, sent=at)
+    dayparts = {"date": at.date().isoformat(), "parts": ["evening"], "source_ref": 1} if explicit_evening else None
+    review = ReviewClient([_decision(clock_role=role, opening_window=None, opening_dayparts=dayparts,
+                                    accepted_stake_range=stakes)])
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=InMemoryTraceRecorder(),
+                                   table_availability_client=review)
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        games = {}
+        for host, starts in (("night", "2026-11-26T20:00:00+08:00"), ("after-midnight", "2026-11-27T00:30:00+08:00")):
+            game, _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name="桌主",
+                known_players=[{"customer_id": host}], trace_id=host, requirement={
+                    "game_type": game_type, "stake": stakes["max"], "planned_start_at": starts,
+                })
+            games[host] = game.game_id
+
+        def query(end, step):
+            tool = ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": False, "requirement": {
+                "game_type": game_type, "stake_range": stakes, "start_time_range": {
+                    "start_at": f"2026-11-26T{floor}:00+08:00", "end_at": end,
+                },
+            }})
+            action = AgentAction(goal="找合适的现成桌", objective_status="needs_tool", reasoning_summary="查现成桌",
+                                 tool_calls=[tool])
+            return service.execute_tool_calls(action, message=message, trace_id=message.message_id, step_index=step,
+                previous_step_tool_results=[], run_id="personal-evening", run_version=store.conversation_version("dm")).tool_results[0]
+
+        overnight = query("2026-11-27T06:00:00+08:00", 1)
+        if explicit_evening:
+            assert overnight.called and overnight.allowed
+            assert {option["game"]["game_id"] for option in overnight.result["matches"]} == set(games.values())
+        else:
+            assert not overnight.called and not overnight.allowed and "2026-11-26T23:59:59.999999+08:00" in overnight.error
+            same_day = query("2026-11-26T23:59:59+08:00", 2)
+            assert same_day.called and same_day.allowed
+            assert {option["game"]["game_id"] for option in same_day.result["matches"]} == {games["night"]}
+
+    assert len(review.calls) == 1 and len(store.games) == 2 and not store.room_reservations
+    store._connection.close()
+
+
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
 def test_han_minutes_keep_the_exact_arrival_lookup_boundary(backend, tmp_path):
     """实际工具保留本人来话的分钟，过滤更早的桌并拒绝可能提前开场的建局。"""
