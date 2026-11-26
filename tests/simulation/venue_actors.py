@@ -544,6 +544,12 @@ _RECENT_BOARD_CONTINUATION = (
     "没有新的行程事件时，不把 `earliest_possible_if_leaving_now` 的重算值当成到店计划变化。"
     "要不要继续说、说什么，由你决定。"
 )
+_OLDER_SHOP_RECEIPT = (
+    "delivery 是本轮被唤醒的那条店家私聊，当时说过的话仍可参考。"
+    "newer_shop_dialogue 指向之后同一私聊里你实际发过的话及随后看到的店家回复。先读这些再决定。"
+    "如果自己已经回答过旧问题，别因为旧消息触发本轮就重复回答。"
+    "可以接店家最新的问题、补充旧消息里仍未解决的必要信息，或不回。新旧开场不同且需要谈时间时，说清指哪一个。"
+)
 
 
 def _last_shop_contact(projected: Mapping[str, Any]) -> tuple[dict[str, Any] | None, datetime | None, datetime]:
@@ -575,6 +581,24 @@ def _travel_update(event: Mapping[str, Any], previous: dict[str, Any] | None, at
     if previous and previous.get("message_id") and elapsed_minutes is not None and elapsed_minutes <= 20:
         update.update(previous_shop_message_id=previous["message_id"], minutes_since_previous_message=int(elapsed_minutes))
     return update
+
+
+def _newer_shop_dialogue(history: list[dict[str, Any]], delivery: dict[str, Any],
+                         previous: dict[str, Any] | None) -> dict[str, str] | None:
+    """保留触发回执，另指出之后实际发生的本人店家私聊。"""
+    if delivery not in history or not previous or not previous.get("message_id"):
+        return None
+    later = history[history.index(delivery) + 1:]
+    if previous not in later:
+        return None
+    result = {"customer_message_id": previous["message_id"]}
+    reply = next((row for row in reversed(later[later.index(previous) + 1:])
+                  if row.get("kind") == "private" and row.get("sender_id") == SIMULATION_AGENT
+                  and row.get("recipient_id") == delivery.get("recipient_id")
+                  and row.get("message_id") and row.get("text")), None)
+    if reply is not None:
+        result["shop_message_id"] = reply["message_id"]
+    return result
 
 
 def _focus_familiar_opening(projected: dict[str, Any]) -> dict[str, Any]:
@@ -687,6 +711,9 @@ class ModelActor:
               and (not delivery or delivery.get("kind") == "group")
               and (previous is None or previous_at is not None and previous_at.date() < now.date())):
             prompt = _OPENING_PROMPTS[tendency] + "\n\n" + prompt
+        if shop_reply and (newer := _newer_shop_dialogue(projected["history"], delivery, previous)):
+            projected["newer_shop_dialogue"] = newer
+            prompt = _OLDER_SHOP_RECEIPT + "\n\n" + prompt
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(projected, ensure_ascii=False)},
@@ -773,6 +800,10 @@ class ModelActor:
             evidence = {"stage": "physical_availability", "conflict": conflict}
             return replace(decision, availability_reviews=(*decision.availability_reviews, evidence)), conflict
         receipt = decision.context.get("delivery") or {}
+        if action.kind == "private" and action.recipient_id == SIMULATION_AGENT:
+            newer_reply = (decision.context.get("newer_shop_dialogue") or {}).get("shop_message_id")
+            if newer_reply:
+                receipt = next(row for row in decision.context["history"] if row.get("message_id") == newer_reply)
         local_now = availability.now.isoformat()
         table_request = _table_availability_request(action, decision.context, local_now)
         payload = {"draft": action.text, "local_now": local_now, "received_text": receipt.get("text")}

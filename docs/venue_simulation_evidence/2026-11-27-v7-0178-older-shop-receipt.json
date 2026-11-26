@@ -1,0 +1,186 @@
+{
+  "run": "2026-11-25-real-f43d9234b8",
+  "start_commit": "a87e461",
+  "case": "0178 私聊旧回执和群聊唤醒先后交错",
+  "chat": [
+    {
+      "sequence": 6,
+      "message_id": "customer:role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1",
+      "direction": "inbound",
+      "kind": "private",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_e4bb6dede30f7e5576fa9f24",
+      "text": "老板 今晚还有位吗 想打块底的 最好无烟"
+    },
+    {
+      "sequence": 7,
+      "message_id": "outbound:trace_e4bb6dede30f7e5576fa9f24:1",
+      "direction": "outbound",
+      "kind": "private",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1",
+      "trace_id": "trace_e4bb6dede30f7e5576fa9f24",
+      "text": "今晚一块底的现在还没有能搭的局诶，要不我帮你组一桌？"
+    },
+    {
+      "sequence": 19,
+      "message_id": "customer:role-event:5c8bb6bb6b2a0526a84b7b34e119f02979461eb6a0d0f0729af962b90cac8f95",
+      "direction": "inbound",
+      "kind": "private",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_5e7225c5d9be7206e4156856",
+      "text": "老板 组一桌吧 一块底的 最好无烟 我七点半左右能到"
+    },
+    {
+      "sequence": 20,
+      "message_id": "outbound:trace_5e7225c5d9be7206e4156856:1",
+      "direction": "outbound",
+      "kind": "private",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:5c8bb6bb6b2a0526a84b7b34e119f02979461eb6a0d0f0729af962b90cac8f95",
+      "trace_id": "trace_5e7225c5d9be7206e4156856",
+      "text": "好，给你组一桌。打什么玩法？"
+    },
+    {
+      "sequence": 32,
+      "message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+      "direction": "inbound",
+      "kind": "private",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_84dd27da94d44ea788044669",
+      "text": "组一桌吧 一块底的 最好无烟 我七点半左右能到"
+    },
+    {
+      "sequence": 34,
+      "message_id": "outbound:trace_84dd27da94d44ea788044669:1",
+      "direction": "outbound",
+      "kind": "private",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+      "trace_id": "trace_84dd27da94d44ea788044669",
+      "text": "一块底、无烟、七点半左右到，我记着了。玩法还没说呢，你想打哪种？"
+    }
+  ],
+  "role_events": [
+    {
+      "actor_id": "venue-sender-0178",
+      "kind": "timer",
+      "due_at": "2026-11-25T11:00:00.000000+00:00",
+      "event_id": "role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1",
+      "caused_by": null,
+      "raw_response": "{\"action\":\"send\",\"text\":\"老板 今晚还有位吗 想打块底的 最好无烟\",\"kind\":\"private\",\"recipient_id\":\"simulation-agent\"}",
+      "response_source": {
+        "call_id": "llm_call_7cd4e106d99e4457bc4ad9e2bbf6564c",
+        "http_response_complete": true,
+        "raw_response_sha256": "a299ef883919a184a488339ace9c1845b63c5b8f9c6dd654d7e94f93653d2a52",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_aa09960af40d4b99ad8b4cce9f3125da",
+        "trace_id": "role:role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1"
+      },
+      "delivery": null,
+      "visible_history_ids": [
+        "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "history:rolling:real_group_smoke_alternative_20261122_001:m02"
+      ],
+      "sent_message_id": "customer:role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1",
+      "shop_trace_id": "trace_e4bb6dede30f7e5576fa9f24"
+    },
+    {
+      "actor_id": "venue-sender-0178",
+      "kind": "group_attention",
+      "due_at": "2026-11-25T11:00:00.000000+00:00",
+      "event_id": "role-event:5c8bb6bb6b2a0526a84b7b34e119f02979461eb6a0d0f0729af962b90cac8f95",
+      "caused_by": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+      "raw_response": "{\"action\":\"send\",\"text\":\"老板 组一桌吧 一块底的 最好无烟 我七点半左右能到\",\"kind\":\"private\",\"recipient_id\":\"simulation-agent\"}",
+      "response_source": {
+        "call_id": "llm_call_a99eaa6093a84e19968dbbaec53af750",
+        "http_response_complete": true,
+        "raw_response_sha256": "4c2167466c0b6b201266ff7629faaf0a1a71b59bdd1346d8ebe4bd9488191f7b",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_9561da13267c4d93a89d5a1781ab3498",
+        "trace_id": "role:role-event:5c8bb6bb6b2a0526a84b7b34e119f02979461eb6a0d0f0729af962b90cac8f95"
+      },
+      "delivery": {
+        "from_self": false,
+        "kind": "group",
+        "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+        "quoted_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "recipient_id": "venue-group",
+        "sender_id": "venue-sender-0078",
+        "sent_at": "2026-11-25T10:58:00+00:00",
+        "text": "有烟还是无烟"
+      },
+      "visible_history_ids": [
+        "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+        "customer:role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1",
+        "outbound:trace_e4bb6dede30f7e5576fa9f24:1",
+        "customer:role-event:7ee27bbbfdbdcb38550f344dd5b4f848c5fdceca6c08f1acc7dd25edbf7ff51a",
+        "customer:role-event:739f03321e3f08c5799d5b3771bf43dfe2ccf4cf3c59e768d3fa2a71c514edd5"
+      ],
+      "sent_message_id": "customer:role-event:5c8bb6bb6b2a0526a84b7b34e119f02979461eb6a0d0f0729af962b90cac8f95",
+      "shop_trace_id": "trace_5e7225c5d9be7206e4156856"
+    },
+    {
+      "actor_id": "venue-sender-0178",
+      "kind": "private_receipt",
+      "due_at": "2026-11-25T11:02:00.000000+00:00",
+      "event_id": "role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+      "caused_by": "outbound:trace_e4bb6dede30f7e5576fa9f24:1",
+      "raw_response": "{\"action\":\"send\",\"text\":\"组一桌吧 一块底的 最好无烟 我七点半左右能到\",\"kind\":\"private\",\"recipient_id\":\"simulation-agent\"}",
+      "response_source": {
+        "call_id": "llm_call_dfb0bb1ffa904c508b2c19d4dcb5dfc0",
+        "http_response_complete": true,
+        "raw_response_sha256": "05f539e145acdaf497e8e2b33efa3dd9b020f9ab94669e5f5b28b399ed981c2f",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_99742014561c4374b7323aa50b998729",
+        "trace_id": "role:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab"
+      },
+      "delivery": {
+        "from_self": false,
+        "kind": "private",
+        "message_id": "outbound:trace_e4bb6dede30f7e5576fa9f24:1",
+        "recipient_id": "venue-sender-0178",
+        "sender_id": "simulation-agent",
+        "sent_at": "2026-11-25T11:00:00+00:00",
+        "text": "今晚一块底的现在还没有能搭的局诶，要不我帮你组一桌？"
+      },
+      "visible_history_ids": [
+        "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+        "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+        "customer:role-event:fe9d659a60f6ef701909df6c271f8a4d30bdf61cc35248f88fec3e4168794fe1",
+        "outbound:trace_e4bb6dede30f7e5576fa9f24:1",
+        "customer:role-event:7ee27bbbfdbdcb38550f344dd5b4f848c5fdceca6c08f1acc7dd25edbf7ff51a",
+        "customer:role-event:739f03321e3f08c5799d5b3771bf43dfe2ccf4cf3c59e768d3fa2a71c514edd5",
+        "customer:role-event:5c8bb6bb6b2a0526a84b7b34e119f02979461eb6a0d0f0729af962b90cac8f95",
+        "outbound:trace_5e7225c5d9be7206e4156856:1",
+        "customer:role-event:88b1e020e1443ef614fb3b574dcf373e1a44cc74ee9a895a1e1686bae1375acd",
+        "customer:role-event:94ec843a3c1cd1abe61568f051febde6f13e07695f1a0996fad740f2d8185771",
+        "customer:role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a"
+      ],
+      "sent_message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+      "shop_trace_id": "trace_84dd27da94d44ea788044669"
+    }
+  ],
+  "diagnosis": "群聊先唤醒了顾客，他从实际私聊承接了老板组局提议，老板随后问玩法。先前提议的定时回执排在两分钟后，原触发和最新对话都在同一顾客可见历史，顾客仍重复发出了旧委托。两次发言相同，只有称呼不同，未增加条件；此前店家的澄清确实做过且已送达。",
+  "change": "保留实际旧回执作为唤醒源，同时给顾客模型指出同私聊之后实际发过的来话和已收到的店家回复。允许接新问题、处理旧话仍有用的部分或等待，正文仍由角色生成。私聊本人到店引文优先使用同会话实际收到的最新回复作参考。",
+  "controls": [
+    "只收到原回执时不添加更新提示。",
+    "本人已发但老板还没回时只给本人新来话引用。",
+    "本人已发且看到新回执时给出两条引用，继续保留原触发。",
+    "其他顾客的私聊不可见，不能影响回复或引文。"
+  ],
+  "verification_scope": "归档的两次实际发言不改。离线专项核对投影及真实触发的保留，下一次真模型覆盖新提示。"
+}

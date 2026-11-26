@@ -212,6 +212,46 @@ def test_recent_arrival_uses_visible_own_message_and_actual_world_event(kind, co
     assert action.raw == raw and action.action.text == text
 
 
+@pytest.mark.parametrize("later_exchange", ["none", "pending", "answered"])
+def test_old_private_receipt_preserves_cause_and_prioritizes_later_shop_dialogue(later_exchange):
+    """复放实际的前后顺序，旧邀请仍是触发证据，另投影已确认送达的私聊。"""
+    person = generate_personas(42, count=1)[0]
+    original = {"kind": "private", "sender_id": OWNER, "recipient_id": person.sender_id,
+                "message_id": "old-offer", "sent_at": "2026-11-25T19:00:00+08:00",
+                "text": "今晚一块底的现在还没有能搭的局诶，要不我帮你组一桌？"}
+    customer = {**original, "sender_id": person.sender_id, "recipient_id": OWNER, "message_id": "already-requested",
+                "text": "老板 组一桌吧 一块底的 最好无烟 我七点半左右能到"}
+    latest = {**original, "message_id": "new-clarification", "text": "好，给你组一桌。打什么玩法？"}
+    unrelated = {**latest, "message_id": "another-friend", "recipient_id": "someone-else", "text": "另约八点"}
+    history = [original]
+    if later_exchange in {"pending", "answered"}:
+        history.append(customer)
+    if later_exchange == "answered":
+        history.append(latest)
+    history.append(unrelated)
+    event = {**_event("delivered", can_arrive=True, free_from="2026-11-25T18:00:00+08:00",
+                      free_until="2026-11-25T23:00:00+08:00"), "caused_by": "old-offer"}
+    responses = ('{"action":"send","text":"杭麻吧"}', '{"claims":[]}')
+    captured = []
+    result = ModelActor(_client(responses, captured)).decide(
+        ActorContext(person, "2026-11-25T19:02:00+08:00", history=history, events=(event,)), trace_id="old-private-receipt",
+    )
+    assert result.action.text == "杭麻吧" and result.raw == responses[0]
+    assert result.context["delivery"]["message_id"] == "old-offer"
+    assert unrelated["message_id"] not in {row["message_id"] for row in result.context["history"]}
+    newer_dialogue = result.context.get("newer_shop_dialogue")
+    if later_exchange == "none":
+        assert newer_dialogue is None
+    else:
+        expected = {"customer_message_id": "already-requested"}
+        if later_exchange == "answered":
+            expected["shop_message_id"] = "new-clarification"
+        assert newer_dialogue == expected
+        assert "别因为旧消息触发本轮就重复回答" in captured[0]["messages"][0]["content"]
+    availability = json.loads(captured[1]["messages"][-1]["content"])
+    assert availability["received_text"] == (latest if later_exchange == "answered" else original)["text"]
+
+
 def test_returning_actor_can_use_personal_private_shop_receipt_without_repeating_its_contents():
     person = generate_personas(42, count=1)[0]
     person = replace(person, temperament=replace(person.temperament, opening_disclosure="main_need_first"))
