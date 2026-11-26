@@ -283,7 +283,9 @@ def test_mixed_named_and_personal_reads_keep_separate_verified_conditions_and_re
         assert len(review.calls) == 1
         outcome = _review_game_availability_evidence([personal.to_dict(), named.to_dict()], [])
         assert outcome["searches_by_scope"] == {
-            "personal": {"status": "completed", "matched_count": 0, "call_id": "red-center"},
+            "personal": {"status": "completed", "matched_count": 0, "call_id": "red-center",
+                         "submitted_filters_without_results": {"game_type": "red_center_mahjong", "stake": "1",
+                                                               "start_time_range": window, "must_end_by": departure}},
             "specific_table": {"status": "completed", "matched_count": 1, "call_id": "board"},
         }
         continuity = executed_requirement_contract([personal, named])

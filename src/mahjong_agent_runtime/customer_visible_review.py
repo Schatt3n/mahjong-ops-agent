@@ -690,10 +690,44 @@ def _review_search_outcome(query: dict[str, Any]) -> dict[str, Any]:
         if isinstance(option, dict) and option.get("requires_timing_confirmation") is True
         and isinstance(option.get("game"), dict)
     ]
+    empty_search_filters = _review_empty_personal_search_filters(result) if not matches else {}
     return {"status": "completed", "matched_count": len(matches),
+            **({"submitted_filters_without_results": empty_search_filters} if empty_search_filters else {}),
             **({"table_reference_evidence": result["table_reference_evidence"]}
                if result.get("lookup_scope") == "specific_table" and result.get("table_reference_evidence") else {}),
             **({"options_requiring_timing_confirmation": timing_options} if timing_options else {})}
+
+
+def _review_empty_personal_search_filters(result: dict[str, Any]) -> dict[str, Any]:
+    """只整理完整个人查局为空的实查过滤值，避免把缺数据、备选或截断当成空。"""
+    if (result.get("lookup_scope") != "personal" or result.get("selection_truncated")
+            or any(result.get(key) not in (None, []) for key in ("alternatives", "nearby_options"))
+            or result.get("match_count", 0) != 0):
+        return {}
+    contract = result.get("customer_reply_contract")
+    if not isinstance(contract, dict):
+        return {}
+    scope, semantics = contract.get("evidence_scope"), contract.get("search_result_semantics")
+    if (not isinstance(scope, dict) or not isinstance(semantics, dict)
+            or scope.get("kind") != "submitted_filters_only"
+            or scope.get("supports_narrower_empty_claim") is not False
+            or semantics.get("status") != "no_actionable_match"
+            or semantics.get("backend_retrieval_policy_applied") is not True
+            or any(type(semantics.get(key)) is not int or semantics[key] != 0
+                   for key in ("returned_game_count", "actionable_match_count", "alternative_count"))):
+        return {}
+    requirement = result.get("requirement")
+    applied = scope.get("applied_filter_fields")
+    if (not isinstance(requirement, dict) or not isinstance(applied, list)
+            or any(not isinstance(field, str) for field in applied)):
+        return {}
+    # 过滤协议包含座位数路径，平铺该路径只传真实座位数，不携带请求方身份。
+    party = requirement.get("requesting_party")
+    values = ({**requirement, "requesting_party.seat_count": party.get("seat_count")}
+              if isinstance(party, dict) else requirement)
+    if any(values.get(field) is None for field in applied):
+        return {}
+    return {field: deepcopy(values[field]) for field in applied}
 
 
 def build_reply_self_review_payload(
@@ -723,6 +757,11 @@ def build_reply_self_review_payload(
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
     game_availability_evidence = (
         _review_game_availability_evidence(turn_tool_evidence, seat_count_evidence) if current_customer_reply else {}
+    )
+    has_submitted_empty_search = any(
+        search.get("submitted_filters_without_results")
+        for search in (game_availability_evidence.get("latest_search", {}),
+                       *game_availability_evidence.get("searches_by_scope", {}).values())
     )
     private_customer_reply = (
         current_customer_reply and bool(review_items) and not any(item.get("channel") == "group" for item in review_items)
@@ -886,6 +925,12 @@ def build_reply_self_review_payload(
                 "明确问有无现成局且已按有效条件完整查过时，可以直接说当前范围内没有可搭的现成桌。保留会改变结论的时间、玩法和档位，允许对话自然承接已知条件；不强制使用‘没查到’或报告查询过程。局况仍待核实、搜索未完成或失败时，不能称为当前无桌。提议组桌仍是等本人决定，不表示已开始。",
                 *(("分别核对未查到符合条件的现成局、确定存在且满座的具体桌。game_availability_evidence.latest_search.matched_count=0 只证明本次查询没返回匹配，不证明某桌存在、已满或先有位后被占。正文若把具体桌说成没位或满座，必须由这张桌自己的 zero_seat_game_ids 和 seat_count_evidence 支持；别桌、历史话术、房间无空、失败查询均不能代替。缺证据以 unsupported_conclusion 拒绝。自然转述、询问或当前范围内没查到合适桌不等于断言具体桌满座。",)
                   if game_availability_evidence else ()),
+                *(("submitted_filters_without_results 是这一次成功检索实际应用的条件，结果未返回正选或备选。先把正文里的结论跟这组条件对照。"
+                   "‘按你说的条件，暂时没找到能搭的现成桌’与‘暂时没找到符合这些条件的现成桌’都是限定结论；范围对应且其他事实正确时，两种表达均通过。"
+                   "不能把它读成‘目前所有时段都没有这种桌’，也不要求把上下文已清楚的条件逐项念一遍。"
+                   "这份凭据不补足未知玩法，也不授予建局、邀约或预约权限。"
+                   "包间是否可用及其时段另核对查房回执；空的查局回执不支持包间可用、已有预约或可以保证开打。",)
+                  if has_submitted_empty_search else ()),
                 "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
                 "只有真实查询的 customer_reply_contract.evidence_scope.supports_narrower_empty_claim=true，且本次成功查询确为空时，才可依据后端已证实的未过滤可用局池为空推断更窄"
                 + ("检索范围为空。该权限只覆盖没有查到可供选择的局，不覆盖已指明具体桌的席位或存在情况。"

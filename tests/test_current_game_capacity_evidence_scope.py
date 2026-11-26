@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 
 import pytest
 
@@ -10,7 +11,8 @@ from mahjong_agent_runtime import (
     AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage,
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
-from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
+from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload, compact_tool_result_dict
+from mahjong_agent_runtime.models import using_clock
 from mahjong_agent_runtime.services import ToolExecutionService
 
 
@@ -98,6 +100,76 @@ def test_table_seat_reference_conflict_is_scoped_to_named_lookup_and_reply_revie
         "personal": {"status": "completed", "matched_count": 1, "call_id": "personal"},
     }
     assert evidence["latest_search"] == {"status": "completed", "matched_count": 1}
+
+
+def test_review_keeps_successful_filtered_empty_query_distinct_from_earlier_table_and_room(capacity_store):
+    """真实库有较早现成桌，晚间过滤为空只支持同一检索范围，查房另有边界。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    window = {"start_at": "2026-11-25T20:40:00+08:00", "end_at": "2026-11-25T23:00:00+08:00"}
+    matching = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 2, "max": 3},
+                "smoke_preference": "no_smoking", "must_end_by": window["end_at"]}
+    message = UserMessage("dm", "customer", "顾客",
+                          "老板 组一桌可以 杭州麻将 无烟 2块或3块底 我八点四十左右能到 最多能打到十一点 能凑一桌吗",
+                          sent_at=at)
+    store, gateway = capacity_store, ToolGateway(capacity_store)
+
+    def execute(name, arguments, call_id):
+        result = gateway.execute(ToolCall(name, arguments, call_id=call_id), trace_id=call_id,
+            conversation_id=message.conversation_id, sender_id=message.sender_id, sender_name=message.sender_name,
+            source_message_id=call_id, step_index=1)
+        assert result.called and result.allowed and not result.error
+        return compact_tool_result_dict(result.to_dict())
+
+    with using_clock(lambda: at):
+        store.configure_rooms(["东一包间"])
+        early, _ = store.create_game(conversation_id="host", organizer_id="host", organizer_name="牌友",
+            requirement={"game_type": "hangzhou_mahjong", "stake": 2, "smoke_preference": "no_smoking",
+                         "start_time_kind": "scheduled", "planned_start_at": at.replace(minute=15).isoformat(),
+                         "duration_hours": 3}, known_players=[], trace_id="seed-early-existing")
+        scoped = execute("search_current_games", {"lookup_scope": "personal",
+            "requirement": matching | {"start_time_range": window}}, "scoped")
+        room = execute("check_room_availability", window, "room")
+        wider = execute("search_current_games", {"lookup_scope": "personal", "requirement": matching}, "wider")
+
+    assert scoped["result"]["matches"] == [] and scoped["result"]["nearby_options"] == []
+    assert [item["game"]["game_id"] for item in wider["result"]["matches"]] == [early.game_id]
+    expected = matching | {"start_time_range": window}
+    accurate = "按你说的条件，暂时没找到能搭的现成桌。八点四十到十一点有包间，你想几点开打？"
+    overclaim = "今天整晚都没有无烟二三块的杭麻桌，八点四十以后房间一直有空。你想几点开打？"
+
+    def review_input(reply, tools):
+        action = AgentAction("核对现成桌与包间", "waiting_user", "还需顾客确认开场", reply_to_user=reply)
+        return build_reply_self_review_payload(message=message, action=action, review_scope="reply_to_user",
+            context_payload={"turn_tool_evidence": tools},
+            review_items=[{"item_id": "reply_to_user", "recipient_id": message.sender_id, "text": reply}])
+
+    accurate_payload = review_input(accurate, [scoped, room])
+    overclaim_payload = review_input(overclaim, [scoped, room])
+    evidence = accurate_payload["semantic_fidelity_contract"]
+    assert evidence == overclaim_payload["semantic_fidelity_contract"]
+    assert evidence["game_availability_evidence"]["latest_search"]["submitted_filters_without_results"] == expected
+    assert any("能搭的现成桌" in rule and "按你说的条件" in rule and "查房回执" in rule for rule in evidence["rules"])
+    assert "selection_truncated" not in scoped["result"]
+    assert room["result"]["configured"] is True and room["result"]["available_count"] == 1
+    assert {key: room["result"][key] for key in window} == window
+    assert not store.room_reservations
+
+    missing_scope = deepcopy(scoped)
+    missing_scope["result"]["requirement"].pop("must_end_by")
+    truncated = deepcopy(scoped)
+    truncated["result"]["selection_truncated"] = True
+    alternative = deepcopy(scoped)
+    alternative["result"]["customer_reply_contract"]["search_result_semantics"]["alternative_count"] = 1
+    named = deepcopy(scoped)
+    named["result"]["lookup_scope"] = "specific_table"
+    failed = {**scoped, "allowed": False, "error": "timeout"}
+    for invalid in (missing_scope, truncated, alternative, named, failed, wider):
+        payload = review_input(accurate, [invalid, room])
+        review = payload["semantic_fidelity_contract"]
+        assert "submitted_filters_without_results" not in review["game_availability_evidence"]["latest_search"]
+        assert all("两种表达均通过" not in rule for rule in review["rules"])
+    assert review_input(accurate, [scoped, failed, room])["semantic_fidelity_contract"]["game_availability_evidence"][
+        "latest_search"] == {"status": "unknown"}
 
 
 @pytest.mark.parametrize("requirement", [

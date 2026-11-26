@@ -1,0 +1,77 @@
+{
+  "source_run": "2026-11-25-real-85ac9eba42",
+  "source_artifacts": ["agent_trace.log", "chat.sqlite3"],
+  "cases": [
+    {
+      "role_suffix": "0405",
+      "trace_id": "trace_3584355c9c1591e7a9aa4ea6",
+      "customer_text": "老板 组一桌可以 杭州麻将 无烟 2块或3块底 我八点四十左右能到 最多能打到十一点 能凑一桌吗",
+      "actual_query": {
+        "call_id": "search_games_4",
+        "lookup_scope": "personal",
+        "game_type": "hangzhou_mahjong",
+        "smoke_preference": "no_smoking",
+        "stake_range": {"min": 2, "max": 3},
+        "start_time_range": {"start_at": "2026-11-25T20:40:00+08:00", "end_at": "2026-11-25T23:00:00+08:00"},
+        "must_end_by": "2026-11-25T23:00:00+08:00",
+        "returned_matches": 0,
+        "returned_alternatives": 0,
+        "returned_nearby": 0,
+        "supports_narrower_empty_claim": false
+      },
+      "separate_room_receipt": {
+        "configured": true,
+        "available_count": 3,
+        "start_at": "2026-11-25T20:40:00+08:00",
+        "end_at": "2026-11-25T23:00:00+08:00"
+      },
+      "first_review": {
+        "rejected_clause": "现在还没有现成的无烟2、3块杭麻桌",
+        "violation": "unsupported_conclusion",
+        "suggestion_clause": "我按今晚八点四十以后、无烟、2到3块底、最晚十一点这些条件查了一下，暂时没查到能搭的现成杭麻桌。",
+        "attribution": "The clause drops both time bounds and implies a broader absence than the actual query established."
+      },
+      "second_review": {
+        "rejected_clause": "我按今晚八点四十以后、无烟、2到3块底、最晚十一点这些条件查了一下，暂时没查到能搭的现成杭麻桌。",
+        "violation": "unsupported_conclusion",
+        "suggestion_clause": "我按今晚八点四十以后、无烟、2到3块底、最晚十一点这些条件查了一下，暂时没查到符合条件的现成杭麻桌。",
+        "attribution": "The actual candidate used the first reviewer's full recommended reply. In the negative-search clause, the second suggestion swaps 能搭的 for 符合条件的, retaining the same scope and strength."
+      },
+      "final_runtime_reason": "max_steps_exceeded",
+      "customer_received": "稍等一下",
+      "safe_replay_candidate": "按你说的条件，暂时没找到能搭的现成桌。八点四十到十一点有空包间，你想几点开？",
+      "unsupported_replay_control": "今天整晚都没有无烟二三块的杭麻桌，八点四十以后房间一直有空。你想几点开打？"
+    },
+    {
+      "role_suffix": "0103",
+      "trace_id": "trace_255776e285474947126243a6",
+      "customer_text": "老板，刚才七点半那桌没搭上，我晚上七点半以后能到店，最多打到23点。你帮我再找一桌无烟的吧，底注2、3都行，能搭一桌吗？",
+      "actual_query": {
+        "lookup_scope": "personal",
+        "smoke_preference": "no_smoking",
+        "stake_range": {"min": 2, "max": 3},
+        "start_time_range": {"start_at": "2026-11-25T19:30:00+08:00", "end_at": "2026-11-26T06:00:00+08:00"},
+        "must_end_by": "2026-11-25T23:00:00+08:00",
+        "returned_matches": 0,
+        "returned_alternatives": 0,
+        "nearby_search": false,
+        "supports_narrower_empty_claim": false
+      },
+      "separate_write_guard": "本轮没有可核验的顾客授权：新组局或招募。",
+      "evidence": "Multiple reviews distinguished a filtered retrieval from an inventory claim but also rejected retrieval-qualified replies. Some earlier versions combined that issue with a claim about new-table recruiting, which remained outside the write authorization. A missing game type leaves personal fit open.",
+      "final_runtime_reason": "max_steps_exceeded",
+      "customer_received": "稍等一下",
+      "safe_replay_candidate": "按你说的时间、无烟和底注，暂时没找到能搭的现成桌。你想打哪种？"
+    }
+  ],
+  "offline_regression": {
+    "test": "tests/test_current_game_capacity_evidence_scope.py::test_review_keeps_successful_filtered_empty_query_distinct_from_earlier_table_and_room",
+    "setup": "Memory and SQLite tool execution seed a real earlier same-terms table outside the filtered interval. A separate room query covers only 20:40–23:00.",
+    "adversarial_controls": [
+      "The wider real query returns the earlier game, so an all-evening absence falsely covers an existing table.",
+      "The same review payload distinguishes the room window from the game filters and records no reservation.",
+      "Failed, specifically named, truncated, nonempty, alternative-bearing and missing-filter receipts do not produce the scoped-empty fact. A later same-scope failed query supersedes the earlier observation."
+    ],
+    "verification": "Offline tool and review evidence only. The example texts are unscored replay candidates. The archived real-model rejection and delivery remain unchanged."
+  }
+}
