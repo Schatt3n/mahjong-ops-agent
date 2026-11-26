@@ -15,7 +15,7 @@ from ..models import ConversationRole, ConversationTurn, ToolCall, ToolResult, U
 from ..stores import AgentStore
 from .customer_play_preference import attendance_preference_agrees
 from .delivered_game_offer import ordinary_private_message
-from .game_domain import derive_game_lifecycle, normalize_requirement
+from .game_domain import OPENING_NOT_BEFORE, derive_game_lifecycle, normalize_requirement
 from .model_context import has_agreed_game_duration
 from .temporal import parse_context_datetime
 from .value_utils import first_present_value
@@ -34,6 +34,11 @@ unconfirmed: 目标不明、存在未解决的授权条件、后续撤回或新�
 
 _REFERENCE_REPAIR_PROMPT = """上次选择了建局授权，但所引店家记录在客户授权之后。上次判定没有执行任何写入。
 重新核对完整对话的顺序。本轮明确委托时，customer_ref 应引用标有 current=true 的本轮原话。若这句本身已经委托，shop_offer_ref 用 null，不要附带较晚的店家记录。若是接受提议，shop_offer_ref 必须早于作答的 customer_ref。只有确实同意组织且条件匹配才保留 create。返回同一 JSON 协议。"""
+
+_FLEXIBLE_OPENING_PREVIEW = (
+    "如果 proposed_game_lifecycle 提供 opening_not_before_at，这是已核实并随局保存的最早开场边界。"
+    "planned_start_at 仍为 null 时，还需要同桌协商实际开场。根据本人原话核对是否授权先登记这张待组局，以及其他限制是否都被满足。"
+)
 
 _TERMS = (
     "game_type", "requested_game", "game_variant", "stake", "base_stake", "stake_range", "duration_kind",
@@ -215,6 +220,8 @@ def check_creation_authorization(
             key: lifecycle[key].isoformat() if lifecycle[key] else None
             for key in ("planned_start_at", "planned_end_at", "expires_at")
         }
+        if OPENING_NOT_BEFORE in requirement:
+            payload["proposed_game_lifecycle"][OPENING_NOT_BEFORE] = requirement[OPENING_NOT_BEFORE]
     customer = store.customers.get(message.sender_id)
     usual = store.completed_game_preference(message.sender_id) if customer is not None else None
     if usual is not None and attendance_preference_agrees(customer, usual):
@@ -234,6 +241,8 @@ def check_creation_authorization(
         if remaining <= 0:
             break
         prompt = _PROMPT if attempt == 1 else _PROMPT + "\n" + _REFERENCE_REPAIR_PROMPT
+        if OPENING_NOT_BEFORE in requirement:
+            prompt += "\n" + _FLEXIBLE_OPENING_PREVIEW
         messages = [{"role": "system", "content": prompt}, {"role": "user", "content": input_text}]
         source_trace = f"{trace_id}:creation:{step_index}:{attempt}"
         trace_recorder.record(trace_id, "creation_authorization_prompt",

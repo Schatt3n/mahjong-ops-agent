@@ -20,13 +20,15 @@ _EARLY = _OPEN.replace(hour=19, minute=0)
 _LATE = _EARLY + timedelta(minutes=30)
 
 
-def _table(tmp_path, *, anonymous=False, duration_hours=4):
+def _table(tmp_path, *, anonymous=False, duration_hours=4, opening_floor=None):
     """经正式建桌和报名形成一张尚未定时的人齐开局。"""
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
     requirement = {"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
                    "start_time_kind": "asap_when_full"}
     if duration_hours is not None:
         requirement["duration_hours"] = duration_hours
+    if opening_floor is not None:
+        requirement["opening_not_before_at"] = opening_floor.isoformat()
     with using_clock(lambda: _OPEN - timedelta(minutes=3)):
         store.configure_rooms(["room"])
         game, _ = store.create_game(
@@ -52,6 +54,40 @@ def _propose(opening, group, message_id, minute, start):
 def _vote(group, actor, message_id, minute, text, quote=None):
     return group.send(MessageEnvelope(message_id, actor, text, _OPEN + timedelta(minutes=minute),
                                       "group", group.room_id, quote))
+
+
+def test_bounded_asap_opens_group_before_eligible_time_and_requires_four_votes_then_actual_play(tmp_path):
+    """可提前建群，开场不能早于下界、晚于招募失效或越过已知四小时的营业上限。"""
+    store, game_id, group, opening = _table(tmp_path, opening_floor=_LATE)
+    game = store.require_game(game_id)
+    assert group.member_ids() == {AGENT_ID, *_MEMBERS}
+    assert game.status == GameStatus.READY and game.planned_start_at is None
+    with pytest.raises(ValueError, match="outside its start window"):
+        store.start_game_play(game_id, attendee_ids=_MEMBERS, room_id="room", at=_EARLY, trace_id="early")
+    with pytest.raises(ValueError, match="confirmed opening"):
+        store.start_game_play(game_id, attendee_ids=_MEMBERS, room_id="room", at=_LATE, trace_id="unconfirmed")
+    for proposal_at in (_EARLY, _LATE.replace(hour=20, minute=0), game.expires_at):
+        with pytest.raises(ValueError, match="verified opening or venue hours"):
+            opening.proposal_message("invalid", at=_OPEN, start_at=proposal_at)
+    assert not group.delivered_receipts() and not store.room_reservations
+
+    _propose(opening, group, "proposal", 1, _LATE)
+    for index, actor in enumerate(_MEMBERS[:-1], 2):
+        receipt = _vote(group, actor, f"{actor}-yes", index, "七点半能到。", "proposal")
+        assert opening.record_vote(receipt, proposal_id="proposal", accepts=True) == "waiting"
+    stored = SQLiteAgentStore(store.path)
+    room = VenueTableGroup(stored, group.archive_path, game_id, actor_ids=(*_MEMBERS, "outsider"), opened_at=_OPEN)
+    reopened = VenueTableOpening(room)
+    assert stored.require_game(game_id).planned_start_at is None
+    final = _vote(room, _MEMBERS[-1], "fourth", 5, "七点半可以。", "proposal")
+    assert reopened.record_vote(final, proposal_id="proposal", accepts=True) == "committed"
+    assert stored.require_game(game_id).planned_start_at == _LATE
+    assert not stored.room_reservations
+    playing, _ = stored.start_game_play(game_id, attendee_ids=_MEMBERS, room_id="room", at=_LATE, trace_id="actual")
+    assert playing.expected_play_end_at == _LATE + timedelta(hours=4)
+    ended, _ = stored.finish_game_play(game_id, at=playing.expected_play_end_at, trace_id="finish")
+    assert ended.actual_ended_at == playing.expected_play_end_at
+    assert stored.room_reservations[playing.play_reservation_id].status == "released"
 
 
 def test_four_delivered_answers_set_the_same_opening_and_preserve_the_four_hour_room_loop(tmp_path):

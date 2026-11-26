@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
-from datetime import datetime
+from datetime import datetime, time
 from math import isfinite
 import re
 from datetime import timedelta
@@ -37,6 +37,8 @@ DEFAULT_OVERNIGHT_DURATION_HOURS = 8
 START_KIND_SCHEDULED = "scheduled"
 
 START_KIND_ASAP_WHEN_FULL = "asap_" "when_full"
+
+OPENING_NOT_BEFORE = "opening_not_before_at"
 
 DURATION_KIND_OVERNIGHT = "overnight"
 
@@ -81,6 +83,7 @@ PROTECTED_REQUIREMENT_PATCH_FIELDS = {
     "lifecycle_expires_at",
     "lifecycle_ttl_hours",
     "latest_start_at",
+    OPENING_NOT_BEFORE,
     "recruitment_opens_at",
     "recruitment_status",
     "recruitment_lead_hours",
@@ -315,6 +318,16 @@ def planned_game_start_at(requirement: dict[str, Any], *, created_at: datetime) 
     return planned_start_at
 
 
+def flexible_opening_not_before(requirement: dict[str, Any]) -> datetime | None:
+    """读取已落库的时间边界。它可限制开场，但不会选定开场。"""
+    value = requirement.get(OPENING_NOT_BEFORE)
+    if value is None:
+        return None
+    if not isinstance(value, str) or (stamp := datetime.fromisoformat(value)).utcoffset() is None:
+        raise ValueError("opening_not_before_at requires a datetime with offset")
+    return stamp.astimezone(DEFAULT_TZ)
+
+
 def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) -> dict[str, Any]:
     """根据权威事实推导牌局生命周期，不引入未经证实的信息。"""
     requirement = dict(requirement or {})
@@ -334,6 +347,16 @@ def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) 
         expires_at = planned_start_at + timedelta(hours=DEFAULT_UNKNOWN_DURATION_HOURS)
     else:
         expires_at = created_at + timedelta(hours=DEFAULT_ASAP_GAME_TTL_HOURS)
+
+    floor = flexible_opening_not_before(requirement)
+    if floor is not None:
+        if planned_start_at is not None and planned_start_at < floor:
+            raise ValueError("planned opening is before its verified earliest start")
+        if planned_start_at is None:
+            local_midnight = datetime.combine(floor.date() + timedelta(days=1), time.min, tzinfo=DEFAULT_TZ)
+            expires_at = min(expires_at, local_midnight)
+            if start_kind != START_KIND_ASAP_WHEN_FULL or floor >= expires_at:
+                raise ValueError("flexible opening bound requires an enforceable game lifetime")
 
     patch: dict[str, Any] = {
         "lifecycle_expires_at": expires_at.isoformat(),

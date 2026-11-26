@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from ..domains import START_KIND_ASAP_WHEN_FULL
+from ..domains.game_domain import OPENING_NOT_BEFORE, flexible_opening_not_before
 from ..domains.game_participants import planned_start_has_passed
 from ..domains.model_context import has_agreed_game_duration
 from ..models import Game, GameStatus
@@ -25,6 +26,7 @@ _PUBLIC_REQUIREMENT_KEYS = (
     "smoke_preference",
     "start_time_kind",
     "start_time",
+    OPENING_NOT_BEFORE,
     "duration_kind",
     "duration_hours",
 )
@@ -69,6 +71,8 @@ def public_game_start_display(game: Game) -> str:
     """展示带日期的权威时间，避免跨日同钟点的不同牌局在看板中无法区分。"""
 
     if str(game.requirement.get("start_time_kind") or "") == START_KIND_ASAP_WHEN_FULL:
+        if floor := flexible_opening_not_before(game.requirement):
+            return f"{floor:%m月%d日 %H:%M}后，开场待定"
         return "人齐开"
     if game.planned_start_at is not None:
         return game.planned_start_at.strftime("%Y-%m-%d %H:%M")

@@ -1,0 +1,42 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_commit": "a87e461",
+  "trace_id": "trace_9cf45d81cf66cf5f2c9e2cb3",
+  "role": "0038",
+  "customer_message": {
+    "message_id": "customer:role-event:6a06b68bbde9d8a10af6e6e787e0c8acabe560e1b3e231bbfab3624c4c63325e",
+    "at": "2026-11-25T19:02:00+08:00",
+    "text": "老板 那帮我组一桌杭州麻将 一块底的 我七点半左右能到 组好了跟我说啊"
+  },
+  "verified_availability": {
+    "lookup_scope": "personal",
+    "clock_role": "arrival_estimate",
+    "arrival_lookup_floor_at": "2026-11-25T19:30:00+08:00",
+    "opening_window": null,
+    "has_fixed_opening_authority": false,
+    "current_ref": 5,
+    "supporting_customer_refs": [5]
+  },
+  "observed": {
+    "step_1": {
+      "name": "create_game",
+      "call_id": "c1",
+      "requirement": {"game_type": "hangzhou_mahjong", "stake": 1, "start_time_kind": "asap_when_full"},
+      "called": false,
+      "error": "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
+    },
+    "step_3": {
+      "name": "search_current_games",
+      "called": true,
+      "start_at": "2026-11-25T19:30:00+08:00",
+      "end_at": "2026-11-25T23:59:59.999999+08:00",
+      "matches": 0
+    },
+    "customer_visible_reply": "七点半以后现在还没有能搭的一块底杭麻桌，我帮你组一桌。你七点半左右到，那就按七点半开场行吗？定下来我就去凑人，凑好了在这儿跟你说。"
+  },
+  "lesson": "原话已经委托招募。明确的到店估计可用于登记暂不早于该时间的待组局，开场仍由同桌协商。独立建局授权、房态和四人确认各有自己的凭证。",
+  "offline_regressions": [
+    "tests/test_table_availability_authorization.py::test_verified_arrival_can_bound_sandbox_formation_without_a_fixed_start",
+    "tests/simulation/test_venue_table_opening.py::test_bounded_asap_opens_group_before_eligible_time_and_requires_four_votes_then_actual_play"
+  ]
+}

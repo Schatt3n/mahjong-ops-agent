@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 import json
 
 import pytest
@@ -80,6 +80,85 @@ def _check(store, client, message, trace=None, *, step=1):
     """贴近执行入口调用，不给独立模型传待审工具参数。"""
     return check_table_availability(store, client, message, trace_id=message.message_id, step_index=step,
                                     timeout_seconds=12.0, trace_recorder=trace or InMemoryTraceRecorder())
+
+
+@pytest.mark.parametrize("case", ["authorized", "preceding_read", "disabled", "only_inquiry", "forged_bound",
+                                  "hard_departure", "expires_before_arrival", "known_duration_past_close"])
+def test_verified_arrival_can_bound_sandbox_formation_without_a_fixed_start(tmp_path, case):
+    """复现 V7 0038，保留独立授权、硬离店限制及原截止前才成桌的条件。"""
+    at = datetime.fromisoformat("2026-11-25T19:02:00+08:00")
+    floor = at.replace(hour=19, minute=30)
+    if case == "expires_before_arrival":
+        at = at.replace(hour=15)
+    text = "老板 那帮我组一桌杭州麻将 一块底的 我七点半左右能到 组好了跟我说啊"
+    if case == "only_inquiry":
+        text = "老板 杭州麻将 一块底的 我七点半左右能到 有现成桌吗"
+    elif case == "hard_departure":
+        text += "，但最晚十点必须走。"
+    elif case == "known_duration_past_close":
+        text = "老板 那帮我组一桌杭州麻将 一块底的 我八点左右能到 打四小时。"
+    message = _incoming(text, sent=at)
+    verified = _decision(clock_role="arrival_estimate", opening_window=None,
+                         accepted_stake_range={"min": 1, "max": 1})
+    if case == "hard_departure":
+        verified.update(clock_role="other", clock_roles=[
+            {"clock_ref": 1, "role": "arrival_estimate"}, {"clock_ref": 2, "role": "departure_deadline"},
+        ])
+    elif case == "known_duration_past_close":
+        verified["agreed_duration_hours"] = 4
+    availability = ReviewClient([verified])
+    approval = {"scope": "inquire", "customer_ref": None, "shop_offer_ref": None} if case == "only_inquiry" else {
+        "scope": "create", "customer_ref": 1, "shop_offer_ref": None,
+    }
+    creation = ReviewClient([approval])
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace,
+        table_availability_client=availability, creation_authorization_client=creation,
+        sandbox_flexible_opening_closes_at=None if case == "disabled" else time(23, 50))
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1, "start_time_kind": "asap_when_full"}
+    if case == "forged_bound":
+        terms["opening_not_before_at"] = floor.isoformat()
+    if case == "known_duration_past_close":
+        terms["duration_hours"] = 4
+    action = AgentAction("承接新桌", "needs_tool", "原话核对后登记", tool_calls=[
+        ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "requirement": terms}),
+    ])
+    prior_results = []
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        if case == "preceding_read":
+            read = AgentAction("查现成桌", "needs_tool", "按到店时段查找", tool_calls=[
+                ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {
+                    "game_type": "hangzhou_mahjong", "stake": 1, "start_time_range": {
+                        "start_at": floor.isoformat(), "end_at": "2026-11-25T23:59:59.999999+08:00",
+                    },
+                }}),
+            ])
+            prior_results = service.execute_tool_calls(read, message=message, trace_id=message.message_id,
+                previous_step_tool_results=[], step_index=1, run_id="v7-0038",
+                run_version=store.conversation_version(message.conversation_id)).tool_results
+            assert len(prior_results) == 1 and prior_results[0].called and prior_results[0].result["matches"] == []
+        result, = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=prior_results, step_index=2, run_id="v7-0038",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+    if case in {"authorized", "preceding_read"}:
+        assert result.called and result.allowed, result.to_dict()
+        game, = SQLiteAgentStore(store.path).games.values()
+        assert game.requirement["opening_not_before_at"] == floor.isoformat()
+        assert game.planned_start_at is None and game.actual_started_at is None
+        assert game.expires_at == at + timedelta(hours=4)
+        payload = json.loads(creation.calls[0][0][-1]["content"])
+        assert payload["proposed_game_lifecycle"]["opening_not_before_at"] == floor.isoformat()
+        assert payload["proposed_game_lifecycle"]["planned_start_at"] is None
+        assert "opening_not_before_at" not in terms
+    else:
+        assert not result.called and not result.allowed and not store.games
+        assertion = {"disabled": "没有能落实的最早开场", "only_inquiry": "授权", "forged_bound": "verified backend condition",
+                     "hard_departure": "最早开场", "expires_before_arrival": "最早开场",
+                     "known_duration_past_close": "最早开场"}
+        assert assertion[case] in result.error
 
 
 @pytest.mark.parametrize("text,qualifier", [

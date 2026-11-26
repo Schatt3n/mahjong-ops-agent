@@ -22,6 +22,7 @@ from .game_domain import (
     DEFAULT_ASAP_GAME_TTL_HOURS,
     derive_game_lifecycle,
     duration_hours_from_requirement,
+    flexible_opening_not_before,
     normalize_datetime,
 )
 from .game_participants import (
@@ -72,7 +73,7 @@ def game_commitment_window(game: Game) -> tuple[datetime, datetime]:
         if game.is_playing and now() >= end:
             end = datetime.max.replace(tzinfo=end.tzinfo)
         return game.actual_started_at, end
-    start = game.planned_start_at or game.created_at
+    start = game.planned_start_at or max(game.created_at, flexible_opening_not_before(game.requirement) or game.created_at)
     if game.planned_end_at is not None:
         end = game.planned_end_at
     else:
@@ -96,7 +97,7 @@ def requirement_commitment_window(
 
     created_at = normalize_datetime(reference_at or now())
     lifecycle = derive_game_lifecycle(requirement, created_at=created_at)
-    start = lifecycle["planned_start_at"] or created_at
+    start = lifecycle["planned_start_at"] or max(created_at, flexible_opening_not_before(requirement) or created_at)
     end = lifecycle["planned_end_at"]
     if end is None:
         end = lifecycle["expires_at"] + timedelta(hours=duration_hours_from_requirement(requirement))

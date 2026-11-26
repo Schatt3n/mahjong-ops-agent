@@ -8,6 +8,7 @@ import json
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import time
 from time import monotonic
 from typing import Any
 
@@ -16,7 +17,7 @@ from ..group_chat.tool_scope import tool_execution_scope
 from ..group_chat.topic_context import verified_board_claim_reference
 from ..hooks import HookManager
 from ..llm import AgentLLMClient
-from ..models import AgentAction, ToolCall, ToolResult, UserMessage
+from ..models import AgentAction, ToolCall, ToolResult, UserMessage, now
 from ..runtime_components import ActionProcessingResult
 from ..stores import AgentStore
 from ..tool_consistency import (
@@ -30,16 +31,21 @@ from ..tool_consistency import (
     validate_model_create_game_stake,
     validate_table_availability,
     validate_tool_call_consistency,
+    verified_flexible_arrival_floor,
 )
 from ..domains.tools import ToolGateway
 from ..domains.creation_authorization import (
     check_creation_authorization, creation_clock_conflict, delegated_private_creation_needs_gameplay,
 )
+from ..domains.delivered_game_offer import ordinary_private_message
+from ..domains.game_domain import OPENING_NOT_BEFORE
 from ..domains.game_participants import validate_game_accepts_confirmation
 from ..domains.model_context import has_agreed_game_duration
 from ..domains.invitation_policy import tool_confirms_seat
 from ..domains.participation_authorization import check_unknown_duration_participation, customer_participation_deadline
-from ..domains.table_availability_authorization import check_table_availability, requires_table_clock_review
+from ..domains.table_availability_authorization import (
+    check_table_availability, qualified_table_clock, requires_table_clock_review,
+)
 from ..domains.tools.participation_access import participation_access_source
 from ..domains.tools.validation import validate_schema
 from .contracts import SingleToolExecution
@@ -84,6 +90,7 @@ class ToolExecutionService:
     table_availability_timeout_seconds: float = 20.0
     participation_authorization_client: AgentLLMClient | None = None
     participation_authorization_timeout_seconds: float = 20.0
+    sandbox_flexible_opening_closes_at: time | None = None
     _scheduler: ToolCallScheduler = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -282,6 +289,27 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
             return SingleToolExecution(result=result, blocked_by_consistency=True)
 
+        verified_floor = None
+        metadata = message.metadata or {}
+        if (self.sandbox_flexible_opening_closes_at is not None and call.name == "create_game"
+                and self.creation_authorization_client is not None and ordinary_private_message(message)
+                and not (metadata.get("source") == "group_private_continuation"
+                         or metadata.get("group_topic_source") or metadata.get("input_source") == "system_trigger")
+                and call.arguments.get("organizer_id") == message.sender_id
+                and tool_execution_scope(self.tool_gateway.store, message) is None
+                and (qualified_table_clock(message) or {}).get("clock_count") == 1):
+            availability = (context_payload or {}).get("verified_table_availability") or {}
+            if floor := verified_flexible_arrival_floor(
+                call, availability, at=now(), venue_closes_at=self.sandbox_flexible_opening_closes_at,
+            ):
+                verified_floor = floor.isoformat()
+                call = replace(call, arguments={**call.arguments, "requirement": {
+                    **call.arguments["requirement"], OPENING_NOT_BEFORE: verified_floor,
+                }})
+                self.trace_recorder.record(trace_id, "sandbox_flexible_opening_bound_verified", {
+                    "source_message_id": message.message_id, "opening_not_before_at": verified_floor,
+                })
+
         superseded_duration = superseded_read_duration_evidence(
             call, observed_results, (context_payload or {}).get("verified_table_availability"),
         )
@@ -451,6 +479,9 @@ class ToolExecutionService:
                 self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
                 return SingleToolExecution(result=result, blocked_by_consistency=True)
             reference_contract = dict((context_payload or {}).get("message_reference_contract") or {})
+            reference_contract.pop(OPENING_NOT_BEFORE, None)
+            if verified_floor is not None:
+                reference_contract[OPENING_NOT_BEFORE] = verified_floor
             reference_contract.pop("game_creation_authorization", None)
             if creation_scope is not None:
                 reference_contract["game_creation_authorization"] = creation_scope

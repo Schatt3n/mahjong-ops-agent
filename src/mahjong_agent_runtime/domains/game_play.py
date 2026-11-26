@@ -8,7 +8,9 @@ from datetime import datetime, timedelta
 
 from ..models import DEFAULT_TZ, Game, GameStatus, RoomReservation, StateTransition, new_id
 from .game_commitments import active_game_participant_ids, game_commitment_window
-from .game_domain import apply_game_recruitment_policy, duration_hours_from_requirement, normalize_datetime
+from .game_domain import (
+    apply_game_recruitment_policy, duration_hours_from_requirement, flexible_opening_not_before, normalize_datetime,
+)
 from .room_assignment import room_reservation_blocks_window
 
 
@@ -35,8 +37,12 @@ def prepare_game_play_start(
         raise ValueError("game already has a different actual start record")
     if game.status != GameStatus.READY or game.remaining_seats() != 0:
         raise ValueError("only a full ready game can start")
-    if stamp < (game.planned_start_at or game.created_at) or (game.expires_at and stamp >= game.expires_at):
+    floor = flexible_opening_not_before(game.requirement)
+    if (stamp < (game.planned_start_at or game.created_at) or (floor is not None and stamp < floor)
+            or (game.expires_at and stamp >= game.expires_at)):
         raise ValueError("game cannot start outside its start window")
+    if floor is not None and game.planned_start_at is None:
+        raise ValueError("bounded flexible game requires a confirmed opening before play")
     committed_ids = {
         customer_id
         for claim in game.seat_claims()

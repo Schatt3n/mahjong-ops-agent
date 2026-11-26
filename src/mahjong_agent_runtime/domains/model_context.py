@@ -21,6 +21,7 @@ _PUBLIC_LOOKUP_TERMS = (
     "smoke_preference", "date", "start_time_kind", "start_time", "planned_start_at", "duration_kind", "duration_hours",
     "duration", "max_duration_hours", "known_player_count", "needed_seats", "seat_format", "recruitment_mode",
     "recruitment_status",
+    "opening_not_before_at",
 )
 _PUBLIC_SEAT_COUNTS = ("seats_total", "claimed_seats", "remaining_seats")
 

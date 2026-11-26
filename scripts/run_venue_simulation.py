@@ -217,6 +217,7 @@ def run_simulation(
     show_verified_write_scope: bool = False, align_write_reviews: bool = False, resume: bool = False,
     customer_model_source: str = "auto", reply_review_no_reasoning: bool = False,
     rolling_table_groups: bool = False,
+    rolling_bounded_flexible_opening: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -232,7 +233,10 @@ def run_simulation(
         ("planner_low", planner_low), ("clarify_consent", clarify_consent), ("guard_writes", guard_writes),
         ("show_verified_write_scope", show_verified_write_scope), ("align_write_reviews", align_write_reviews),
     ) if enabled]
-    controls = private_controls + (["reply_review_no_reasoning"] if reply_review_no_reasoning else [])
+    controls = private_controls + [name for name, enabled in (
+        ("reply_review_no_reasoning", reply_review_no_reasoning),
+        ("rolling_bounded_flexible_opening", rolling_bounded_flexible_opening),
+    ) if enabled]
     write_guard = None
     scenario_started = False
     try:
@@ -250,6 +254,8 @@ def run_simulation(
             raise ValueError("关闭回复审查推理只适用于指定 OpenCode Go 的真实沙盒")
         if rolling_table_groups and scenario_name != "rolling-roles":
             raise ValueError("模拟桌群须在持续角色运行中启用")
+        if rolling_bounded_flexible_opening and (mode != "real" or not rolling_table_groups or not guard_writes):
+            raise ValueError("有时间下界的人齐开仅用于启用独立写入核验和桌群的真实滚动沙盒")
         if show_verified_write_scope and not guard_writes:
             raise ValueError("规划器写入范围对照要求独立授权检查")
         if align_write_reviews and not show_verified_write_scope:
@@ -370,6 +376,8 @@ def run_simulation(
                 local_coordination=True,
                 tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
             )
+            if rolling_bounded_flexible_opening:
+                runtime.tool_execution_service.sandbox_flexible_opening_closes_at = time.fromisoformat(VENUE["closes"])
             runtime_limits = {"max_steps": runtime.max_steps,
                               "max_model_calls_per_turn": runtime.token_budget.max_calls_per_turn,
                               "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
@@ -445,6 +453,7 @@ def run_simulation(
                     "rolling_peers": rolling_peers, "show_verified_write_scope": show_verified_write_scope,
                     "align_write_reviews": align_write_reviews, "reply_review_no_reasoning": reply_review_no_reasoning,
                     "rolling_table_groups": rolling_table_groups,
+                    "rolling_bounded_flexible_opening": rolling_bounded_flexible_opening,
                 }}
                 temporary = run_dir / f".{_ROLLING_STATE}.tmp"
                 temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -577,6 +586,7 @@ def main() -> int:
     parser.add_argument("--rolling-play", action="store_true", help="用已确认四席和真实角色到离场决定推进四小时房态")
     parser.add_argument("--rolling-peers", action="store_true", help="让有关系的活跃顾客自行发起搭子私聊并接收回执唤醒")
     parser.add_argument("--rolling-table-groups", action="store_true", help="四席确认后建模拟桌群，真实档在群内协商人齐开时间")
+    parser.add_argument("--rolling-bounded-flexible-opening", action="store_true", help="试用带已核实到店下界的人齐开，开场由桌群协商")
     parser.add_argument("--show-verified-write-scope", action="store_true", help="只向沙盒私聊规划器列出本轮已有独立授权的专用写工具")
     parser.add_argument("--align-write-reviews", action="store_true", help="在沙盒私聊规划和回复审查中同时提供本轮授权边界")
     args = parser.parse_args()
@@ -602,7 +612,7 @@ def main() -> int:
             parser.error("历史出行事件只能用于新开的历史私聊续演")
         if args.reply_review_no_reasoning:
             parser.error("续跑时从原始运行读取回复审查配置")
-        if args.rolling_table_groups:
+        if args.rolling_table_groups or args.rolling_bounded_flexible_opening:
             parser.error("续跑时从原始运行读取桌群配置")
         run_dir = args.resume_run.resolve()
         try:
@@ -625,6 +635,7 @@ def main() -> int:
             show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews,
             reply_review_no_reasoning=args.reply_review_no_reasoning,
             rolling_table_groups=args.rolling_table_groups,
+            rolling_bounded_flexible_opening=args.rolling_bounded_flexible_opening,
             customer_model_source=args.customer_model_source or (
                 "opencode-go" if args.mode == "real" and args.model_source == "project" else "auto"))
     paused = report.get("provider_pause")

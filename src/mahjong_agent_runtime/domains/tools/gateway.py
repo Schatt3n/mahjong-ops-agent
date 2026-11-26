@@ -16,7 +16,7 @@ from ...stores.idempotency_common import tool_result_is_retryable_no_effect
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
 from .participation_access import participation_access_source
-from ..game_domain import planned_game_start_at
+from ..game_domain import OPENING_NOT_BEFORE, planned_game_start_at
 from ..game_participants import (
     LateParticipationRequiresConfirmation, ParticipationDeadlineRequiresConfirmation, ParticipationTermsChangedError,
     validate_current_participation_terms,
@@ -91,6 +91,11 @@ class ToolGateway:
         # 模型提供的 idempotency_key 只能作为建议，不能成为副作用操作的身份依据。
         definition = self.tools.get(call.name)
         schema_error = validate_schema(call.arguments, definition.schema) if definition is not None else None
+        requirement = call.arguments.get("requirement")
+        if (call.name == "create_game" and isinstance(requirement, dict) and OPENING_NOT_BEFORE in requirement
+                and (not isinstance(requirement[OPENING_NOT_BEFORE], str)
+                     or requirement[OPENING_NOT_BEFORE] != (message_reference_contract or {}).get(OPENING_NOT_BEFORE))):
+            schema_error = "opening_not_before_at is a verified backend condition, not a model argument"
         canonical_arguments = (
             definition.canonical_arguments(call.arguments)
             if definition is not None and schema_error is None

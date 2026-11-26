@@ -13,13 +13,14 @@ import re
 import json
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from .models import ToolCall, ToolResult, now
 from .domains import normalize_requirement
 from .domains.game_domain import (
-    START_KIND_ASAP_WHEN_FULL, current_game_query_end_deadline, current_game_query_start_range, derive_game_lifecycle,
+    OPENING_NOT_BEFORE, START_KIND_ASAP_WHEN_FULL, current_game_query_end_deadline, current_game_query_start_range,
+    derive_game_lifecycle, flexible_opening_not_before,
 )
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import current_game_search_reply_contract, known_players_with_requesting_party
@@ -94,6 +95,36 @@ def named_table_smoke_question_conflicts(text: str, requirement: Any) -> bool:
     verified_words = {normalize_smoke_preference(match["preceding"] or match["following"])
                       for match in _TABLE_SMOKE_DESCRIPTOR.finditer(descriptions)}
     return len(verified_words) != 1 or wanted != verified_words
+
+
+def verified_flexible_arrival_floor(
+    call: ToolCall, evidence: dict[str, Any], *, at: datetime, venue_closes_at: time,
+) -> datetime | None:
+    """试用范围只含当日本人到店下界，不把绝对散场、选定开场或其他人的时间带入。"""
+    requirement = call.arguments.get("requirement")
+    if (call.name != "create_game" or not isinstance(requirement, dict) or OPENING_NOT_BEFORE in requirement
+            or requirement.get("start_time_kind") != START_KIND_ASAP_WHEN_FULL or call.arguments.get("alternative_to_game_id")
+            or evidence.get("lookup_scope") != "personal"
+            or evidence.get("clock_role") not in {"arrival_estimate", "arrival_not_before"}
+            or type(evidence.get("current_ref")) is not int
+            or evidence.get("current_ref") not in (evidence.get("supporting_customer_refs") or [])
+            or any(evidence.get(key) for key in ("opening_window", "has_fixed_opening_authority", "must_end_by",
+                                                "max_duration_hours", "historical_table_opening_not_confirmed",
+                                                "also_requests_personal_options"))):
+        return None
+    floor = _aware_datetime(evidence.get("arrival_lookup_floor_at"))
+    try:
+        lifecycle = derive_game_lifecycle(requirement, created_at=at)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (floor is None or floor.astimezone(at.tzinfo).date() != at.date()
+            or not at < floor < lifecycle["expires_at"] or lifecycle["planned_start_at"] is not None):
+        return None
+    closes = datetime.combine(at.date(), venue_closes_at, tzinfo=at.tzinfo)
+    agreed_hours = evidence.get("agreed_duration_hours")
+    if floor >= closes or (agreed_hours is not None and (closes - floor).total_seconds() / 3600 < agreed_hours):
+        return None
+    return floor
 
 
 def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> str | None:
@@ -242,7 +273,9 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
             )
         if (earliest and planned < earliest) or (limit and planned > limit[1]):
             return "拟建局的固定开场超出了核实过的可开打时段。"
-    elif earliest and stamp < earliest:
+    elif (earliest and stamp < earliest
+          and not (proposed.get("start_time_kind") == START_KIND_ASAP_WHEN_FULL
+                   and flexible_opening_not_before(proposed) == earliest)):
         return "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
     if hard_departure and planned is None:
         # 人齐开的有效期约束招募，不能充当这一桌的散场时间。
@@ -442,10 +475,14 @@ def validate_tool_call_consistency(
         except (ValueError, OverflowError) as exc:
             return f"tool argument consistency violation: invalid proposed create_game lifecycle; {exc}"
         flexible = current_requirement.get("start_time_kind") == START_KIND_ASAP_WHEN_FULL or lifecycle["planned_start_at"] is None
+        floor = flexible_opening_not_before(current_requirement)
         if flexible and lifecycle["expires_at"] <= opening_window[0]:
             mismatches.append(f"flexible game expires at {lifecycle['expires_at'].isoformat()} before it can reach "
                               f"the searched opening window starting at {opening_window[0].isoformat()}")
-        elif flexible and stamp < opening_window[0]:
+        elif flexible and floor is not None and (not opening_window[0] <= floor <= opening_window[1]
+                or lifecycle["expires_at"] - timedelta(microseconds=1) > opening_window[1]):
+            mismatches.append("flexible opening bound or expiry falls outside the searched opening window")
+        elif flexible and floor is None and stamp < opening_window[0]:
             mismatches.append(f"flexible game can start before the searched opening window starting at "
                               f"{opening_window[0].isoformat()}; it has no enforceable earliest start")
     if not mismatches:

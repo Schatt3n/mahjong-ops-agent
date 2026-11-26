@@ -6,7 +6,7 @@ import re
 import unicodedata
 
 from mahjong_agent_runtime.domains.game_commitments import active_game_participant_ids
-from mahjong_agent_runtime.domains.game_domain import START_KIND_ASAP_WHEN_FULL
+from mahjong_agent_runtime.domains.game_domain import START_KIND_ASAP_WHEN_FULL, flexible_opening_not_before
 from mahjong_agent_runtime.domains.invitation_policy import invite_duration_terms
 from mahjong_agent_runtime.domains.stake_values import format_number, parse_number
 from mahjong_agent_runtime.llm import completion_diagnostics, model_response_source
@@ -106,23 +106,26 @@ class VenueTableShop:
         if game.planned_start_at is not None or game.requirement.get("start_time_kind") != START_KIND_ASAP_WHEN_FULL:
             return None
         agreed_hours = invite_duration_terms(game)["duration_hours"]
+        floor = flexible_opening_not_before(game.requirement)
         if reply_to is None:
             message_id = f"table-opening-inquiry:{group.game_id}"
             if revision_id is not None:
                 message_id = f"{message_id}|{revision_id}"
             hours = f"这桌打 {format_number(agreed_hours)} 小时。" if agreed_hours is not None else ""
-            return self._message(group, message_id, at, f"人齐了，{hours}大家各自几点能到？咱们在这儿定个开场。")
+            opening_time = f"最早 {floor:%H:%M} 能开。" if floor else ""
+            return self._message(group, message_id, at, f"人齐了，{hours}{opening_time}大家各自几点能到？咱们在这儿定个开场。")
 
         source = reply_to.message
         observed = active if (active and positions[active["proposal_id"]] < positions[source.message_id]
                               and source.quoted_message_id in {None, active["proposal_id"]}) else None
-        vote, start = self._decide(group, reply_to, at, records, observed, agreed_hours=agreed_hours)
+        vote, start = self._decide(group, reply_to, at, records, observed, agreed_hours=agreed_hours, floor=floor)
         result = None
         if observed and vote in {"accept", "decline"}:
             result = opening.record_vote(reply_to, proposal_id=observed["proposal_id"], accepts=vote == "accept")
         if result == "committed":
             return self._confirmation(group, at, opening.current(), records)
-        if start is None or start <= at or start.second or start.microsecond or len(proposed) >= 3:
+        if (start is None or start <= at or start.second or start.microsecond or len(proposed) >= 3
+                or not opening.accepts_bounded_proposal(start)):
             return None
         if active and (observed is None or start.isoformat() == active["start_at"]
                        or opening.current()["declined_count"] == 0):
@@ -130,7 +133,7 @@ class VenueTableShop:
         message_id = f"{_PROPOSAL_PREFIX}{start.isoformat()}|{source.message_id}"
         return opening.proposal_message(message_id, at=at, start_at=start)
 
-    def _decide(self, group, reply, at, records, active, *, agreed_hours):
+    def _decide(self, group, reply, at, records, active, *, agreed_hours, floor):
         """单轮只解释当前发言和同桌公开历史，调用失败继续保留待协商状态。"""
         body = {
             "now": at.isoformat(),
@@ -147,6 +150,8 @@ class VenueTableShop:
         # 只上传桌群现有事实；真实顾客的私人出行安排始终由各自角色保留。
         body["current"] = {key: body["current"][key] for key in
                            ("message_id", "sender_id", "text", "sent_at", "quoted_message_id")}
+        if floor is not None:
+            body["table_terms"]["opening_not_before_at"] = floor.isoformat()
         trace_id = f"table-shop:{group.game_id}:{reply.message.message_id}"
         evidence = {"trace_id": trace_id, "input": body}
         vote, start = "other", None

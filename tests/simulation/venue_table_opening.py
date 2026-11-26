@@ -1,15 +1,19 @@
 """人齐开桌群的开场协商，以实际收件支撑同一版时间的四席确认。"""
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, time, timedelta
 import json
 
 from mahjong_agent_runtime.domains.game_commitments import active_game_participant_ids, ready_commitment_conflicts
-from mahjong_agent_runtime.domains.game_domain import START_KIND_ASAP_WHEN_FULL, apply_game_lifecycle
+from mahjong_agent_runtime.domains.game_domain import (
+    START_KIND_ASAP_WHEN_FULL, apply_game_lifecycle, duration_hours_from_requirement, flexible_opening_not_before,
+)
+from mahjong_agent_runtime.domains.model_context import has_agreed_game_duration
 from mahjong_agent_runtime.models import DEFAULT_TZ, GameStatus, StateTransition, using_clock
 
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_table_group import TableGroupReceipt, VenueTableGroup
+from .venue_scenario import VENUE
 
 
 class VenueTableOpening:
@@ -42,9 +46,28 @@ class VenueTableOpening:
         stamp, start = _local(at), _local(start_at)
         if start <= stamp or start.second or start.microsecond:
             raise ValueError("table opening proposal must be a future minute boundary")
+        if not self.accepts_bounded_proposal(start):
+            raise ValueError("table opening proposal falls outside the verified opening or venue hours")
         when = start.strftime("%H:%M" if start.date() == stamp.date() else "%m月%d日 %H:%M")
         return MessageEnvelope(message_id, AGENT_ID, f"{when} 开大家能到吗？都行的话就定这个时间。",
                                stamp, "group", self.group.room_id)
+
+    def accepts_bounded_proposal(self, start: datetime) -> bool:
+        """只为有明确下界的试点牌局核对开场和已约定的营业时长。"""
+        return self._within_bounded_opening(self.store.require_game(self.game_id), _local(start))
+
+    @staticmethod
+    def _within_bounded_opening(game, start: datetime) -> bool:
+        floor = flexible_opening_not_before(game.requirement)
+        if floor is None:
+            return True
+        closing = datetime.combine(start.date(), time.fromisoformat(VENUE["closes"]), tzinfo=DEFAULT_TZ)
+        end = (start + timedelta(hours=duration_hours_from_requirement(game.requirement))
+               if has_agreed_game_duration(game.requirement) else None)
+        return (floor.date() == start.date() and floor <= start < closing
+                and start.time() >= time.fromisoformat(VENUE["opens"])
+                and (game.expires_at is None or start < game.expires_at)
+                and (end is None or end <= closing))
 
     def record_proposal(self, receipt: TableGroupReceipt, *, start_at: datetime) -> None:
         """只有四席主人实际收到的那份店家提议才成为有效版本。"""
@@ -65,6 +88,8 @@ class VenueTableOpening:
                     raise ValueError("proposal retry conflicts with its first delivery")
                 return
             game = self.store.require_game(self.game_id)
+            if not self._within_bounded_opening(game, start):
+                raise ValueError("table opening proposal falls outside the verified opening or venue hours")
             seats = active_game_participant_ids(game)
             if (not self._unsettled(game, stamp) or len(seats) != game.seats_total
                     or set(receipt.recipient_ids) != seats
@@ -131,6 +156,8 @@ class VenueTableOpening:
         if proposal["committed"] or not self._unsettled(game, at):
             return "closed"
         start = datetime.fromisoformat(proposal["start_at"])
+        if not self._within_bounded_opening(game, start):
+            return "outside_opening_window"
         if at >= start:
             return "proposal_elapsed"
         latest_vote_at = self.store._connection.execute("""
