@@ -385,7 +385,11 @@ def test_future_flexible_opening_handoff_preserves_delegation_and_does_not_place
         outbound, = before["archive_outputs"]
         assert outbound["source_message_id"] == "afternoon-inbound" and outbound["text"] == handoff
         assert not store.games and not store.invite_drafts and not store.room_reservations and not authority.calls
-        business_tools = [event.content for event in traces.get_trace(before["trace_id"]) if event.step == "tool_result"]
+        before_trace = traces.get_trace(before["trace_id"])
+        verified, = [event.content["decision"] for event in before_trace if event.step == "table_availability_authorization_result"]
+        assert verified["named_future_opening"] == {"date": "2026-11-26", "parts": ["afternoon"]}
+        assert verified["opening_window"] == window and not verified["has_fixed_opening_authority"]
+        business_tools = [event.content for event in before_trace if event.step == "tool_result"]
         read, denied = [tool for tool in business_tools if tool["name"] in {"search_current_games", "create_game"}]
         assert read["called"] and read["allowed"] and read["result"]["matches"] == []
         assert read["result"]["requirement"]["start_time_range"] == window
@@ -396,6 +400,10 @@ def test_future_flexible_opening_handoff_preserves_delegation_and_does_not_place
     with using_clock(lambda: next_at):
         after = channel.send(MessageEnvelope("confirmed-inbound", "guest", confirmation, next_at, "private", AGENT_ID))
         assert after["final_reply"] == receipt
+        after_trace = traces.get_trace(after["trace_id"])
+        created, = [event.content for event in after_trace
+                    if event.step == "tool_result" and event.content.get("name") == "create_game"]
+        assert created["called"] and created["allowed"]
         scheduled, = store.games.values()
         assert scheduled.planned_start_at.isoformat() == fixed_at
         assert scheduled.organizer_id == "guest"

@@ -48,6 +48,7 @@
     "test": "tests/test_table_availability_authorization.py::test_rolling_0437_keeps_future_named_opening_and_uses_real_write_permission",
     "sqlite_scheduler_control": "原话可查11月26日18:00到27日06:00。人齐开提前失效和模型自行提出20:00均无写入。顾客另外授权老板选时或明确选定20:00时，实际建局工具写入20:00，未提前到18:00前失效。",
     "other_controls": "无未来约束的人齐开仍可走普通四小时有效期。时段核验无结果或者错误判成其他范围时拒绝提前建局。23:00说明确的明晚，以次日当地日期核验。",
+    "integration_control": "午后都行后面接用空格分隔的玩法和底注时，首轮仍核实12:00–18:00，实际查桌并送达澄清。第二轮顾客明确说下午一点开后，正常核验并写入13:00。当天普通人齐开仍可直接承接。",
     "live_replay": "pending",
     "focused_tests_passed": 623
   }

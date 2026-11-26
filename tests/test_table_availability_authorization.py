@@ -1204,9 +1204,12 @@ def test_opening_interval_preserves_read_and_requires_separate_authority_for_fix
 @pytest.mark.parametrize(("text", "hour", "needs_review"), [
     ("帮我组一桌杭麻，今晚都行", 11, True),
     ("帮我组个下午都能开的川麻", 11, True),
+    ("老板 那就人齐了开吧 午后都行 一点底杭麻", 9, True),
     ("明晚有桌吗", 22, True),
     ("老板晚上好，杭麻打无烟的", 11, False),
     ("今晚可不可以通知我一下", 11, False),
+    ("午后可以 通知我一下", 9, False),
+    ("午后都行动了", 9, False),
     ("晚上好，今天都行", 11, False),
     ("昨天晚上都行", 11, False),
     ("次日晚上都行", 11, False),

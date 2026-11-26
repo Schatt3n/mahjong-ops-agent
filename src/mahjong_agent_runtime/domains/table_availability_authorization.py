@@ -56,7 +56,8 @@ _PERSONAL_CLOCK_ROLES = frozenset({"arrival_by", "arrival_not_before", "arrival_
 _OPENING_DAYPART_HOURS = {"morning": (0, 12), "afternoon": (12, 18), "evening": (18, 24 + OVERNIGHT_SEARCH_END_HOUR)}
 _NAMED_OPENING_PARTS = {
     "上午": "morning", "早上": "morning", "今早": "morning", "明早": "morning", "凌晨": "morning",
-    "下午": "afternoon", "傍晚": "evening", "晚上": "evening", "晚间": "evening", "今晚": "evening", "明晚": "evening",
+    "下午": "afternoon", "午后": "afternoon",
+    "傍晚": "evening", "晚上": "evening", "晚间": "evening", "今晚": "evening", "明晚": "evening",
 }
 _RELATIVE_DATE_OFFSETS = {
     "今天": 0, "今晚": 0, "今早": 0, "明天": 1, "明晚": 1, "明早": 1, "后天": 2, "大后天": 3,
@@ -72,7 +73,8 @@ _LATER_DATE_TEXT = re.compile(r"次日|翌日|明日|隔天|第二天|过了?午
 _CLAUSE_SEPARATOR = re.compile(r"[,，。；;！!？?\n]")
 _NAMED_OPENING_CUE = re.compile(
     rf"(?P<part>{'|'.join(_NAMED_OPENING_PARTS)})(?![ \t]*好)[ \t]*"
-    r"(?=(?:都|也)?(?:行|可以)[吧呀呢吗]?[ \t]*$|(?:都|也)?(?:可以|能)(?:开|打|玩)"
+    r"(?=(?:都|也)行[吧呀呢吗]?(?=[ \t]|$)|(?:都|也)?(?:行|可以)[吧呀呢吗]?[ \t]*$"
+    r"|(?:都|也)?(?:可以|能)(?:开|打|玩)"
     r"|(?:开|打|玩)(?:都行|就好|也行|可以)|有.{0,24}(?:桌|局|位))"
 )
 _PAST_DAYPART_CUE = re.compile(r"昨天|昨晚|前天|之前那")
