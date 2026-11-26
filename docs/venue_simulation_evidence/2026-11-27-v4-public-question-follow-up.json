@@ -1,0 +1,38 @@
+{
+  "run": "2026-11-25-real-270ac8a1b6",
+  "start_commit": "bf3428d",
+  "public_board": {
+    "sequence": 65,
+    "message_id": "outbound:board:board_snapshot_d3239b5f80964e18aa31e270f0a80250",
+    "text": "1、人齐开 杭麻 1 烟况待定 173"
+  },
+  "unsupported_public_follow_up": {
+    "trace_id": "trace_a615cfd332ed38bb617bfbff",
+    "customer": {
+      "sequence": 66,
+      "message_id": "customer:role-event:9de5a03b52be60f7acd381b48a57f99b36d715e24e48351b432154cd7e38caaa",
+      "text": "老板 人齐开的杭麻1块底那桌还有位吗 烟况怎么样 我打四川麻将的 这个能搭吗"
+    },
+    "delivered": {
+      "sequence": 67,
+      "message_id": "outbound:trace_a615cfd332ed38bb617bfbff:1",
+      "text": "那桌杭麻一块底、人齐开，现在一个还缺三个。烟况没写，稍后问下。它打的是杭麻，不是川麻，这样你还打吗？"
+    },
+    "tools": ["customer_visible_content_review"],
+    "final_review_approved": true,
+    "reason": "该桌烟况未知，有依据。另起的「稍后问下」承担了向原桌询问的责任，同轮没有查证任务、转达或其他业务执行。继续询问顾客能否接受玩法是另一件事。"
+  },
+  "supported_private_follow_up": {
+    "trace_id": "trace_37c191b34a42768cfcc13106",
+    "source_message_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+    "sequences": [86, 87],
+    "delivered": "那桌还是1个人，缺3个，人齐开。有人凑起来我跟你说一声。",
+    "tools": ["search_current_games", "schedule_follow_up", "customer_visible_content_review"],
+    "task_id": "follow_up_4355221a8409",
+    "status_when_delivered": "pending",
+    "due_at": "2026-11-26T11:57:00+08:00",
+    "expires_at": "2026-11-26T17:30:00+08:00",
+    "reason": "顾客明确请求有进展时通知，同来源持久复查支持承接。在回复送达时复查仍待执行。"
+  },
+  "change": "为发前审查补充一项群聊或私聊对照，核对单独承担的询问与实际安排。原运行和原评审保持可审计，修订后真模型尚待复验。"
+}
