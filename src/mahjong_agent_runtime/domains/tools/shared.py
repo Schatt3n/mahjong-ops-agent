@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 from ..customer_domain import HOST_CONFIRMATION_REQUIRED, scored_game_requirement_fields
+from ..game_domain import current_game_query_opening_filter
 from ..game_participants import requested_seat_count_from_search_requirement
 from ..query_contract import game_query_strategy_contract
 
@@ -118,6 +119,8 @@ def current_game_search_reply_contract(
     applied_filters = scored_game_requirement_fields(requirement)
     if "start_time_range" in requirement:
         applied_filters["start_time_range"] = requirement["start_time_range"]
+    elif opening := current_game_query_opening_filter(requirement):
+        applied_filters["planned_start_at"] = opening[0].isoformat()
     # 与 Store 使用同一人数协议和优先级，别名统一为容量字段；桌况人数不计为己方人数。
     # 所有可用局原本至少有一个空位，缺省或显式单人均未缩小此基线，不能虚报新增过滤。
     requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)

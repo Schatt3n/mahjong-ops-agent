@@ -3248,7 +3248,8 @@ def test_v7_0103_certified_empty_pool_is_not_evidence_of_an_unexecuted_deadline_
     assert latest == {"status": "completed", "matched_count": 0, "call_id": "search2", "certified_empty_pool": {
         "scope": "same_requester_and_conversation",
         "executed_filters": {"max_duration_hours": 3.5, "smoke_preference": "no_smoking",
-                             "stake_range": {"min": 2.0, "max": 3.0}, "start_time_kind": "scheduled"},
+                             "stake_range": {"min": 2.0, "max": 3.0}, "start_time_kind": "scheduled",
+                             "planned_start_at": terms["planned_start_at"]},
     }}
     assert any("executed_filters" in rule and "未执行、被拒或未提交" in rule and "unsupported_conclusion" in rule
                for rule in limited["rules"])
@@ -3266,17 +3267,18 @@ def test_v7_0103_certified_empty_pool_is_not_evidence_of_an_unexecuted_deadline_
     assert "certified_empty_pool" not in review(accurate, [denied, truncated])[
         "game_availability_evidence"]["latest_search"]
 
+    duration_only_terms = {key: value for key, value in terms.items() if key not in {"planned_start_at", "start_time"}}
     with using_clock(lambda: at):
         late_table, _ = store.create_game(conversation_id="other", organizer_id="host", organizer_name="牌友",
             requirement={"planned_start_at": "2026-11-25T21:00:00+08:00", "start_time_kind": "scheduled",
                          "smoke_preference": "no_smoking", "stake": 2, "duration_hours": 3},
             known_players=[], trace_id="late-table")
         fallback_read = ToolGateway(store).execute(ToolCall("search_current_games", {
-            "lookup_scope": "personal", "requirement": {**terms, "max_duration_hours": 3.5},
+            "lookup_scope": "personal", "requirement": {**duration_only_terms, "max_duration_hours": 3.5},
         }), trace_id="late-table", conversation_id=message.conversation_id, sender_id=message.sender_id,
             sender_name=message.sender_name, step_index=1)
         exact_read = ToolGateway(store).execute(ToolCall("search_current_games", {
-            "lookup_scope": "personal", "requirement": {**terms, "must_end_by": deadline},
+            "lookup_scope": "personal", "requirement": {**duration_only_terms, "must_end_by": deadline},
         }), trace_id="late-table", conversation_id=message.conversation_id, sender_id=message.sender_id,
             sender_name=message.sender_name, step_index=2)
         deadline_read = compact_tool_result_dict(exact_read.to_dict())

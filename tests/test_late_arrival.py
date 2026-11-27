@@ -183,6 +183,77 @@ def test_v4_0022_missing_current_lookup_can_retry_same_key_without_double_arrang
             assert "联系人授权不足" in retried.error and not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
 
 
+@pytest.mark.parametrize("same_instant_duplicate", [False, True])
+def test_v8_0022_dated_lookup_disambiguates_late_arrival_without_changing_seats(store, same_instant_duplicate):
+    """同钟点的隔日桌不能混入确切日期查局，同一瞬时仍有两桌时继续拒绝联系。"""
+    at = datetime.fromisoformat("2026-11-26T19:35:00+08:00")
+    start = "2026-11-26T19:30:00+08:00"
+    next_start = "2026-11-27T19:30:00+08:00"
+    arrival = "2026-11-26T20:03:00+08:00"
+    trace_id = "dated-late-arrival"
+    message = UserMessage(_private("guest"), "guest", "客人",
+        "老板好 七点半那桌杭麻1到3块无烟的我20点03分能到 晚一点还能搭吗",
+        message_id="dated-inquiry", sent_at=at)
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store, trace_recorder=trace), trace)
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3},
+             "smoke_preference": "no_smoking", "start_time_kind": "scheduled", "start_time": "19:30"}
+
+    def submit(name, arguments, step):
+        action = AgentAction("核实晚到", "needs_tool", "沿用当前原桌条件", tool_calls=[
+            ToolCall(name, arguments, call_id=f"step-{step}"),
+        ])
+        return service.execute_tool_calls(action, message=message, trace_id=trace_id,
+            previous_step_tool_results=[], step_index=step, run_id="dated-inquiry-run",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    def lookup(requirement, step):
+        report = submit("search_current_games", {"lookup_scope": "specific_table", "requirement": requirement}, step)
+        assert report.called and report.allowed
+        return report.result, {row["game"]["game_id"] for row in report.result["matches"]}
+
+    with using_clock(lambda: at):
+        original = _seed(store, duration_hours=None, start=datetime.fromisoformat(start))
+        store.update_game_requirement(game_id=original.game_id, requirement_patch={**terms, "max_duration_hours": 2.5},
+            reason="写入原桌条件", trace_id="table-terms")
+        tomorrow, _ = store.create_game(conversation_id=_private("tomorrow"), organizer_id="tomorrow", organizer_name="另一桌",
+            requirement={**terms, "stake_range": {"min": 2, "max": 3}, "planned_start_at": next_start},
+            known_players=[], trace_id="tomorrow-table")
+        store.append_user_turn(message, trace_id)
+        request = {"game_id": original.game_id, "arrival_at": arrival}
+        _, undated = lookup(terms, 1)
+        assert undated == {original.game_id, tomorrow.game_id}
+        denied = submit("request_late_arrival", request, 2)
+        assert denied.result["validation_error"]["code"] == "late_arrival_current_table_lookup_required"
+        assert not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        _, other_day = lookup({**terms, "planned_start_at": next_start}, 3)
+        assert other_day == {tomorrow.game_id}
+        duplicate_ids = set()
+        if same_instant_duplicate:
+            duplicate, _ = store.create_game(conversation_id=_private("duplicate"), organizer_id="duplicate", organizer_name="同一晚另一桌",
+                requirement={**terms, "planned_start_at": start}, known_players=[], trace_id="same-opening-table")
+            duplicate_ids.add(duplicate.game_id)
+        before = {key: game.to_dict() for key, game in store.games.items()}
+        precise, exact = lookup({**terms, "planned_start_at": start}, 4)
+        assert exact == {original.game_id} | duplicate_ids
+        assert "planned_start_at" in precise["customer_reply_contract"]["evidence_scope"]["applied_filter_fields"]
+        _, equivalent = lookup({**terms, "planned_start_at": "2026-11-26T11:30:00+00:00"}, 5)
+        assert equivalent == exact
+        result = submit("request_late_arrival", request, 6)
+        assert result.called is result.allowed is not same_instant_duplicate
+        assert result.result["contact_started"] is False
+        assert {key: game.to_dict() for key, game in store.games.items()} == before
+        if same_instant_duplicate:
+            assert result.result["validation_error"]["code"] == "late_arrival_current_table_lookup_required"
+            assert not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        else:
+            assert result.result["late_arrival_request"]["status"] == "queued"
+            question, = _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+            assert question.aggregate_id == original.game_id and question.subject_id == "host"
+            assert question.payload["source_message_id"] == message.message_id
+            assert question.payload["arrival_at"] == arrival
+
+
 def test_late_arrival_requires_real_receipts_and_all_confirmed_contacts(store):
     with using_clock(lambda: TOUCH):
         game = _seed(store, peer=True)

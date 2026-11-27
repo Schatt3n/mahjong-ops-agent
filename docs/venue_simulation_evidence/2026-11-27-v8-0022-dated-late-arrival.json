@@ -1,0 +1,358 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "trace_id": "trace_34ad36b87e42d3137f14ee72",
+  "customer_role": "0022",
+  "local_clock": "2026-11-26T19:35:00+08:00",
+  "conversation_ledger": [
+    {
+      "sequence": 82,
+      "message_id": "customer:role-event:170b2bf2ec7b79b4b3381576c728f827160f671f76e62aae1dbacda4ec729600",
+      "direction": "inbound",
+      "text": "老板好 七点半那桌杭麻1到3块无烟的还有位吗",
+      "sent_at": "2026-11-26T03:09:30+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "trace_id": "trace_2c40e6c21300d9d5b9c984da"
+    },
+    {
+      "sequence": 83,
+      "message_id": "outbound:trace_2c40e6c21300d9d5b9c984da:1",
+      "direction": "outbound",
+      "text": "七点半那桌有位哦，杭麻1到3块无烟的，现在一个坐着、还差三个人，这桌大概打两个半小时，你来吗？",
+      "sent_at": "2026-11-26T03:09:30+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:170b2bf2ec7b79b4b3381576c728f827160f671f76e62aae1dbacda4ec729600",
+      "trace_id": "trace_2c40e6c21300d9d5b9c984da"
+    },
+    {
+      "sequence": 130,
+      "message_id": "customer:role-event:1e92140e6f72a0325847fb2ac82b893f734e0e021bd4263aff885ac9c2c274c2",
+      "direction": "inbound",
+      "text": "老板好 七点半那桌杭麻1到3块无烟的我20点03分能到 晚一点还能搭吗",
+      "sent_at": "2026-11-26T11:35:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "trace_id": "trace_34ad36b87e42d3137f14ee72"
+    },
+    {
+      "sequence": 133,
+      "message_id": "outbound:trace_34ad36b87e42d3137f14ee72:1",
+      "direction": "outbound",
+      "text": "稍等一下",
+      "sent_at": "2026-11-26T11:35:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:1e92140e6f72a0325847fb2ac82b893f734e0e021bd4263aff885ac9c2c274c2",
+      "trace_id": "trace_34ad36b87e42d3137f14ee72"
+    }
+  ],
+  "same_customer_preflight": {
+    "status": "no_permission",
+    "raw": "{\"permissions\":[]}"
+  },
+  "independent_time_scope": {
+    "decision": {
+      "accepted_stake_range": null,
+      "agreed_duration_hours": null,
+      "clock_role": "arrival_estimate",
+      "clock_roles": [
+        {
+          "clock_ref": 1,
+          "role": "opening"
+        },
+        {
+          "clock_ref": 2,
+          "role": "arrival_estimate"
+        },
+        {
+          "clock_ref": 3,
+          "role": "other"
+        }
+      ],
+      "current_ref": 1,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "specific_table",
+      "max_duration_hours": null,
+      "opening_customer_ref": null,
+      "opening_dayparts": null,
+      "opening_window": null,
+      "personal_clocks_not_opening": [
+        "2026-11-26T20:03:00+08:00"
+      ],
+      "supporting_customer_refs": [
+        1
+      ]
+    },
+    "response_source": {
+      "call_id": "llm_call_2ce60d7784c44a53bf096e82dbc8db2c",
+      "http_response_complete": true,
+      "raw_response_sha256": "607425f87a7b34a99c11b54f447bf6ece512505ac508cf85032ed6f680544007",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 2,
+      "terminal_attempt_id": "llm_attempt_5271dbf0b012470890cfa060d0102f46",
+      "trace_id": "trace_34ad36b87e42d3137f14ee72:table-availability:2"
+    }
+  },
+  "tool_reports": [
+    {
+      "step_index": 2,
+      "name": "search_current_games",
+      "arguments": {
+        "lookup_scope": "specific_table",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "smoke_preference": "no_smoking",
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time": "19:30",
+          "start_time_kind": "scheduled"
+        }
+      },
+      "called": true,
+      "allowed": true,
+      "matches": [
+        {
+          "game_id": "game_8aef6bf1423b",
+          "status": "forming",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "actual_started_at": null,
+          "seat_summary": {
+            "claimed_seats": 1,
+            "remaining_seats": 3,
+            "seats_total": 4
+          },
+          "stake_range": {
+            "max": 3.0,
+            "min": 1.0
+          },
+          "recruitment_status": "open",
+          "match_kind": "exact"
+        },
+        {
+          "game_id": "game_f28f170b8e4a",
+          "status": "forming",
+          "planned_start_at": "2026-11-27T19:30:00+08:00",
+          "actual_started_at": null,
+          "seat_summary": {
+            "claimed_seats": 1,
+            "remaining_seats": 3,
+            "seats_total": 4
+          },
+          "stake_range": {
+            "max": 3.0,
+            "min": 2.0
+          },
+          "recruitment_status": "scheduled",
+          "match_kind": "exact"
+        }
+      ]
+    },
+    {
+      "step_index": 4,
+      "name": "request_late_arrival",
+      "arguments": {
+        "arrival_at": "2026-11-26T20:03:00+08:00",
+        "game_id": "game_8aef6bf1423b"
+      },
+      "called": false,
+      "allowed": false,
+      "contact_started": false,
+      "validation_error": {
+        "code": "late_arrival_current_table_lookup_required",
+        "message": "请先按这桌原条件查到同一桌，再安排晚到核实。"
+      }
+    },
+    {
+      "step_index": 6,
+      "name": "search_current_games",
+      "arguments": {
+        "lookup_scope": "specific_table",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "smoke_preference": "no_smoking",
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time": "19:30",
+          "start_time_kind": "scheduled"
+        }
+      },
+      "called": true,
+      "allowed": true,
+      "matches": [
+        {
+          "game_id": "game_8aef6bf1423b",
+          "status": "forming",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "actual_started_at": null,
+          "seat_summary": {
+            "claimed_seats": 1,
+            "remaining_seats": 3,
+            "seats_total": 4
+          },
+          "stake_range": {
+            "max": 3.0,
+            "min": 1.0
+          },
+          "recruitment_status": "open",
+          "match_kind": "exact"
+        },
+        {
+          "game_id": "game_f28f170b8e4a",
+          "status": "forming",
+          "planned_start_at": "2026-11-27T19:30:00+08:00",
+          "actual_started_at": null,
+          "seat_summary": {
+            "claimed_seats": 1,
+            "remaining_seats": 3,
+            "seats_total": 4
+          },
+          "stake_range": {
+            "max": 3.0,
+            "min": 2.0
+          },
+          "recruitment_status": "scheduled",
+          "match_kind": "exact"
+        }
+      ]
+    },
+    {
+      "step_index": 7,
+      "name": "request_late_arrival",
+      "arguments": {
+        "arrival_at": "2026-11-26T20:03:00+08:00",
+        "game_id": "game_8aef6bf1423b"
+      },
+      "called": false,
+      "allowed": false,
+      "contact_started": false,
+      "validation_error": {
+        "code": "late_arrival_current_table_lookup_required",
+        "message": "请先按这桌原条件查到同一桌，再安排晚到核实。"
+      }
+    },
+    {
+      "step_index": 8,
+      "name": "request_late_arrival",
+      "arguments": {
+        "arrival_at": "2026-11-26T20:03:00+08:00",
+        "game_id": "game_8aef6bf1423b"
+      },
+      "called": false,
+      "allowed": false,
+      "contact_started": false,
+      "validation_error": {
+        "code": "late_arrival_current_table_lookup_required",
+        "message": "请先按这桌原条件查到同一桌，再安排晚到核实。"
+      }
+    }
+  ],
+  "action_contract_failures": [
+    {
+      "step_index": 1,
+      "errors": [
+        "missing required key: reply_to_user",
+        "missing required key: tool_calls",
+        "missing required key: needs_human",
+        "missing required key: stop_reason",
+        "stop_reason must be object",
+        "stop_reason.can_stop is required",
+        "stop_reason.why is required",
+        "stop_reason.pending_work is required",
+        "stop_reason.depends_on_tool_results is required",
+        "needs_tool requires stop_reason.can_stop=false",
+        "objective_state.fact_assertions[0].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "objective_state.fact_assertions[1].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "objective_state.fact_assertions[2].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "objective_state.fact_assertions[3].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "needs_tool requires at least one tool_call"
+      ],
+      "response_source": {
+        "call_id": "llm_call_f6eda1eee4664b6c9aad7082c75dc8d4",
+        "http_response_complete": true,
+        "raw_response_sha256": "5dc87693601aeddc9453f7dda7775e5495c9dfe90488b0396be93bb4008b23f6",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_c564bd97ee18434e8e1b66d6c2269cca",
+        "trace_id": "trace_34ad36b87e42d3137f14ee72"
+      }
+    },
+    {
+      "step_index": 3,
+      "errors": [
+        "objective_state.fact_assertions[0].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: ['late_arrival_check']",
+        "objective_state.fact_assertions[1].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: ['late_arrival_check']",
+        "objective_state.fact_assertions[2].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: ['late_arrival_check']",
+        "objective_state.fact_assertions[3].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: ['late_arrival_check']"
+      ],
+      "response_source": {
+        "call_id": "llm_call_abfba550bb5e45babb8afe1bb8387549",
+        "http_response_complete": true,
+        "raw_response_sha256": "16ac72bf056e5cae463eab016a1bf2875bc6cdb9b1edb5106815a41ffb71bcb3",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 3,
+        "terminal_attempt_id": "llm_attempt_6235b977c11c405893ba831edaa0035e",
+        "trace_id": "trace_34ad36b87e42d3137f14ee72"
+      }
+    },
+    {
+      "step_index": 5,
+      "errors": [
+        "missing required key: reply_to_user",
+        "missing required key: tool_calls",
+        "missing required key: needs_human",
+        "missing required key: stop_reason",
+        "stop_reason must be object",
+        "stop_reason.can_stop is required",
+        "stop_reason.why is required",
+        "stop_reason.pending_work is required",
+        "stop_reason.depends_on_tool_results is required",
+        "needs_tool requires stop_reason.can_stop=false",
+        "objective_state.fact_assertions[0].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "objective_state.fact_assertions[1].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "objective_state.fact_assertions[2].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "objective_state.fact_assertions[3].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+        "needs_tool requires at least one tool_call"
+      ],
+      "response_source": {
+        "call_id": "llm_call_85c6985cb582440898461b3e9466f689",
+        "http_response_complete": true,
+        "raw_response_sha256": "089655158983ecd1fd6fc235bcb14a065b0882132755a345d38dba2bd8b72081",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 5,
+        "terminal_attempt_id": "llm_attempt_0f32a6b151144a30b3fff2c3afce91ba",
+        "trace_id": "trace_34ad36b87e42d3137f14ee72"
+      }
+    }
+  ],
+  "runtime_status": "needs_help",
+  "runtime_reason": "max_steps_exceeded",
+  "diagnosis": "此人当天上午已问过七点半杭麻 1～3 元无烟原桌，店家给过实到的私聊回复。当晚同人继续问 20:03 晚到能否搭上。两次真实读取均把次日同钟点且档位有重叠的桌返回为 exact，步骤 6 的查询已有完整计划开场日期和时区。晚到工具必须有同一来话内唯一精确读取，三次均拒绝，没有登记征询或占位。另有三次主模型动作结构不合规。",
+  "offline_verification": {
+    "implementation": "两个存储后端在检索限额前精确执行有效 planned_start_at，查询回执列明该过滤字段。钟点未附日期时仍保留多个结果，同一瞬时出现多个结果也继续拒绝代问。",
+    "test": "tests/test_late_arrival.py::test_v8_0022_dated_lookup_disambiguates_late_arrival_without_changing_seats",
+    "checks": [
+      "按原业务钟、顾客原话、原桌和次日桌条件，复放两次实际查询和实际晚到工具。",
+      "钟点查询保留两桌。指定 11 月 26 日只匹配原桌；指定 11 月 27 日只匹配次日桌。偏移不同时同一个绝对时刻结果等价。",
+      "唯一原桌时，征询任务只排给原桌联系人，保留顾客来话与 ETA。尚未实际送达。时间完全相同仍有两桌时不排任务。两张或三张桌的完整状态及席位均保留。"
+    ],
+    "gates": {
+      "focused_cases": 4,
+      "focused_failures_with_previous_store_filter": 4,
+      "related_tests_passed": 791,
+      "real_replay": "pending"
+    }
+  }
+}

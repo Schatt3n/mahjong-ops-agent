@@ -191,6 +191,23 @@ def current_game_query_start_range(requirement: dict[str, Any]) -> tuple[datetim
     return start, end
 
 
+def current_game_query_opening_filter(requirement: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """固定开场按带日期和时区的同一瞬时过滤，日内钟点不推断日期。"""
+    window = current_game_query_start_range(requirement)
+    if window is not None:
+        return window
+    value = requirement.get("planned_start_at")
+    if is_blank_value(value):
+        return None
+    try:
+        opening = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("planned_start_at must be a datetime with an offset") from exc
+    if opening.utcoffset() is None:
+        raise ValueError("planned_start_at requires a timezone offset")
+    return opening, opening
+
+
 def merge_requirement_patch(requirement: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """合并档位和同桌条件；软偏好不能暗中覆盖明确的硬限制。"""
     base = dict(requirement)

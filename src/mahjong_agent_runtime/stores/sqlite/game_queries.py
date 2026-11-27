@@ -20,7 +20,7 @@ from ...domains import (
     task_memory_anchor_ids,
 )
 from ...domains.customer_domain import HOST_CONFIRMATION_REQUIRED, board_only_search_game_projection, scored_game_requirement_fields
-from ...domains.game_domain import current_game_query_start_range, normalize_current_game_query
+from ...domains.game_domain import current_game_query_opening_filter, normalize_current_game_query
 
 class SQLiteGameQueriesStoreMixin:
     """从兼容存储中提取的后端特定操作。"""
@@ -37,7 +37,7 @@ class SQLiteGameQueriesStoreMixin:
     ) -> list[dict[str, Any]]:
         """先按请求方座位与当前作用域排除不可入局对象，再评分并截取结果。"""
         requirement = normalize_current_game_query(requirement)
-        start_range = current_game_query_start_range(requirement)
+        start_range = current_game_query_opening_filter(requirement)
         has_scored_filters = bool(scored_game_requirement_fields(requirement))
         scored: list[dict[str, Any]] = []
         requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)

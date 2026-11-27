@@ -17,7 +17,7 @@ from ...models import (
     now,
 )
 from ...domains.recruitment_options import creation_option_root
-from ...domains.game_domain import current_game_query_start_range, merge_requirement_patch, normalize_current_game_query
+from ...domains.game_domain import current_game_query_opening_filter, merge_requirement_patch, normalize_current_game_query
 from ...domains.game_play import prepare_game_play_finish, prepare_game_play_start
 from ...domains.stake_values import stake_options
 from ...domains import (
@@ -61,7 +61,7 @@ class InMemoryGamesStoreMixin:
         """先按请求方座位与当前作用域排除不可入局对象，再评分并截取结果。"""
         with self._lock:
             requirement = normalize_current_game_query(requirement)
-            start_range = current_game_query_start_range(requirement)
+            start_range = current_game_query_opening_filter(requirement)
             has_scored_filters = bool(scored_game_requirement_fields(requirement))
             scored: list[dict[str, Any]] = []
             requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
