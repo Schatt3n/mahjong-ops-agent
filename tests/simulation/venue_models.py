@@ -143,6 +143,14 @@ _PREFLIGHT_REVIEW = """
 同一客户此前明确委托组桌，本轮只回答玩法并更正最早到店时间，沙盒未给 `organize` 时，仍用实际送达的前文理解原委托。确实缺一个可行开场时，可以只问这桌几点开并用 `waiting_user` 等回复。无需要求客户重新委托、让主模型调用不可用工具、或把这段追问改成话到为止的告知。已有可行的明确开场时不用再问；当前缺写入范围仍不能声称已经安排或会继续办理。
 """
 
+_BOUNDED_FLEXIBLE_OPENING = """
+
+## 沙盒有最早时段的人齐开
+
+普通私聊中，顾客已明确委托组新桌，只给了当日自己的到店时间，未确认固定开场、未限定最晚散场或最长可打多久时，可以尝试用 `create_game` 的 `start_time_kind=asap_when_full` 先登记招募。只提交有依据的局条件，省略 `start_time`、`planned_start_at` 和 `opening_not_before_at`。最早开场由后端独立核实并保存。原有组局授权和其他条件仍须核实。用本轮工具回执区分等待招募、四席凑齐和同桌已定开场。没有固定开场回执时，只说明尚待四人在牌局小群商量。尚未保存的到店、散场和后续通知不得说成已安排。
+若已有可行的固定开场，沿用已确认的时间。后端未能保存最早边界时，按实际缺项澄清或说明当前进度，不能把到店时间改成已确认的开场。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class _VenuePreflightPrompt:
@@ -165,6 +173,15 @@ def configure_venue_consent_prompt(runtime, run_dir: Path) -> str:
     origin = runtime.context_builder.prompt_path
     revised = origin.read_text(encoding="utf-8") + _CONSENT_CLARIFICATION
     target = run_dir / "sandbox_planner_prompt.md"
+    target.write_text(revised, encoding="utf-8")
+    runtime.context_builder.prompt_path = target
+    return sha256(revised.encode("utf-8")).hexdigest()
+
+
+def configure_venue_bounded_opening_prompt(runtime, run_dir: Path) -> str:
+    """仅给已启用到店下界的沙盒告知可以先招募再定具体开场。"""
+    revised = runtime.context_builder.prompt_path.read_text(encoding="utf-8") + _BOUNDED_FLEXIBLE_OPENING
+    target = run_dir / "sandbox_bounded_opening_planner_prompt.md"
     target.write_text(revised, encoding="utf-8")
     runtime.context_builder.prompt_path = target
     return sha256(revised.encode("utf-8")).hexdigest()

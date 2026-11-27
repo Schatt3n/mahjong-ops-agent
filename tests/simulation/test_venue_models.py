@@ -13,8 +13,10 @@ import pytest
 from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL, StaticAgentClient
 from mahjong_agent_runtime.review_config import build_reply_review_client
 
-from .venue_models import (configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
-                           opencode_auxiliary, opencode_config, venue_planner_config, venue_reply_review_no_reasoning)
+from .venue_models import (
+    configure_venue_bounded_opening_prompt, configure_venue_consent_prompt, configure_venue_preflight_prompts,
+    deepseek_official_config, opencode_auxiliary, opencode_config, venue_planner_config, venue_reply_review_no_reasoning,
+)
 from .venue_write_guard import VenueWriteGuard, WriteAuthorization, WritePermission
 
 
@@ -186,7 +188,10 @@ def test_sandbox_review_reasoning_control_preserves_the_independent_reply_review
 
 @pytest.mark.parametrize("status", ["authorized", "no_permission", "invalid", "unavailable"])
 @pytest.mark.parametrize("clarify_consent", [False, True])
-def test_preflight_prompt_copies_project_only_scoped_status_and_verified_scopes(tmp_path, status, clarify_consent):
+@pytest.mark.parametrize("bounded_opening", [False, True])
+def test_preflight_prompt_copies_project_only_scoped_status_and_verified_scopes(
+    tmp_path, status, clarify_consent, bounded_opening,
+):
     planner = tmp_path / "planner.md"
     reviewer = tmp_path / "review.md"
     planner.write_text("原生规划", encoding="utf-8")
@@ -195,6 +200,10 @@ def test_preflight_prompt_copies_project_only_scoped_status_and_verified_scopes(
     runtime = SimpleNamespace(context_builder=SimpleNamespace(prompt_path=planner),
                               action_processor=SimpleNamespace(reply_self_review_prompt_path=reviewer))
     baseline = SimpleNamespace(context_builder=SimpleNamespace(prompt_path=planner))
+    if bounded_opening:
+        digest = configure_venue_bounded_opening_prompt(runtime, tmp_path)
+        assert digest == sha256(runtime.context_builder.prompt_path.read_bytes()).hexdigest()
+        baseline.context_builder.prompt_path = runtime.context_builder.prompt_path
     if clarify_consent:
         configure_venue_consent_prompt(baseline, tmp_path)
     unscoped_planner = baseline.context_builder.prompt_path.read_text(encoding="utf-8")
@@ -221,6 +230,7 @@ def test_preflight_prompt_copies_project_only_scoped_status_and_verified_scopes(
             }
             assert all(secret not in text for secret in ("客户授权原文", "店家提议原文", "offer-id"))
         assert "通用进度/停滞" in projected_planner.read_text(encoding="utf-8")
+        assert ("最早开场由后端独立核实并保存" in projected_planner.read_text(encoding="utf-8")) is bounded_opening
         review_text = projected_review.read_text(encoding="utf-8")
         assert "delegation_not_advanced" in review_text and "事实、隐私、未落实的承诺" in review_text
     assert projected_planner.read_text(encoding="utf-8") == unscoped_planner

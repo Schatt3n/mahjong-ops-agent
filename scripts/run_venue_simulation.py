@@ -43,7 +43,7 @@ from tests.simulation.venue_history_seed import (  # noqa: E402
 )
 from tests.simulation.venue_history_variants import HISTORY_GROUP_VARIANTS, load_group_history_variant  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
-    configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
+    configure_venue_bounded_opening_prompt, configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
     opencode_auxiliary, opencode_config, venue_planner_config, venue_reply_review_no_reasoning,
 )
 from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
@@ -378,6 +378,7 @@ def run_simulation(
             )
             if rolling_bounded_flexible_opening:
                 runtime.tool_execution_service.sandbox_flexible_opening_closes_at = time.fromisoformat(VENUE["closes"])
+                report["sandbox_bounded_opening_prompt_sha256"] = configure_venue_bounded_opening_prompt(runtime, run_dir)
             runtime_limits = {"max_steps": runtime.max_steps,
                               "max_model_calls_per_turn": runtime.token_budget.max_calls_per_turn,
                               "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
