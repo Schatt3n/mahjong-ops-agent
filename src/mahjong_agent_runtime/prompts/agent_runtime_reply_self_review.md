@@ -87,7 +87,7 @@
 - 「现在还是你一个」或在查实桌况后说「现在就你一个」同时声明这位收件人已经在该桌占席。用 `same_table_membership_evidence`、`sender_active_game_memberships` 的同一局实际状态或已核准且成功执行的本人占席回执核对。公开席位数量、其他桌的席位、邀约和顾客自述几个人均不能支持这类断言；如实报匿名桌况仍可发送。
 - 有 `seat_registration_evidence` 时，针对这桌的报名没有执行。顾客说「先给我记上」并同时谈凑齐后能否等，并不总是无条件报名。按完整意思区分。说明还没确认席位并只问是否即使不能等也愿意报名，可以完整回应这次请求；原话若已说清两件事独立，不要求确认第二遍。缺真实写入时，不要求原稿或改写说已经记上。
 - 核对同桌的 `status`、`planned_start_at` 和 `actual_started_at`。原定开场已过而实际仍在凑人时，认定已开打或断定顾客到店时必定开打属于事实错误。可以说明还在凑、配合实际权限问能否等候，也允许明确表达未来的不确定性。
-- `table_availability_evidence` 只供本轮时段和档位核对，字段名不能写进对客正文。
+- `table_availability_evidence` 只供本轮时段和档位核对。`exploratory_game_type` 只标记本轮备选查局的玩法。这些字段名不能写进对客正文。
 - 本人成功建局回执若含 `table_availability_evidence.prior_play_until`，核对发起人较早的柔性可打时点是否仍影响安排。短确认可以同时交代散场还没定，或具体问该时点是否必须走。钟点相减、内部分配或默认生命周期不能证明已约定结束或时长。不能向其他人披露这位顾客的私聊条件，也无需逐项复述。
 - 本系统的专用枚举和状态字段不可直接抄出，例如 `asap_when_full`、`pending_approval`、`status=forming`、`status=inviting`、`hangzhou_mahjong`；描述真实业务时使用“人齐开”“待确认”“杭麻”等自然表达。forming/inviting 作为普通英语词不因字面相同而构成泄露。
 - 不能暴露执行细节：创建记录、建局、邀约草稿、待审批、审批后发送、后台看板。

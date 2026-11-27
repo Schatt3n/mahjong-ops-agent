@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from mahjong_agent_runtime import (
-    AgentAction, InMemoryAgentStore, InMemoryTraceRecorder, QuotedMessageRef, SQLiteAgentStore, ToolCall, ToolGateway,
+    AgentAction, CustomerProfile, InMemoryAgentStore, InMemoryTraceRecorder, QuotedMessageRef, SQLiteAgentStore, ToolCall, ToolGateway,
     UserMessage,
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
@@ -24,7 +24,9 @@ from mahjong_agent_runtime.group_chat.parsing import parse_explicit_need
 from mahjong_agent_runtime.models import using_clock
 from mahjong_agent_runtime.runtime import message_idempotency_key
 from mahjong_agent_runtime.services import ToolExecutionService
-from mahjong_agent_runtime.tool_consistency import apply_approximate_opening_search_evidence, validate_table_availability
+from mahjong_agent_runtime.tool_consistency import (
+    apply_approximate_opening_search_evidence, executed_requirement_contract, validate_table_availability,
+)
 
 
 SENT = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
@@ -81,6 +83,94 @@ def _check(store, client, message, trace=None, *, step=1):
     """贴近执行入口调用，不给独立模型传待审工具参数。"""
     return check_table_availability(store, client, message, trace_id=message.message_id, step_index=step,
                                     timeout_seconds=12.0, trace_recorder=trace or InMemoryTraceRecorder())
+
+
+@pytest.mark.parametrize("source", ["0103", "0437", "explicit", "profile", "option"])
+def test_v9_personal_gameplay_filter_requires_same_customer_evidence(tmp_path, source):
+    """私聊未知玩法的试查保留实际参数与候选，另查和建局分别依本人来源。"""
+    evidence = Path(__file__).resolve().parents[1] / "docs/venue_simulation_evidence"
+    report = json.loads((evidence / "2026-11-27-v9-0103-0437-gameplay-scope.json").read_text(encoding="utf-8"))
+    role = "0437" if source == "0437" else "0103"
+    case = report["cases"][role]
+    actual = next(row for row in report["ledger"] if row["trace_id"] == case["trace_id"] and row["direction"] == "inbound")
+    body = actual["text"] + ("，我想打红中。" if source == "explicit" else "")
+    at = datetime.fromisoformat(case["business_time"])
+    message = _incoming(body, sent=at, message_id=actual["message_id"])
+    availability = ReviewClient([case["verified_availability"]["raw"]])
+    creation = ReviewClient([case["creation_authorization"]["decision"]] if source == "0437" else [])
+    store = SQLiteAgentStore(tmp_path / "personal-gameplay.sqlite3")
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=availability,
+                                   creation_authorization_client=creation)
+    lookup = case["actual_successful_reads"][0]["requirement"]
+    expected_game = lookup["game_type"]
+    other_conditions = {key: value for key, value in lookup.items() if key != "game_type"}
+
+    def submit(name, arguments, step, prior=()):
+        action = AgentAction("服务本次找桌", "needs_tool", "按顾客条件查局", tool_calls=[
+            ToolCall(name, arguments, call_id=f"step-{step}"),
+        ])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=list(prior), step_index=step, run_id="gameplay-check",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    with using_clock(lambda: at):
+        store.upsert_customer(CustomerProfile(customer_id="guest", display_name="顾客",
+            preferred_games=[expected_game] if source == "profile" else []))
+        _activate(store, started=at - timedelta(minutes=5))
+        if source == "0437":
+            previous = case["creation_authorization"]["trusted_conversation"][:-1]
+            for row in previous:
+                if row["speaker"] == "customer":
+                    _persist(store, _incoming(row["text"], sent=at - timedelta(minutes=2), message_id=f"old-{row['ref']}"))
+                else:
+                    store.append_assistant_turn("dm", row["text"], f"shop-{row['ref']}",
+                                                metadata={"delivery_status": "delivered"})
+        _persist(store, message)
+        types = ["hangzhou_mahjong", expected_game] if source == "option" else ["hangzhou_mahjong"]
+        games = {}
+        for game_type in types:
+            game, _ = store.create_game(conversation_id=f"pool-{game_type}", organizer_id=f"host-{game_type}",
+                organizer_name="牌友", known_players=[], trace_id=f"seed-{game_type}",
+                requirement={"game_type": game_type, "stake": "0.5", "smoke_preference": "no_smoking",
+                             "planned_start_at": "2026-11-25T19:30:00+08:00"})
+            games[game_type] = game.game_id
+        store.create_game(conversation_id="unrelated", organizer_id="unrelated", organizer_name="另一位牌友",
+            known_players=[], trace_id="other-stake", requirement={"game_type": expected_game, "stake": "1"})
+        sampled = submit("search_current_games", {"lookup_scope": "personal", "requirement": lookup}, 1)
+        assert sampled.called and sampled.allowed, sampled.error
+        assert sampled.result["requirement"]["game_type"] == expected_game
+        assert [option["game"]["game_id"] for option in sampled.result["matches"]] == ([games[expected_game]] if source == "option" else [])
+        known = source in {"explicit", "profile"}
+        assert sampled.result.get("exploratory_game_type") == (None if known else expected_game)
+        preserved = executed_requirement_contract([sampled])["preserve_requirement"]
+        assert preserved["stake"] == "0.5" and ("game_type" in preserved) is known
+        action = AgentAction("答复找桌", "waiting_user", "核对具体范围", reply_to_user="你想打哪种麻将？")
+        contract = build_reply_self_review_payload(message=message, action=action, review_scope="reply_to_user",
+            context_payload={"turn_tool_evidence": [compact_tool_result_dict(sampled.to_dict())]}, review_items=[
+                {"item_id": "reply_to_user", "recipient_id": message.sender_id, "text": action.reply_to_user},
+            ])["semantic_fidelity_contract"]
+        reviewed = contract["game_availability_evidence"]["searches_by_scope"]["personal"]
+        assert reviewed.get("exploratory_game_type") == (None if known else expected_game)
+        assert "certified_empty_pool" not in reviewed
+        assert any("备选说成既有需求" in rule for rule in contract["rules"]) is not known
+        if source in {"0103", "0437"}:
+            opening = ({"start_time_kind": "asap_when_full"} if source == "0437" else {
+                "start_time_kind": "scheduled", "planned_start_at": "2026-11-25T19:30:00+08:00"})
+            rejected = submit("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "requirement": {
+                "game_type": expected_game, "stake": "0.5", "smoke_preference": "no_smoking", **opening,
+            }}, 2, [sampled])
+            assert not rejected.called and not rejected.allowed
+            assert rejected.result["validation_error"]["code"] == (
+                "create_game_gameplay_required" if source == "0437" else "verified_table_availability_conflict")
+            if source == "0437":
+                creator_input = json.loads(creation.calls[0][0][1]["content"])
+                assert creator_input["latest_existing_game_lookup"]["exploratory_game_type"] == expected_game
+        broad = submit("search_current_games", {"lookup_scope": "personal", "requirement": other_conditions}, 3, [sampled])
+        assert broad.called and broad.allowed and "exploratory_game_type" not in broad.result
+        assert {option["game"]["game_id"] for option in broad.result["matches"]} == set(games.values())
+        assert len(store.games) == len(games) + 1 and not store.invite_drafts and not store.room_reservations
+    store._connection.close()
 
 
 @pytest.mark.parametrize("case", ["authorized", "preceding_read", "disabled", "only_inquiry", "forged_bound",

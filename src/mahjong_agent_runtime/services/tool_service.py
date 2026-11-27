@@ -16,6 +16,7 @@ from ..group_chat.parsing import explicit_numeric_cap_candidates, explicit_own_p
 from ..group_chat.tool_scope import tool_execution_scope
 from ..group_chat.topic_context import verified_board_claim_reference
 from ..hooks import HookManager
+from ..knowledge import default_terminology_repository
 from ..llm import AgentLLMClient
 from ..models import AgentAction, ToolCall, ToolResult, UserMessage, now
 from ..runtime_components import ActionProcessingResult
@@ -35,9 +36,11 @@ from ..tool_consistency import (
 )
 from ..domains.tools import ToolGateway
 from ..domains.creation_authorization import (
-    check_creation_authorization, creation_clock_conflict, delegated_private_creation_needs_gameplay,
+    check_creation_authorization, creation_clock_conflict, customer_authorization_evidence,
+    delegated_private_creation_needs_gameplay,
 )
-from ..domains.delivered_game_offer import ordinary_private_message
+from ..domains.customer_play_preference import attendance_preference_agrees
+from ..domains.delivered_game_offer import DELIVERED_GAME_OFFER, ordinary_private_message
 from ..domains.game_domain import OPENING_NOT_BEFORE
 from ..domains.game_participants import validate_game_accepts_confirmation
 from ..domains.model_context import has_agreed_game_duration
@@ -67,6 +70,43 @@ def input_batch_run_is_stale(store: Any, message: UserMessage) -> bool:
         return False
     current = store.pending_input_batch(message.conversation_id, message.sender_id)
     return current is None or current.batch_id != batch_id or current.version != batch_version
+
+
+def _label_exploratory_gameplay(
+    store: AgentStore, message: UserMessage, result: ToolResult, verified: dict | None, context: dict,
+) -> ToolResult:
+    """本人范围无玩法来源时保留实际查询，将玩法筛选仅作为候选探索。"""
+    metadata = message.metadata or {}
+    if (result.name != "search_current_games" or not result.called or not result.allowed or result.error
+            or result.result.get("lookup_scope") != "personal" or not verified or not ordinary_private_message(message)
+            or message.quoted_message is not None or metadata.get("source") == "group_private_continuation"
+            or metadata.get("group_topic_source")):
+        return result
+    game_type = (result.result.get("requirement") or {}).get("game_type")
+    terminology = default_terminology_repository()
+    # 开放玩法的词表可能没有对应表达，继续由主模型和独立审查解释。
+    if not isinstance(game_type, str) or not any(term.canonical.get("requested_game") == game_type for term in terminology.terms):
+        return result
+    customer = store.customers.get(message.sender_id)
+    if customer is not None:
+        if set(customer.preferred_games) == {game_type}:
+            return result
+        preference = store.completed_game_preference(message.sender_id)
+        if preference and preference["game_type"] == game_type and attendance_preference_agrees(customer, preference):
+            return result
+    prior_offer = context.get(DELIVERED_GAME_OFFER) or {}
+    if (prior_offer.get("terms") or {}).get("game_type") == game_type:
+        return result
+    texts = [row["text"] for row in customer_authorization_evidence(store, message) if row["speaker"] == "customer"]
+    terms = terminology.relevant_terms(texts, categories={"game_type", "game_variant"})
+    if (any(item.term.canonical.get("requested_game") == game_type for item in terms)
+            or any(game_type in text.casefold().split() for text in texts)):
+        return result
+    return replace(result, result={**result.result, "exploratory_game_type": game_type, "instruction": (
+        "本次实际按该玩法探查选项，仍缺已核实的本人玩法来源。若查到桌，可以按其实际条件作为备选征求意见。"
+        "这类筛选查空不能代替顾客未限定玩法的找桌请求。按已核实的其他条件不带玩法重查，或只问本人想打什么玩法。"
+        "新组局不能把备选玩法当成已确认条件。"
+    )})
 
 
 @dataclass(slots=True)
@@ -466,7 +506,9 @@ class ToolExecutionService:
             if stale_result is not None:
                 stale_result.call_id = call_id
                 return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
-            if delegated_private_creation_needs_gameplay(call, message, creation_scope):
+            explored_game_types = tuple(item.result["exploratory_game_type"] for item in observed_results
+                                        if item.name == "search_current_games" and item.result.get("exploratory_game_type"))
+            if delegated_private_creation_needs_gameplay(call, message, creation_scope, explored_game_types=explored_game_types):
                 error = "已核实顾客委托组局，但缺少这桌的具体玩法。"
                 result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
                     "validation_error": {"code": "create_game_gameplay_required", "message": error},
@@ -507,6 +549,7 @@ class ToolExecutionService:
             )
         result.call_id = call_id
         result = apply_approximate_opening_search_evidence(result, verified)
+        result = _label_exploratory_gameplay(self.store, message, result, verified, context)
         verified_schedule = (context_payload or {}).get("verified_table_availability") or {}
         if (call.name == "create_game" and result.called and result.allowed and not result.error
                 and verified_schedule.get("prior_play_until")):

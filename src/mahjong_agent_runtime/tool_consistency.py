@@ -809,6 +809,9 @@ def _latest_read_requirement_reference(
             continue
         requirement = result.result.get("requirement")
         if isinstance(requirement, dict):
+            if result.result.get("exploratory_game_type") and result.result["exploratory_game_type"] == requirement.get("game_type"):
+                # 真实探查结果仍完整保存，但未经确认的候选玩法不绑定建局参数。
+                requirement = {key: value for key, value in requirement.items() if key != "game_type"}
             return {"requirement": requirement, "source_tool": tool_name,
                     "source_call_id": result.call_id if isinstance(result.call_id, str) and result.call_id else None,
                     "source_evidence_index": index, "source_kind": "successful_read"}

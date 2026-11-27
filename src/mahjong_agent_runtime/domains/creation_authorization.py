@@ -29,6 +29,7 @@ unconfirmed: 目标不明、存在未解决的授权条件、后续撤回或新�
 有组桌授权仍须核对时间。读本人当前和同一目标较早的来话，区别到店、能开打的时段、约定开场及离店。current_clock_observation 只是钟点线索；到店上界之后的桌仍然能赶到，可以打到某个时段也不是要求那时开或必须打到那么久。时间含义不明确时不能把到店写成固定开场，能打到晚上不表示通宵。
 对 proposed_game_lifecycle 实际比较日期和当地时刻。固定开场早于本人最早可到、有效期在到店前已过，均 unconfirmed。人齐开可能在顾客抵达前就开；若有尚未到店的时间约束而提案无法持久保存可赶上的开场，保留其组局委托，但本次写入 unconfirmed。系统预览结束时刻不是约定时长。
 若 latest_existing_game_lookup 提供同一轮的现成桌，结合本人原话判断是否真的需要另建。客户只是要帮他找到能打的一桌，同一范围已有可玩的现成桌时，应先反馈可选桌；不能把到店上界当作拒绝后来开场的理由，或把客人可以待到某时理解为所有桌必须打到该时。本人明确要求新桌、已拒绝这些选项或有真实条件不合时，仍可按已核实的创建委托判断。无匹配记录不能推断其他范围。
+拟建玩法要核对本人本任务的原话、可靠唯一画像、本人已明确选择的那一桌，或本人明确同意由店家选玩法的范围。另一个顾客的牌局、提案里的玩法和查局的玩法筛选都不能补足未确认的条件。exploratory_game_type 只记录已查过的备选，给这一次创建的授权和玩法须各自核对；玩法仍未知时用 unconfirmed。
 同一顾客的 attendance_preference 只在本次未改条件时提供常打玩法、档位和烟况。提案沿用这些条件时，不要求顾客在明确委托组局的同一句中重说。组局权限来自本次任务中的本人来话。顾客本次明确改条件须尊重改后的范围。
 只输出 JSON 对象 {"scope":"create|inquire|unconfirmed","customer_ref":null,"shop_offer_ref":null}。ref 用所给对话记录的整数 ref，勿复述或杜撰。create 必须有客户 ref，shop_offer_ref 在接受店家提议时填写；非 create 可留空。"""
 
@@ -51,7 +52,9 @@ class _ReversedOfferReference(ValueError):
     """引用都真实可见但顺序错误，允许模型以原权责范围重新核对一次。"""
 
 
-def delegated_private_creation_needs_gameplay(call: ToolCall, message: UserMessage, scope: str | None) -> bool:
+def delegated_private_creation_needs_gameplay(
+    call: ToolCall, message: UserMessage, scope: str | None, *, explored_game_types: tuple[str, ...] = (),
+) -> bool:
     """已核准本人私聊委托仍须有具体玩法，群话题、系统和直接存储入口各走原合同。"""
     metadata = message.metadata or {}
     if (scope != "create" or call.arguments.get("organizer_id") != message.sender_id
@@ -62,7 +65,8 @@ def delegated_private_creation_needs_gameplay(call: ToolCall, message: UserMessa
     if not isinstance(requirement, dict):
         return False
     game_type = first_present_value(requirement, "game_type", "requested_game")
-    return not isinstance(game_type, str) or game_type.strip().casefold() in {"", "any", "unknown"}
+    return (not isinstance(game_type, str) or game_type.strip().casefold() in {"", "any", "unknown"}
+            or game_type in explored_game_types)
 
 
 def customer_authorization_evidence(
@@ -206,6 +210,7 @@ def check_creation_authorization(
         payload["latest_existing_game_lookup"] = {
             "query": {key: query[key] for key in (*_TERMS, "start_time_range") if key in query},
             "returned_matches": len(data.get("matches") or []), "verified_options": options,
+            **({"exploratory_game_type": data["exploratory_game_type"]} if data.get("exploratory_game_type") else {}),
         }
     clock = parse_explicit_need(message.text, anchor=message_at).get("clock_observation")
     if clock:

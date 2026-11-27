@@ -692,8 +692,10 @@ def _review_search_outcome(query: dict[str, Any]) -> dict[str, Any]:
         and isinstance(option.get("game"), dict)
     ]
     empty_search_evidence = _review_empty_personal_search_evidence(result) if not matches else {}
+    explored = result.get("exploratory_game_type")
     return {"status": "completed", "matched_count": len(matches),
             **empty_search_evidence,
+            **({"exploratory_game_type": explored} if isinstance(explored, str) and explored else {}),
             **({"table_reference_evidence": result["table_reference_evidence"]}
                if result.get("lookup_scope") == "specific_table" and result.get("table_reference_evidence") else {}),
             **({"options_requiring_timing_confirmation": timing_options} if timing_options else {})}
@@ -799,6 +801,7 @@ def build_reply_self_review_payload(
                          *game_availability_evidence.get("searches_by_scope", {}).values())
     has_submitted_empty_search = any(search.get("submitted_filters_without_results") for search in reviewed_searches)
     has_certified_empty_pool = any(search.get("certified_empty_pool") for search in reviewed_searches)
+    has_exploratory_gameplay = any(search.get("exploratory_game_type") for search in reviewed_searches)
     private_customer_reply = (
         current_customer_reply and bool(review_items) and not any(item.get("channel") == "group" for item in review_items)
         and metadata.get("source") != "group" and metadata.get("is_room") is not True and not metadata.get("room_id")
@@ -961,6 +964,11 @@ def build_reply_self_review_payload(
                    "即使候选玩法和档位全部属实，也要就所指作条件式说明或追问，同时答复已经查明的其他问题；无条件认桌以 semantic_contradiction 拒绝。",)
                   if game_availability_evidence.get("searches_by_scope", {}).get("specific_table", {}).get("table_reference_evidence") else ()),
                 "结论强度不能超过证据：局池查询只证明已提交条件下的登记局况；空条件查询且客户需求未知时，不支持有无适合该客户的局，也不支持候选人有无的断言。主 Agent 原稿也可能过度推断，不能因改写忠于原稿就放行",
+                *(("exploratory_game_type 是实际查过的备选玩法，仍缺本人依据。发现的桌可以按真实条件征询是否考虑。"
+                   "备选不得表述成顾客已确认的玩法。该备选查空且无本轮适用的广查或未过滤空池证据时，不能说顾客所问范围没有现成桌。"
+                   "指出现有证据的范围，允许主模型按更宽条件再查，或者只问想打哪种玩法。"
+                   "把备选说成既有需求或把备选查空说成整体无桌时，以 unsupported_conclusion 拒绝。",)
+                  if has_exploratory_gameplay else ()),
                 "找局策略遵守 game_query_strategy_contract，结合原话、上下文和真实工具证据判断是否合理，不以固定追问或唯一语义路径拒绝；未知个人适配仍不得伪造。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
                 "empty_personal_matching_default 是主 Agent 的服务规划策略。审查空结果正文时核对真实查询范围和事实。仅未附加服务提议不构成 semantic_fact_loss。用户明确要求的答复、待决事项或实际已获委托仍按各自证据和完成要求审查。",
                 "先按 request_scope_contract 核对本人原话、限制及同目标委托，再按 delegation_acceptance.progress_review 核验实际执行阶段，最后判断剩余提议或承诺。action_boundary.request_scope仅是有来源的模型解释，新goal、reply_scope或空查询不能撤销既有委托。有效完整委托且事实足够，但尚无相应持久承接及实际推进，却停在重新询问是否开始同一服务，以 delegation_not_advanced 拒绝并要求重新规划；短确认也不能掩盖缺执行。已建立同目标待组局并完成当前可执行找人步骤是真实进展，候选为空不撤销执行；工具允许本轮结束时，另征询持续复查或个人通知且整句仍待客户接受，不是重置原委托，不要求预先调度。实际承担未来责任仍须有效对应机制，不得借提议放过无条件通知、独立已发送声明、未完成的明确要求或工具续办义务。真正缺项、具体局参加确认、只找现成或明确撤销仍保留；看板未配置不能谎称已安排发布。",

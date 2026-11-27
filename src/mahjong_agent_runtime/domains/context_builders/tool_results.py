@@ -31,6 +31,7 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
     "closed",
     "requirement",
     "lookup_scope",
+    "exploratory_game_type",
     "table_reference_evidence",
     "reference_requirement",
     # 规范化冲突的拒绝原因与同客户来源标识必须回灌，供主模型有据修正断言后重新规划。

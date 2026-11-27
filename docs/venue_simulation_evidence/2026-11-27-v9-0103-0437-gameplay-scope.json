@@ -1,0 +1,405 @@
+{
+  "source_run": "2026-11-25-real-7cd18c8d46",
+  "ledger": [
+    {
+      "sequence": 5,
+      "message_id": "customer:role-event:2c7524023311d952147ad206ec3cabc8986ed30869887acb6b0f04daebb25ee0",
+      "direction": "inbound",
+      "text": "老板晚上好，七点半那桌0.5的还有位吗，能搭一桌吗，有烟还是无烟？",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7"
+    },
+    {
+      "sequence": 6,
+      "message_id": "outbound:trace_4d5107d9f86c1c0b1ec2dca7:1",
+      "direction": "outbound",
+      "text": "现在还没有七点半0.5档的桌能搭，烟况也就还没定。要不我帮你组一桌？",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:2c7524023311d952147ad206ec3cabc8986ed30869887acb6b0f04daebb25ee0",
+      "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7"
+    },
+    {
+      "sequence": 36,
+      "message_id": "customer:role-event:94ec843a3c1cd1abe61568f051febde6f13e07695f1a0996fad740f2d8185771",
+      "direction": "inbound",
+      "text": "老板好 七点半0.5那桌没了的话 我这个点能到 八点到十点有空 要能凑一桌也行 另外烟况有无烟的吗",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_05757e9f00c9851ba9fa864d"
+    },
+    {
+      "sequence": 37,
+      "message_id": "outbound:trace_05757e9f00c9851ba9fa864d:1",
+      "direction": "outbound",
+      "text": "老板，八点到十点、0.5无烟这块我刚查了，暂时没查到合适的现成桌。你要凑一桌的话，几点开场合适？",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:94ec843a3c1cd1abe61568f051febde6f13e07695f1a0996fad740f2d8185771",
+      "trace_id": "trace_05757e9f00c9851ba9fa864d"
+    },
+    {
+      "sequence": 39,
+      "message_id": "customer:role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a",
+      "direction": "inbound",
+      "text": "老板晚上好，刚看群里您说七点半0.5档还没桌、可以帮着组一桌，我这边无烟，能搭一桌吗，底注0.5就行",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_255776e285474947126243a6"
+    },
+    {
+      "sequence": 40,
+      "message_id": "outbound:trace_255776e285474947126243a6:1",
+      "direction": "outbound",
+      "text": "七点半0.5无烟的红中现在还没现成能搭的桌诶，要不我帮你组一桌？就定七点半开，你看行吗？",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a",
+      "trace_id": "trace_255776e285474947126243a6"
+    },
+    {
+      "sequence": 42,
+      "message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+      "direction": "inbound",
+      "text": "老板好 我七点一刻就能到 打0.5无烟 能凑一桌就行 组的话我等你消息",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_d0b37ad7424df77effe7c95c"
+    },
+    {
+      "sequence": 43,
+      "message_id": "outbound:trace_d0b37ad7424df77effe7c95c:1",
+      "direction": "outbound",
+      "text": "七点一刻这桌给你记上了，0.5无烟，人齐开，现在你一个、还差三个人。",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+      "trace_id": "trace_d0b37ad7424df77effe7c95c"
+    },
+    {
+      "sequence": 44,
+      "message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+      "direction": "inbound",
+      "text": "老板 组的那桌算我一个 要无烟的 0.5块底 我最早七点一刻到 七点半能开 留个位给我",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_84dd27da94d44ea788044669"
+    },
+    {
+      "sequence": 47,
+      "message_id": "outbound:trace_84dd27da94d44ea788044669:1",
+      "direction": "outbound",
+      "text": "好，给你留着了。",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+      "trace_id": "trace_84dd27da94d44ea788044669"
+    }
+  ],
+  "cases": {
+    "0103": {
+      "trace_id": "trace_255776e285474947126243a6",
+      "business_time": "2026-11-25T19:00:00+08:00",
+      "preflight": {
+        "status": "authorized",
+        "raw": "{\"permissions\":[{\"scope\":\"organize\",\"evidence\":\"我这边无烟，能搭一桌吗，底注0.5就行\",\"offer_message_id\":null,\"offer_evidence\":null}]}"
+      },
+      "lexical_gameplay": null,
+      "self_game_preferences": [],
+      "visible_other_table": {
+        "game_id": "game_e0d2513f48d7",
+        "game_type": "red_center_mahjong",
+        "stake": "1"
+      },
+      "verified_availability": {
+        "decision": {
+          "accepted_stake_range": {
+            "max": 0.5,
+            "min": 0.5
+          },
+          "agreed_duration_hours": null,
+          "clock_role": "opening",
+          "clock_roles": null,
+          "current_ref": 1,
+          "has_fixed_opening_authority": false,
+          "known_cap_score": null,
+          "lookup_scope": "personal",
+          "max_duration_hours": null,
+          "opening_customer_ref": null,
+          "opening_dayparts": {
+            "date": "2026-11-25",
+            "parts": [
+              "evening"
+            ],
+            "source_ref": 1
+          },
+          "opening_window": {
+            "end_at": "2026-11-26T06:00:00+08:00",
+            "start_at": "2026-11-25T19:00:00+08:00"
+          },
+          "supporting_customer_refs": [
+            1
+          ]
+        },
+        "response_source": {
+          "call_id": "llm_call_2aa023a6ddd64849b9a5d6594d794129",
+          "http_response_complete": true,
+          "raw_response_sha256": "4eb839a0391092b7ceb63408658762e5dec3f779bda683d5205f97501f76b6a6",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 1,
+          "terminal_attempt_id": "llm_attempt_a62960c8e0aa42499a3f346f2debc0dd",
+          "trace_id": "trace_255776e285474947126243a6:table-availability:1"
+        },
+        "raw": {
+          "clock_role": "opening",
+          "clock_roles": null,
+          "lookup_scope": "personal",
+          "opening_window": null,
+          "opening_dayparts": {
+            "date": "2026-11-25",
+            "parts": [
+              "evening"
+            ],
+            "source_ref": 1
+          },
+          "accepted_stake_range": {
+            "min": 0.5,
+            "max": 0.5
+          },
+          "known_cap_score": null,
+          "max_duration_hours": null,
+          "agreed_duration_hours": null,
+          "has_fixed_opening_authority": false,
+          "opening_customer_ref": null,
+          "current_ref": 1,
+          "supporting_customer_refs": [
+            1
+          ]
+        }
+      },
+      "actual_successful_reads": [
+        {
+          "lookup_scope": "personal",
+          "requirement": {
+            "base_stake": 0.5,
+            "game_type": "red_center_mahjong",
+            "smoke_preference": "no_smoking",
+            "stake": "0.5",
+            "stake_label": "0.5",
+            "start_time_range": {
+              "end_at": "2026-11-26T06:00:00+08:00",
+              "start_at": "2026-11-25T19:00:00+08:00"
+            }
+          },
+          "match_count": 0,
+          "unfiltered_available_pool_empty": false,
+          "supports_narrower_empty_claim": false
+        }
+      ],
+      "creation_authorization": null,
+      "write_reports": [
+        {
+          "tool": "create_game",
+          "called": false,
+          "allowed": false,
+          "error": "本次未建局。顾客还没选定或委托你定一个固定开场。已有明确组局委托时保留委托，先反馈实际查到的现成桌或房态，再单独请顾客确认具体开场。可行的候选开场仍是方案，不能报成已登记席位、已有缺口或保证开打。不要再次尝试同一建局。"
+        },
+        {
+          "tool": "create_game",
+          "called": false,
+          "allowed": false,
+          "error": "本次未建局。顾客还没选定或委托你定一个固定开场。已有明确组局委托时保留委托，先反馈实际查到的现成桌或房态，再单独请顾客确认具体开场。可行的候选开场仍是方案，不能报成已登记席位、已有缺口或保证开打。不要再次尝试同一建局。"
+        }
+      ],
+      "status": "waiting_user"
+    },
+    "0437": {
+      "trace_id": "trace_d0b37ad7424df77effe7c95c",
+      "business_time": "2026-11-25T19:02:00+08:00",
+      "preflight": {
+        "status": "authorized",
+        "raw": "{\"permissions\":[{\"scope\":\"organize\",\"evidence\":\"能凑一桌就行 组的话我等你消息\",\"offer_message_id\":null,\"offer_evidence\":null}]}"
+      },
+      "lexical_gameplay": null,
+      "self_game_preferences": [],
+      "visible_other_table": {
+        "game_id": "game_e0d2513f48d7",
+        "game_type": "red_center_mahjong",
+        "stake": "1"
+      },
+      "verified_availability": {
+        "decision": {
+          "accepted_stake_range": {
+            "max": 0.5,
+            "min": 0.5
+          },
+          "agreed_duration_hours": null,
+          "arrival_by_at": "2026-11-25T19:15:00+08:00",
+          "clock_role": "arrival_by",
+          "current_ref": 5,
+          "has_fixed_opening_authority": false,
+          "known_cap_score": null,
+          "lookup_scope": "personal",
+          "max_duration_hours": null,
+          "opening_customer_ref": null,
+          "opening_dayparts": null,
+          "opening_window": null,
+          "supporting_customer_refs": [
+            1,
+            3,
+            5
+          ]
+        },
+        "response_source": {
+          "call_id": "llm_call_df0e011f1a054f4ca194dc4539670457",
+          "http_response_complete": true,
+          "raw_response_sha256": "2a0465eb54f77e8717b00f392d081f8bb0d0698ff872ede12fd10030e62e816e",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 1,
+          "terminal_attempt_id": "llm_attempt_359d89a77d844660b179b3f0322b4c4e",
+          "trace_id": "trace_d0b37ad7424df77effe7c95c:table-availability:1"
+        },
+        "raw": {
+          "clock_role": "arrival_by",
+          "lookup_scope": "personal",
+          "opening_window": null,
+          "opening_dayparts": null,
+          "accepted_stake_range": {
+            "min": 0.5,
+            "max": 0.5
+          },
+          "known_cap_score": null,
+          "max_duration_hours": null,
+          "agreed_duration_hours": null,
+          "has_fixed_opening_authority": false,
+          "opening_customer_ref": null,
+          "current_ref": 5,
+          "supporting_customer_refs": [
+            1,
+            3,
+            5
+          ],
+          "prior_play_until": {
+            "customer_ref": 3,
+            "clock_ref": 3
+          }
+        }
+      },
+      "actual_successful_reads": [
+        {
+          "lookup_scope": "personal",
+          "requirement": {
+            "base_stake": 0.5,
+            "game_type": "red_center_mahjong",
+            "smoke_preference": "no_smoking",
+            "stake": "0.5",
+            "stake_label": "0.5"
+          },
+          "match_count": 0,
+          "unfiltered_available_pool_empty": false,
+          "supports_narrower_empty_claim": false
+        }
+      ],
+      "creation_authorization": {
+        "decision": {
+          "customer_ref": 5,
+          "scope": "create",
+          "shop_offer_ref": null
+        },
+        "response_source": {
+          "call_id": "llm_call_4f83f4ebad8a4effb3b174f437845340",
+          "http_response_complete": true,
+          "raw_response_sha256": "fe3cdc5e0d73841735139737eae695ac83a95298e9f26ddb9b9ab79d32f970bc",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 401,
+          "terminal_attempt_id": "llm_attempt_738781a99d914e9898cab304d1c6351f",
+          "trace_id": "trace_d0b37ad7424df77effe7c95c:creation:401:1"
+        },
+        "trusted_conversation": [
+          {
+            "ref": 1,
+            "speaker": "customer",
+            "text": "老板好 群里371那桌七点半 0.5的还有位吗 我最晚能打到十点"
+          },
+          {
+            "ref": 2,
+            "speaker": "shop",
+            "text": "七点半 0.5 那桌，我现在没查到有位诶。你只能打到十点的话，要是有别的合适桌我帮你看看？"
+          },
+          {
+            "ref": 3,
+            "speaker": "customer",
+            "text": "老板好 七点半0.5那桌没了的话 我这个点能到 八点到十点有空 要能凑一桌也行 另外烟况有无烟的吗"
+          },
+          {
+            "ref": 4,
+            "speaker": "shop",
+            "text": "老板，八点到十点、0.5无烟这块我刚查了，暂时没查到合适的现成桌。你要凑一桌的话，几点开场合适？"
+          },
+          {
+            "current": true,
+            "ref": 5,
+            "speaker": "customer",
+            "text": "老板好 我七点一刻就能到 打0.5无烟 能凑一桌就行 组的话我等你消息"
+          }
+        ],
+        "latest_existing_game_lookup": {
+          "query": {
+            "base_stake": 0.5,
+            "game_type": "red_center_mahjong",
+            "smoke_preference": "no_smoking",
+            "stake": "0.5"
+          },
+          "returned_matches": 0,
+          "verified_options": []
+        }
+      },
+      "write_reports": [
+        {
+          "tool": "create_game",
+          "called": true,
+          "allowed": true,
+          "error": null,
+          "game_id": "game_081466bde568",
+          "game_terms": {
+            "game_type": "red_center_mahjong",
+            "start_time_kind": "asap_when_full",
+            "smoke_preference": "no_smoking",
+            "stake": "0.5"
+          }
+        },
+        {
+          "tool": "create_invite_drafts",
+          "called": true,
+          "allowed": true,
+          "error": null,
+          "draft_count": 5
+        }
+      ],
+      "status": "completed"
+    }
+  },
+  "observed_follow_on": {
+    "role": "0178",
+    "trace_id": "trace_84dd27da94d44ea788044669",
+    "game_id": "game_081466bde568",
+    "receipt_status": "confirmed",
+    "sqlite_roster_status_at_capture": {
+      "0178": "confirmed",
+      "0437": "joined"
+    }
+  },
+  "diagnosis": "两人的相关来话、同任务顾客文本和本人画像都没有玩法。模型先看见了另一位顾客的一底红中桌，再按半块无烟红中查。成功空回执仅覆盖提交过的筛选，未过滤库存没有确认为空。0103 的两次固定开场建桌被拦，顾客仍收到把红中当作既定需求的回复。0437 的独立审查确认了组局委托，实际产生了一张玩法未经本人确认的红中桌、五条邀约草稿，随后 0178 获得确认席位。",
+  "repair": {
+    "scope": "具体玩法无法从同一顾客的原话、可靠画像和可信同桌引用中支持时，把这次按玩法的检索明确标为备选探查。保留真实工具参数，只提实际查到的备选；无更广回执时不能报告顾客整个范围无桌，也不能把备选直接写成新局条件。",
+    "tests": "tests/test_table_availability_authorization.py::test_v9_personal_gameplay_filter_requires_same_customer_evidence",
+    "offline_controls": "按两条原来话和核验回包走实际 SQLite。对照另一玩法的半块无烟时段内桌、真实红中备选、本人明确玩法及唯一可靠画像。备选为空时查局仍有有效回执，广查能找到非红中桌。0103 的固定开场仍被拦，0437 无固定开场的相同建桌也没有写入或外发草稿。",
+    "direct_creation_boundary": "不经查局直接建桌时，独立审查需分别核对组桌委托和玩法出处。此次新增的确定性拦截只适用于仍未确认玩法、且拟建沿用同轮备选探查的情况。0437 实际存在这份草案前的成功查局回执。",
+    "offline_cases_passed": 5,
+    "related_tests_passed": 718,
+    "customer_visible_contract_tests_passed": 251,
+    "real_replay": "pending"
+  }
+}

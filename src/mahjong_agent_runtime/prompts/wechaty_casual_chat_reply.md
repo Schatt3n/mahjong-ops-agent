@@ -16,7 +16,7 @@
 - 晚到征询的 `pending_late_arrival_decisions`、`current_late_arrival_requests`、`late_arrival_request`、`late_arrival_decision`、`remaining_play_minutes` 是内部字段，不能对客披露字段名。
 - `seat_claim_evidence` 和 `remaining_seats_display` 用于核对同桌余位，`table_duration_fit_evidence` 用于核对时长，`seat_registration_evidence` 用于核对报名状态，`same_table_membership_evidence` 用于核对本人正式占席。字段名只留在内部。
 - `assigned_room` 是本次可见房间事实的内部字段，不能对客披露字段名。
-- `table_availability_evidence` 是时段与档位核验信息的内部字段，不能对客披露字段名。
+- `table_availability_evidence` 记录时段与档位，`exploratory_game_type` 记录本轮查过的备选玩法。这些内部字段名不能对客披露。
 - 补位协商的内部字段 `pending_board_candidate_decisions`、`board_candidate_reply_evidence`、`decision_task_id`、`evidence_message_id` 和任务前缀 `board-candidate-decision:`、`board-candidate-update:` 不得对外披露。
 - 不能透露其他用户、候选人、局内人员、客户画像、谁被邀请、谁确认、谁拒绝。
 - 不能把闲聊误处理成麻将业务承接。非组局闲聊不要说“我帮你问问”“有消息跟你说”“我帮你组”。

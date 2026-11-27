@@ -54,6 +54,7 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
     "remaining_seats_display",
     "assigned_room",
     "table_availability_evidence",
+    "exploratory_game_type",
     "pending_board_candidate_decisions",
     "board_candidate_reply_evidence",
     "decision_task_id",
