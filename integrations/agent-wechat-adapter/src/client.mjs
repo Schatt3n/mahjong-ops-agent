@@ -318,7 +318,7 @@ export class AgentWechatClient {
   /** 提交文本外发；同一 Idempotency-Key 重放会返回原始结果。 */
   async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null, replySource = null,
     manual = false, requireManualScope = false, scopedGroupReply = null, incomingReply = false,
-    legacyManagedGroupReply = false }) {
+    legacyManagedGroupReply = false, expectedAccountId = null }) {
     if (!idempotencyKey) throw new Error('idempotencyKey is required')
     if (replySource && await this.checkForOwnerReply(threadId, replySource)) {
       throw new UpstreamError('owner already replied', { status: 409, code: 'owner_already_replied' })
@@ -335,6 +335,10 @@ export class AgentWechatClient {
     }
     if (requireManualScope && !hasManualRecipientScope(policy, threadId)) {
       throw new UpstreamError('auto send switch is disabled', { status: 409, code: 'auto_send_required' })
+    }
+    // 权限读取是异步的，实际入队前再次确认仍使用操作者选中的账号。
+    if (expectedAccountId && this.accountId !== expectedAccountId) {
+      throw new UpstreamError('微信账号已切换，请重新选择收件人。', { status: 409, code: 'work_account_changed' })
     }
     return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/sends`, {
       method: 'POST',

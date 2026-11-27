@@ -62,6 +62,17 @@ DELIVERY_REASONS = {
     "delayed_room_send_not_supported_by_current_bridge": "当前桥接未启用此延迟群回复",
     "no_customer_visible_reply": "本次没有对外回复",
     "duplicate_of_immediate_ack": "与即时确认重复，已跳过",
+    "adapter_rejected_callback": "微信适配器拒绝了这次回复",
+    "group_reply_policy_unavailable": "该群的自动回复权限无法核对",
+    "group_observe_only": "该群设为仅观察",
+    "group_auto_reply_disabled": "该群未开启自动回复",
+    "group_reply_not_authorized": "本条消息未通过群自动回复授权核对",
+    "outbound_recipient_denied": "该会话不在当前外发授权范围内",
+}
+NATIVE_INGRESS_BLOCK_REASONS = frozenset({"send_channel_disabled", "auto_send_disabled"})
+NATIVE_CALLBACK_BLOCK_REASONS = NATIVE_INGRESS_BLOCK_REASONS | {
+    "group_reply_policy_unavailable", "group_observe_only", "group_auto_reply_disabled",
+    "group_reply_not_authorized", "outbound_recipient_denied",
 }
 NATIVE_DELIVERY = {
     "accepted": ("confirmed", "微信通道已确认"),
@@ -233,7 +244,8 @@ def _delivery(step, data, source_message_id):
         return {
             "kind": "reply", "label": label, "tone": {"confirmed": "success", "sending": "working"}.get(outcome, "warning"),
             "status": outcome, "delivery_id": "native-ingress-reply", "target_type": "", "text": _text(data.get("text"), 1500),
-            "message_id": _text(data.get("message_id"), 160), "detail": "",
+            "message_id": _text(data.get("message_id"), 160),
+            "detail": DELIVERY_REASONS.get(reason, "") if isinstance(reason, str) else "",
         }
     elif step in {"delayed_reply_delivery_started", "managed_group_outbound_started"}:
         outcome = "sending"
@@ -411,6 +423,7 @@ def _record_snapshot(record, events, batch_id, *, details, include_model_io=Fals
     game_id = ""
     group_outcome = None
     call_started_at = None
+    attempt_timeout = None
     had_error = False
     system_runs = defaultdict(int)
     # 老的托管群日志没有分流开始事件。主 Agent 开始前的模型尝试属于群分流，避免重试次数看起来被重置。
@@ -480,6 +493,7 @@ def _record_snapshot(record, events, batch_id, *, details, include_model_io=Fals
             "llm_request_started", "llm_http_attempt_started", "wechaty_input_gate_prompt", "wechaty_casual_chat_prompt",
             "customer_visible_text_generation_prompt", "customer_visible_content_review_prompt", "group_semantic_routing_started",
         } else None
+        attempt_timeout = data.get("timeout_seconds") if step == "llm_http_attempt_started" else None
     if record["channel"] == "agent-wechat":
         payload = _mapping(record.get("payload"))
         route = _mapping(payload.get("route_result"))
@@ -525,6 +539,8 @@ def _record_snapshot(record, events, batch_id, *, details, include_model_io=Fals
         "phase": phase, "tone": tone, "call_started_at": call_started_at,
     }
     if details:
+        if call_started_at and type(attempt_timeout) in (float, int) and 0 < attempt_timeout <= 3600:
+            result["attempt_timeout_seconds"] = attempt_timeout
         result.update({
             "batch_id": batch_id, "timeline": timeline[-100:], "reply": reply, "draft": draft,
             "ack": ack, "deliveries": deliveries, "delivery_attempts": list(attempts.values())[-100:],
@@ -608,6 +624,12 @@ def _game_board(store, selected_game):
         item["roster"] = _game_roster(game, customers, channel_name)
         board.append(item)
     return board
+
+
+def agent_work_detail(runtime, record, *, include_model_io=False):
+    """按已核对的入站记录投影详情，避免受全局最近消息列表的窗口限制。"""
+    related, batch_id = _related_events(record, *_trace_index(_recent_events(runtime.trace_recorder)))
+    return _record_snapshot(record, related, batch_id, details=True, include_model_io=include_model_io)
 
 
 def agent_work_snapshot(runtime, *, selected="", include_model_io=False):

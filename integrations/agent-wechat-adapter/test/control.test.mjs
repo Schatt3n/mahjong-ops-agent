@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { AgentWechatClient } from '../src/client.mjs'
 import { ControlSwitches, startControlServer } from '../src/control.mjs'
 import { Directory } from '../src/directory.mjs'
+import { AgentWechatAdapter } from '../src/adapter.mjs'
 
 /** 构造控制面测试配置，端口 0 由系统分配。 */
 function makeConfig(overrides = {}) {
@@ -389,7 +390,11 @@ test('店主会话只查本机精确白名单，过滤无关账号和已撤销�
       assert.equal((await call(`/console-conversation?thread_id=${encodeURIComponent(id)}&kind=${kind}`, { headers })).status, 404)
     }
     assert.equal((await call('/console-conversation?thread_id=wxid_li&kind=group', { headers })).status, 400)
+    const scopePath = '/console-conversation-scope?thread_id=wxid_li&kind=direct'
+    assert.equal((await call(scopePath)).status, 401)
+    assert.deepEqual(await call(scopePath, { headers }), { status: 200, body: { ok: true, account_id: 'acc' } })
     assert.equal((await call('/console-conversation?thread_id=wxid_li&kind=direct', { headers })).status, 404)
+    assert.equal((await call(scopePath, { headers })).status, 404)
   })
 })
 
@@ -573,6 +578,72 @@ test('后台自动回复通过鉴权后复用外发检查并返回发送终态',
     assert.deepEqual(await deliver({ payload, result }, token), {
       status: 200, body: { ok: true, delivery_state: 'withheld' },
     })
+  })
+})
+
+test('原生交付回调保留实际开关与群回复授权的拦截原因', async () => {
+  const thread = '100@chatroom'
+  let adapter
+  const payload = {
+    channel: 'agent-wechat', is_room: true, source_message_id: 'inbound', message_id: 'inbound',
+    room: { id: thread }, payload: { id: 'inbound', account_id: 'acc', direction: 'incoming', threadId: thread },
+  }
+  const result = { ok: true, channel: 'agent-wechat', route_result: {
+    scoped_group_reply: { room_id: thread, source_message_id: 'inbound', text: '收到' },
+  } }
+  await withServer({
+    configOverrides: { agentToken: 'runtime-secret' },
+    clientOverrides: {
+      sendText: async () => assert.fail('被拦截的回复不能提交微信'),
+      contactPolicy: async () => ({
+        groupPermissions: [{ thread_id: thread, mode: 'allowlist', auto_reply: false }],
+      }),
+    },
+    adapterOverrides: { maybeSendReply: (...args) => adapter.maybeSendReply(...args) },
+  }, async ({ call, switches, config, client }) => {
+    adapter = new AgentWechatAdapter({ config, client, switches, logger: { info() {} } })
+    adapter.account = { id: 'acc' }
+    const deliver = () => call('/deliver-ingress-reply', {
+      method: 'POST', headers: { 'X-Mahjong-Agent-Token': 'runtime-secret' },
+      body: JSON.stringify({ payload, result }),
+    })
+    for (const [sendChannelEnabled, autoSendReply, reason] of [
+      [false, true, 'send_channel_disabled'],
+      [true, false, 'auto_send_disabled'],
+      [true, true, 'group_auto_reply_disabled'],
+    ]) {
+      Object.assign(switches, { sendChannelEnabled, autoSendReply })
+      assert.deepEqual(await deliver(), { status: 200, body: { ok: true, delivery_state: 'withheld', reason } })
+    }
+  })
+})
+
+test('选中的手动发送绑定账号，账号切换后拒绝旧请求', async () => {
+  let submissions = 0
+  await withServer({
+    directoryOverrides: { hasExactContact: async id => id === 'wxid_li' },
+    clientOverrides: {
+      sendText: async ({ expectedAccountId }) => {
+        assert.equal(expectedAccountId, 'acc')
+        submissions++
+        return { id: 'scope-send' }
+      },
+      waitForSend: async () => ({ state: 'accepted', id: 'scope-send', accountId: 'acc',
+        destination: 'wxid_li', serverId: 'fixture-receipt' }),
+    },
+  }, async ({ call, client }) => {
+    const resolved = await call('/resolve?query='+encodeURIComponent('李姐'))
+    const scope = resolved.body.candidates[0].work_scope
+    assert.equal(scope, createHash('sha256').update(JSON.stringify(['acc', 'wxid_li', 'direct'])).digest('hex'))
+    const send = () => call('/send', { method: 'POST', body: JSON.stringify({
+      work_scope: scope, exact_target: true, target_type: 'direct', to: 'wxid_li', text: 'fixture',
+    }) })
+    const accepted = await send()
+    assert.equal(accepted.body.work_scope, scope)
+    assert.equal(accepted.body.state, 'accepted')
+    client.accountId = 'other-account'
+    assert.equal((await send()).status, 409)
+    assert.equal(submissions, 1)
   })
 })
 

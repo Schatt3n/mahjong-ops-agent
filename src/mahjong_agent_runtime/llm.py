@@ -906,7 +906,8 @@ class OpenAICompatibleAgentClient:
                 self._record_http_metric("http_attempts")
                 if attempt > 1:
                     self._record_http_metric("http_retries")
-                self._observe_request(trace_id, "llm_http_attempt_started", diagnostics, attempt)
+                self._observe_request(trace_id, "llm_http_attempt_started", diagnostics, attempt,
+                                      timeout_seconds=request_timeout)
                 phase = "response_headers"
                 with self.urlopen(request, timeout=request_timeout) as response:
                     phase = "response_body"

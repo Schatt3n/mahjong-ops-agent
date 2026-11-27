@@ -8,7 +8,8 @@
  */
 import { readFile } from 'node:fs/promises'
 import { buildChannelPayload, isChatroomId, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
-import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
+import { appendDelivery, deliveryReceiptKey, loadCursor, loadDeliveryLedger, persistToSpool,
+  listSpool, removeSpoolFile, saveCursor } from './state.mjs'
 import { groupPermissionRule } from './contact-policy.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -67,6 +68,7 @@ async function scopedGroupReplyRequest(accountId, payload, result, policyPath, r
 /** 向 Runtime raw 入口投递载荷；异步请求收到持久接收确认即可推进游标。 */
 export async function postAgentRaw(endpoint, token, payload, {
   fetchImpl = globalThis.fetch, attempts = 3, logger = console, respondAsync = false, deferredReply = false,
+  replyBlockReason = '',
 } = {}) {
   let lastError = null
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -75,6 +77,7 @@ export async function postAgentRaw(endpoint, token, payload, {
       if (token) headers['X-Mahjong-Agent-Token'] = token
       if (respondAsync) headers.Prefer = 'respond-async'
       if (deferredReply) headers['X-Mahjong-Agent-Wechat-Deferred-Reply'] = '1'
+      if (replyBlockReason) headers['X-Mahjong-Agent-Wechat-Reply-Blocked'] = replyBlockReason
       const response = await fetchImpl(endpoint, {
         method: 'POST',
         headers,
@@ -348,12 +351,21 @@ export class AgentWechatAdapter {
     return !this.switches.autoSendReply && (!this.switches.sendChannelEnabled || Boolean(this.config.outboundAllowlistPath))
   }
 
+  /** 总闸优先于自动外发，入站与提交前使用一致的拒绝原因。 */
+  replySwitchBlockReason() {
+    if (!this.switches.sendChannelEnabled) return 'send_channel_disabled'
+    if (!this.switches.autoSendReply) return 'auto_send_disabled'
+    return ''
+  }
+
   /** 运行进程只等待持久接收，并将可能发送的回复交给 Runtime 后台回调。 */
   ingressDeliveryOptions(payload) {
+    const respondAsync = this.deferAutomaticReplies || this.durableIngressOnly()
+    const replyBlockReason = respondAsync && !payload.self_message ? this.replySwitchBlockReason() : ''
     return {
-      respondAsync: this.deferAutomaticReplies || this.durableIngressOnly(),
-      deferredReply: Boolean(this.deferAutomaticReplies && !payload.self_message &&
-        this.switches.sendChannelEnabled && this.switches.autoSendReply),
+      respondAsync,
+      deferredReply: this.deferAutomaticReplies && !payload.self_message && !replyBlockReason,
+      replyBlockReason,
     }
   }
 
@@ -370,33 +382,49 @@ export class AgentWechatAdapter {
 
   /** 回发 Runtime 的最终回复；默认关闭，失败只记录不重发。 */
   async maybeSendReply(payload, result) {
-    if (payload?.self_message) return null
-    if (this.config.dryRun || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) {
-      this.logger.info(`reply withheld because send switches are off trace=${result?.trace_id || '-'}`)
-      return null
-    }
+    if (payload?.self_message || this.config.dryRun) return null
     const threadId = payload?.payload?.threadId
     if (typeof threadId !== 'string' || !threadId) return null
+    const sourceMessageId = String(payload.source_message_id || payload.message_id || '')
+    const account = this.account?.id
+    const receipt = account && sourceMessageId && payload.payload.account_id === account &&
+      this.delivered.get(deliveryReceiptKey({ account_id: account, thread_id: threadId, source_message_id: sourceMessageId }))
+    if (receipt) {
+      // 已确认的交付早于本次权限检查；收紧权限不改变已经发生的发送。
+      if (!receipt.server_message_id && !receipt.local_message_id) return { state: 'already_delivered' }
+      return { state: 'accepted', accountId: account, destination: threadId,
+        serverId: receipt.server_message_id, localMessageId: receipt.local_message_id }
+    }
+    let blocked = this.replySwitchBlockReason()
+    if (blocked) {
+      this.logger.info(`reply withheld because send switches are off trace=${result?.trace_id || '-'}`)
+      return { state: 'withheld', reason: blocked }
+    }
     let request
     let scopedGroupReply
     if (payload?.is_room || isChatroomId(threadId)) {
       const groupPolicy = await this.client.contactPolicy()
       const rule = groupPermissionRule(groupPolicy, threadId)
-      if (groupPolicy.invalid || rule?.mode === 'observe' || rule?.auto_reply === false) return null
+      if (groupPolicy.invalid) return { state: 'withheld', reason: 'group_reply_policy_unavailable' }
+      if (rule?.mode === 'observe') return { state: 'withheld', reason: 'group_observe_only' }
+      if (rule?.auto_reply === false) return { state: 'withheld', reason: 'group_auto_reply_disabled' }
       const explicitGroupReply = rule?.auto_reply === true
       // 任何群入站自动回复都必须有逐群授权与同一条原消息的公开审查回执。
-      if (!explicitGroupReply && (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath)) return null
+      if (!explicitGroupReply && (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath)) {
+        return { state: 'withheld', reason: 'group_auto_reply_disabled' }
+      }
       request = await scopedGroupReplyRequest(
         this.account?.id, payload, result, this.config.groupReplyPolicyPath, explicitGroupReply ? rule : null,
       )
-      if (request) scopedGroupReply = { receivedAt: payload.payload.createdAt, legacy: !explicitGroupReply }
+      if (!request) return { state: 'withheld', reason: 'group_reply_not_authorized' }
+      scopedGroupReply = { receivedAt: payload.payload.createdAt, legacy: !explicitGroupReply }
     } else {
       const finalReply = extractFinalReply(result)
       if (!finalReply) return null
       request = { threadId, text: finalReply }
     }
-    if (!request || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) return null
-    const sourceMessageId = String(payload?.source_message_id || payload?.message_id || '')
+    blocked = this.replySwitchBlockReason()
+    if (blocked) return { state: 'withheld', reason: blocked }
     if (sourceMessageId && this.delivered.has(sourceMessageId)) {
       this.logger.info(`reply skipped; already delivered source=${sourceMessageId}`)
       return { state: 'already_delivered' }
@@ -412,6 +440,7 @@ export class AgentWechatAdapter {
       const state = await this.client.waitForSend(intent.id, { timeoutMs: this.config.sendWaitTimeoutMs })
       return this.recordSendOutcome({ payload, intent, state, idempotencyKey })
     } catch (error) {
+      if (error?.code === 'outbound_recipient_denied') return { state: 'withheld', reason: 'outbound_recipient_denied' }
       if (error?.code === 'owner_already_replied') {
         this.logger.info(`reply skipped; owner already replied source=${sourceMessageId}`)
         return { state: 'owner_already_replied' }
@@ -436,8 +465,7 @@ export class AgentWechatAdapter {
       const attribution = accountId && threadId && state.accountId === accountId && state.destination === threadId
         ? { account_id: accountId, thread_id: threadId, author: 'agent',
           local_message_id: state.localMessageId || '', server_message_id: state.serverId || '' } : {}
-      this.delivered.add(String(payload.source_message_id))
-      appendDelivery(this.config.deliveryLedgerPath, {
+      const receipt = {
         source_message_id: String(payload.source_message_id || ''),
         conversation_id: String(payload.conversation_id || ''),
         send_id: String(state?.id || intent?.id || ''),
@@ -445,7 +473,9 @@ export class AgentWechatAdapter {
         idempotency_key: idempotencyKey,
         state: finalState,
         ...attribution,
-      })
+      }
+      this.delivered.set(deliveryReceiptKey(receipt), receipt)
+      appendDelivery(this.config.deliveryLedgerPath, receipt)
       this.logger.info(`reply accepted send=${state?.id} message=${messageId}`)
       return state
     }

@@ -43,12 +43,15 @@ class Element extends EventTarget {
     for(const child of children) child.parentNode = this;
     this.children.push(...children);
   }
-  replaceChildren(){
+  replaceChildren(...children){
     for(const child of this.children) child.parentNode = null;
     this.children = [];
+    this.append(...children);
   }
   get childElementCount(){return this.children.length;}
+  get firstElementChild(){return this.children[0] || null;}
   querySelectorAll(selector){
+    if(selector === 'details[open]') return this.children.filter(row => row.open);
     assert.equal(selector, 'button');
     return this.children.map(row=>row.children[0]);
   }
@@ -58,7 +61,24 @@ class Element extends EventTarget {
   showModal(){this.open = true;}
   close(){this.open = false;this.dispatchEvent(new Event('close'));}
 }
-const document = {createElement: () => new Element()};
+const location = {hash:''};
+const window = new EventTarget();
+const ownerViews = Object.fromEntries(['messages','operations','settings'].map(id => [id,new Element()]));
+const document = Object.assign(new EventTarget(),{
+  createElement: () => new Element(),
+  getElementById: id => ownerViews[id],
+});
+const ownerNav = new Element();
+for(const id of Object.keys(ownerViews)){
+  const row = new Element(), link = new Element();
+  link.hash = '#'+id;
+  row.append(link);
+  ownerNav.append(row);
+}
+ownerNav.querySelectorAll = selector => {
+  assert.equal(selector,'a');
+  return ownerNav.children.map(row => row.children[0]);
+};
 const wechatTarget = new Element(), wechatText = new Element(), wechatSendButton = new Element();
 const wechatRecipientCandidates = new Element(), wechatRecipientStatus = new Element(), wechatSendOutput = new Element();
 const wechatRecipientRefreshButton = new Element(), wechatChannelStatus = new Element();
@@ -67,6 +87,7 @@ const wechatHistoryTitle = new Element(), wechatHistoryWrap = new Element(), wec
 const wechatHistoryRefresh = new Element(), wechatHistoryOlder = new Element(), wechatHistoryStatus = new Element();
 const wechatMediaViewer = new Element(), wechatMediaTitle = new Element(), wechatMediaStatus = new Element();
 const wechatMediaImage = new Element(), wechatMediaDownload = new Element();
+const wechatWorkContent = new Element(), wechatWorkPane = new Element(), wechatWorkLive = new Element();
 const stored = new Map();
 const sessionStorage = {
   getItem:key=>stored.get(key) ?? null,
@@ -78,7 +99,7 @@ wechatRecipientRefreshButton.hidden = true;
 wechatRecipientRefreshButton.disabled = true;
 wechatSendButton.disabled = true;
 function setTimeout(callback, ms){
-  assert.equal(ms, 250);
+  assert.ok([250,1600,6000].includes(ms));
   timers.set(++nextTimer, callback);
   return nextTimer;
 }
@@ -135,6 +156,98 @@ loadWechatChannelStatus = productionLoadChannel;
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok\n", "异步交互没有执行完成"
 
+
+
+def test_message_work_recovers_from_hung_body_and_clears_rejected_history():
+    """正文读取挂起仍能重试，旧聊天已展开时撤权也会清掉历史与处理详情。"""
+    _run_console_case(r"""
+selectedWechatRecipient = first;
+wechatWorkScope = 'fixture-scope';
+wechatWorkId = 'incoming';
+wechatHistoryExpanded = true;
+wechatHistoryList.append(new Element());
+const nativeTimeout = AbortSignal.timeout;
+const expired = new AbortController();
+AbortSignal.timeout = ms => {
+  assert.equal(ms,6500);
+  return expired.signal;
+};
+const slow = refreshWechatWork();
+assert.match(requests[0].url,/^\/api\/wechat\/message-work\?/);
+requests[0].resolve({ok:true,status:200,json:() => new Promise((resolve,reject) => {
+  const signal = requests[0].options.signal;
+  signal.addEventListener('abort',() => reject(signal.reason),{once:true});
+})});
+await settle();
+expired.abort(new DOMException('fixture timeout','TimeoutError'));
+await slow;
+assert.match(wechatWorkLive.textContent,/刷新超时.*正在重试/);
+assert.equal(timers.size,1);
+AbortSignal.timeout = nativeTimeout;
+fireTimers();
+assert.equal(requests.length,2);
+respond(requests[1],{ok:true,detail:{
+  phase:'外发已拦截',tone:'warning',kind:'群聊',reply:'合成回复',trace_ids:[],timeline:[],
+  deliveries:{reply:{label:'外发已拦截',detail:'该群未开启自动回复',status:'blocked'}},
+}});
+await settle();
+assert.equal(wechatWorkLive.textContent,'');
+assert.equal(wechatWorkContent.firstElementChild.textContent,'外发已拦截');
+assert.ok(wechatWorkContent.children[2].children.some(node => node.textContent === '该群未开启自动回复'));
+fireTimers();
+respond(requests[2],{ok:false},404);
+await settle();
+assert.equal(wechatHistoryList.childElementCount,0);
+assert.equal(wechatHistoryExpanded,false);
+assert.equal(wechatWorkId,'');
+assert.match(wechatWorkLive.textContent,/无法查看/);
+assert.equal(timers.size,0);
+""")
+
+
+def test_manual_draft_is_bound_to_the_account_when_same_thread_changes():
+    """账号改变必须重新确认会话，旧草稿只随原账号恢复。"""
+    _run_console_case(r"""
+const oldRecipient = {...first,work_scope:'old-account-scope'};
+const newRecipient = {...first,work_scope:'new-account-scope'};
+const history = scope => ({ok:true,id:first.id,kind:first.kind,items:[],nextCursor:null,work_scope:scope});
+selectWechatRecipient(oldRecipient);
+respond(requests[0],history(oldRecipient.work_scope));
+await settle();
+wechatText.value = '旧账号草稿';
+const refresh = loadWechatConversation();
+respond(requests[1],history(newRecipient.work_scope));
+await refresh;
+assert.equal(selectedWechatRecipient,null);
+assert.equal(wechatText.value,'');
+confirmed = true;
+await sendWechatText();
+assert.equal(requests.length,2);
+selectWechatRecipient(newRecipient);
+respond(requests[2],history(newRecipient.work_scope));
+await settle();
+assert.equal(wechatText.value,'');
+wechatText.value = '新账号草稿';
+const sending = sendWechatText();
+assert.equal(JSON.parse(requests[3].options.body).work_scope,newRecipient.work_scope);
+respond(requests[3],{ok:false},409);
+await sending;
+selectWechatRecipient(oldRecipient);
+assert.equal(wechatText.value,'旧账号草稿');
+respond(requests[4],history(oldRecipient.work_scope));
+await settle();
+""", exercise_conversations=True)
+
+
+def test_bridge_without_history_links_to_agent_work_records():
+    """备用桥接明确显示可查看工作记录的入口，并保留现有手动发送页。"""
+    _run_console_case(r"""
+const loading = loadWechatConversations();
+respond(requests[0],{ok:false,error:'wechat_history_unsupported'},501);
+await loading;
+assert.match(wechatListStatus.textContent,/备用桥接/);
+assert.equal(wechatListStatus.children[0].href,'/agent-work');
+""", exercise_conversations=True)
 
 
 def test_media_opens_the_exact_original_without_sending():

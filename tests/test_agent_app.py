@@ -559,7 +559,7 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
     state = SimpleNamespace(calls=[], receipts={}, reject="", uncertain=False,
                             contact_refresh=not_found, contact_policy=not_found,
                             permission_roster=not_found, group_permission=not_found,
-                            active_conversations=not_found, conversation=not_found)
+                            active_conversations=not_found, conversation=not_found, conversation_scope=not_found)
 
     class StubWechatBridge(BaseHTTPRequestHandler):
         def reply(self, status, data):
@@ -586,6 +586,9 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
                 return
             if self.path.partition("?")[0] == "/console-conversation":
                 self.reply(*state.conversation)
+                return
+            if self.path.partition("?")[0] == "/console-conversation-scope":
+                self.reply(*state.conversation_scope)
                 return
             self.reply(200, {"ok": True, "candidates": [
                 {"id": "wxid_fixture", "kind": "direct", "displayName": "合成备注", "backend_only": "debug"},
@@ -684,10 +687,18 @@ def test_owner_console_lists_recent_or_scheduled_whitelisted_wechat_conversation
         assert response.headers["Cache-Control"] == "no-store"
         payload = context.app.json.load(response)
     assert payload == {"ok": True, "items": [
-        {"id": "wxid_recent", "kind": "direct", "displayName": "近期私聊", "last_at": recent, "pending_tasks": 1},
-        {"id": "123@chatroom", "kind": "group", "displayName": "待发看板", "last_at": None, "pending_tasks": 1},
+        {"id": "wxid_recent", "kind": "direct", "displayName": "近期私聊", "last_at": recent, "pending_tasks": 1,
+         "work_scope": context.app.wechat_console_work_scope("fixture-account", "wxid_recent", "direct")},
+        {"id": "123@chatroom", "kind": "group", "displayName": "待发看板", "last_at": None, "pending_tasks": 1,
+         "work_scope": context.app.wechat_console_work_scope("fixture-account", "123@chatroom", "group")},
     ]}
     assert local_wechat_bridge.calls == [("GET", "/console-conversations", "local-channel-test-token", None)]
+    monkeypatch.setenv("MAHJONG_WECHATY_CONTROL_TRANSPORT", "bridge")
+    with pytest.raises(HTTPError) as legacy_history:
+        urlopen(Request(endpoint, headers=context.headers), timeout=5)
+    assert legacy_history.value.code == 501
+    assert context.app.json.load(legacy_history.value)["error"] == "wechat_history_unsupported"
+    assert len(local_wechat_bridge.calls) == 1
     assert context.client.calls == []
 
 
@@ -720,8 +731,10 @@ def test_owner_console_chat_history_relays_exact_target_and_minimal_text(local_a
     request = Request(f"{endpoint}?{urlencode(valid)}", headers=context.headers)
     with urlopen(request, timeout=5) as response:
         assert response.headers["Cache-Control"] == "no-store"
+        scope = context.app.wechat_console_work_scope("hidden-account", valid["thread_id"], valid["kind"])
         assert context.app.json.load(response) == {"ok": True, "id": valid["thread_id"], "kind": "direct",
-                                                   "items": [incoming, outgoing], "nextCursor": "next+page="}
+                                                   "items": [incoming, outgoing], "nextCursor": "next+page=",
+                                                   "work_scope": scope}
     method, path, token, body = local_wechat_bridge.calls.pop()
     assert (method, urlsplit(path).path, token, body) == ("GET", "/console-conversation", "fixture-bridge-control-token", None)
     assert parse_qs(urlsplit(path).query) == {key: [value] for key, value in valid.items()}
@@ -745,6 +758,133 @@ def test_owner_console_chat_history_relays_exact_target_and_minimal_text(local_a
             {**incoming, "direct_recipient": target}, outgoing, {**incoming, "id": "local-3"},
         ]
     assert context.client.calls == []
+
+
+def test_owner_message_work_binds_account_and_thread_and_projects_readable_evidence(
+    local_agent_http, local_wechat_bridge, monkeypatch,
+):
+    """同一条消息的时间预算和发送证据可见，错账号或会话始终查不到。"""
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    thread = "123@chatroom"
+    trace = context.runtime.trace_recorder
+    message_id = "abc" + "x" * 509
+    context.runtime.store.upsert_channel_observation({
+        "channel": "agent-wechat", "source_message_id": message_id, "trace_id": "trace-1",
+        "conversation_id": "wechaty:room:" + thread, "is_room": True,
+        "payload": {"raw_payload": {"payload": {"account_id": "owner-account"}}},
+    })
+    endpoint = context.base + "/api/wechat/message-work"
+    params = {"thread_id": thread, "kind": "group", "message_id": message_id,
+              "scope": context.app.wechat_console_work_scope("owner-account", thread, "group")}
+    local_wechat_bridge.conversation_scope = (200, {"ok": True, "account_id": "owner-account"})
+    monkeypatch.delenv("MAHJONG_WECHATY_OUTBOUND_TOKEN")
+
+    def fetch_detail(**overrides):
+        req = Request(f"{endpoint}?{urlencode(params | overrides)}", headers=context.headers)
+        with urlopen(req, timeout=5) as response:
+            assert response.headers["Cache-Control"] == "no-store"
+            return context.app.json.load(response)["detail"]
+
+    with pytest.raises(HTTPError) as denied:
+        urlopen(f"{endpoint}?{urlencode(params)}", timeout=5)
+    assert denied.value.code == 401
+    assert fetch_detail(message_id="missing") is None
+    assert local_wechat_bridge.calls[-1][2] == "local-channel-test-token"
+    for overrides in ({"thread_id": "345@chatroom"},
+                      {"scope": context.app.wechat_console_work_scope("other-account", thread, "group")}):
+        with pytest.raises(HTTPError) as wrong_scope:
+            fetch_detail(**overrides)
+        assert wrong_scope.value.code == 404
+    with pytest.raises(HTTPError) as too_long:
+        fetch_detail(message_id=message_id + "x")
+    assert too_long.value.code == 400
+    trace.record("trace-1", "llm_http_attempt_started", {"model": "fixture", "attempt": 1, "timeout_seconds": 15.5})
+    detail = fetch_detail()
+    assert detail["attempt_timeout_seconds"] == 15.5
+    assert detail["call_started_at"]
+    trace.record("trace-1", "llm_http_retry_scheduled", {"attempt": 1, "error_type": "TimeoutError"})
+    assert fetch_detail()["phase"] == "模型请求失败，等待重试"
+    trace.record("trace-1", "final_output", {"reply": "还有一个位置。"})
+    trace.record("trace-1", "agent_wechat_ingress_reply_completed",
+                 {"delivery_state": "withheld", "reason": "send_channel_disabled"})
+    blocked = fetch_detail()
+    assert blocked["deliveries"]["reply"]["detail"] == "微信发送总闸已关闭"
+    assert "attempt_timeout_seconds" not in blocked
+    trace.record("trace-1", "agent_wechat_ingress_reply_completed",
+                 {"delivery_state": "accepted", "message_id": "platform-reply"})
+    confirmed = fetch_detail()
+    assert confirmed["reply"] == "还有一个位置。"
+    assert confirmed["deliveries"]["reply"]["message_id"] == "platform-reply"
+    for status, data in ((404, {"ok": False}), (200, {"ok": True, "account_id": "other-account"})):
+        local_wechat_bridge.conversation_scope = (status, data)
+        with pytest.raises(HTTPError) as stale_scope:
+            fetch_detail(model_io="1")
+        assert stale_scope.value.code == 404
+        assert "platform-reply" not in stale_scope.value.read().decode()
+    new_scope = context.app.wechat_console_work_scope("other-account", thread, "group")
+    assert fetch_detail(scope=new_scope) is None
+    assert context.client.calls == []
+
+
+@pytest.mark.parametrize(("ingress_reason", "callback_reason", "label"), [
+    ("send_channel_disabled", None, "微信发送总闸已关闭"),
+    ("auto_send_disabled", None, "自动外发已关闭"),
+    (None, "group_auto_reply_disabled", "该群未开启自动回复"),
+])
+def test_agent_wechat_ingress_persists_switch_and_callback_block_reasons(
+    local_agent_http, monkeypatch, ingress_reason, callback_reason, label,
+):
+    """走原生 HTTP 入队、路由和后台交接，验证拦截原因随观察记录持久化。"""
+    from types import SimpleNamespace
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    app = context.app
+    context.server.channel_ingress_worker = SimpleNamespace(wake=lambda: None)
+    thread = "123@chatroom"
+    message_id = "blocked-inbound"
+    payload = {"message_id": message_id, "is_room": True, "room": {"id": thread},
+               "conversation_id": f"wechaty:room:{thread}", "text": "测试",
+               "payload": {"account_id": "fixture-account", "threadId": thread}}
+    monkeypatch.setattr(app, "channel_route_handler", lambda channel: lambda payload, trace_id: {
+        "managed_group": True,
+        "agent_result": {"final_reply": "内部结果"},
+        "scoped_group_reply": {"room_id": thread, "source_message_id": message_id, "text": "经审查的回复"},
+    })
+    calls = []
+
+    def callback(path, *, payload, timeout_seconds):
+        calls.append(path)
+        return {"ok": True, "delivery_state": "withheld", "reason": callback_reason}
+
+    monkeypatch.setattr(app, "request_local_json", callback)
+    headers = {**context.headers, "Prefer": "respond-async"}
+    if ingress_reason:
+        headers["X-Mahjong-Agent-Wechat-Reply-Blocked"] = ingress_reason
+    else:
+        headers["X-Mahjong-Agent-Wechat-Deferred-Reply"] = "1"
+    request = Request(context.base + "/api/channels/agent-wechat/raw",
+                      headers=headers, data=app.json.dumps(payload).encode())
+    with urlopen(request, timeout=5) as response:
+        assert response.status == 202
+
+    runtime = context.runtime
+    app.process_queued_channel_raw(runtime, runtime.store.next_channel_ingress(set()))
+    if callback_reason:
+        app.process_queued_channel_raw(runtime, runtime.store.next_channel_ingress(set()))
+    assert calls == (["/deliver-ingress-reply"] if callback_reason else [])
+    reopened = SQLiteAgentStore(context.store_path)
+    view = SimpleNamespace(store=reopened, trace_recorder=InMemoryTraceRecorder())
+    observation = reopened.get_channel_observation("agent-wechat", message_id)
+    detail = app.agent_work_detail(view, observation)
+    assert detail["phase"] == "外发已拦截"
+    assert detail["reply"] == "经审查的回复"
+    assert detail["deliveries"]["reply"]["detail"] == label
+    assert not detail["deliveries"]["reply"]["message_id"]
 
 
 def test_wechat_console_uses_configured_authenticated_bridge_for_search_and_controls(

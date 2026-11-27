@@ -33,15 +33,22 @@ export function saveCursor(cursorPath, { cursor, accountId = '', serverId = '' }
   fs.renameSync(temp, cursorPath)
 }
 
-/** 读取已成功外发的源消息 id 集合，用于重启后跳过重复回复。 */
+/** 保存源消息及原生发送账号和会话，区分相同消息 ID 在不同账号下的回执。 */
+export function deliveryReceiptKey(row) {
+  return row.account_id && row.thread_id
+    ? JSON.stringify([row.account_id, row.thread_id, String(row.source_message_id)])
+    : String(row.source_message_id)
+}
+
+/** 读取已成功外发的回执，用于重启后的自动回复对账。 */
 export function loadDeliveryLedger(ledgerPath) {
-  const delivered = new Set()
+  const delivered = new Map()
   try {
     for (const line of fs.readFileSync(ledgerPath, 'utf8').split(/\r?\n/)) {
       if (!line.trim()) continue
       try {
         const record = JSON.parse(line)
-        if (record?.source_message_id) delivered.add(String(record.source_message_id))
+        if (record?.source_message_id && record.state === 'accepted') delivered.set(deliveryReceiptKey(record), record)
       } catch {
         /* 单行损坏不影响其余记录 */
       }

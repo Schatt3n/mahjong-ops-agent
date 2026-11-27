@@ -142,6 +142,7 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `GET/POST /contact-policy` | 用 `query` 搜索私聊联系人。保存时提交精确 `recipient_id`、`mode`（`allowlist`、`managed_only` 或 `observe`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。仅托管的私聊只处理入站，禁止手动和自动外发。 |
 | `GET /permission-roster` | 按 `view` 分页浏览 `policy`、`contacts` 或 `groups`，支持 `query` 和 `cursor`，使用控制面令牌或 Runtime API 令牌。 |
 | `GET /console-conversations`、`GET /console-conversation` | 只读本机精确外发白名单内的会话摘要与分页聊天记录，使用控制面令牌或 Runtime API 令牌。权限在读取前后核对，送达回执支持已发送消息的归属标记。 |
+| `GET /console-conversation-scope` | 使用与聊天历史相同的鉴权和读权限，按 `thread_id` 与 `kind` 核对当前账号下的会话。供 Runtime 轮询处理详情时复核，无需再拉取聊天历史。 |
 | `POST /group-permission` | 按精确群 `recipient_id` 保存 `mode`（`allowlist`、`observe` 或 `inherit`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。 |
 | `GET /resolve?query=&kind=` | 按名字消歧，排除已识别的非个人账号，返回候选与 `recommendedId` |
 | `POST /send` | 兼容 Runtime 的文本外发合同 |
@@ -167,6 +168,7 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 
 - 每条入站请求使用 `Prefer: respond-async`。Runtime 把原始消息和待办状态写入 SQLite 后返回 HTTP 202，适配器随即推进**事件游标**。入站路由最多并行处理四个会话，各会话按落库顺序处理。重复来源消息沿用首次记录，重启后会续处理待办。
 - 自动回复开启时，适配器也只等待持久接收确认。Runtime 保存待发结果，单独串行交给适配器执行发送授权、老板已回复检查及发送去重。其他会话的入站处理可以继续。回调一时不可用时，后台按原消息重试交接。
+- 外发开关在接收入站时已关闭，或交付时被开关、会话授权拦截，适配器把判定原因交给 Runtime。工作记录会为已生成待外发回复的消息显示拦截原因。
 - 消息详情或持久接收失败会保留游标，从上一个已确认位置重连补读。旧 `ingress_spool/` 仍可手动重放。
 - **发送去重**：`delivery_ledger.jsonl` 只记录上游 `accepted` 的回复。
 - **结果不明**：`needs_review` 表示微信是否收到未知，必须人工核对聊天窗口，禁止自动重试。

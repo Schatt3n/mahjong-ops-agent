@@ -595,7 +595,9 @@ Install and upgrade `agent-wechat` independently using tagged releases. This rep
 
 The agent can use recent owner replies from the same direct chat in later turns. Before sending an automatic reply, the adapter checks for a corresponding owner reply and suppresses the pending reply when it finds one.
 
-The owner workspace shows active games, open seats, and invitations awaiting approval. It also gives the owner access to invitation approvals, WeChat permissions, and manual sending. Developer tools provide Runtime and WeChat logs, trace lookup, message debugging, raw state, and test replay. The raw state loads only when opened.
+The owner workspace opens on **Messages**. Select a conversation and choose **查看处理** (View processing) below an incoming message to see the Agent's progress, business reply, and WeChat receipt alongside the chat. If a model attempt exceeds its recorded request budget, the panel indicates that it has yet to observe a completion event. Recorded and redacted model input and output can be opened on demand.
+
+**Operations** shows active games, open seats, and invitations awaiting approval. **Settings** links to WeChat account setup, conversation permissions, outbound controls, and developer tools. Developer tools provide Runtime and WeChat logs, trace lookup, message debugging, raw state, and test replay. The raw state loads only when opened.
 
 The WeChat conversations panel shows local outbound-allowlisted direct and group chats with new messages in the past two hours or a pending or running scheduled task in that conversation. Open a conversation to read saved messages, see Agent replies with delivery evidence, and confirm a manual message to that conversation. Chat history is available on the machine running the service.
 
