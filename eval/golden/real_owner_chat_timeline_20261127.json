@@ -1,0 +1,146 @@
+{
+  "schema_version": "1.1",
+  "kind": "real_owner_chat_golden",
+  "id": "owner_chat_duration_fallback_timeline_20261127_001",
+  "name": "真实老板私聊：四小时没匹配到，老板隔几小时征询五小时备选",
+  "tags": ["real-owner-chat", "fragmented-input", "delegated-recruitment", "duration-negotiation", "proactive-follow-up", "pending-confirmation"],
+  "source": {
+    "channel": "wechat_screenshot",
+    "capture_date": "2026-11-27",
+    "observed_period": "2026-11-13/2026-11-27",
+    "timezone": "Asia/Shanghai",
+    "source_image_files": [
+      "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png",
+      "codex-clipboard-281f8832-bf65-43c7-9427-d3b4fd0420fd.png"
+    ],
+    "omitted_media_policy": "exclude",
+    "note": "由两张截图人工转写，绿色气泡为客户，白色气泡为老板。第三方昵称已用别名替换。无关来信通知、被遮挡的气泡、两处表情图和界面内容不进入消息正文。截图一顶部的 okk 与截图二末条重叠，合并为一条。截图一日期由同一会话和用户提供的当天说明对齐。16:52 是后半段的微信时间标签，其后的气泡仅有相对顺序。"
+  },
+  "participants": {"customer": "我/客户", "boss": "麻将馆老板"},
+  "messages": [
+    {"turn": 1, "role": "customer", "text": "4小时的我看371了是不", "observed_at": "2026-11-13T17:30:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 2, "role": "boss", "text": "4小时加你三缺一五小时加你齐了", "observed_at": "2026-11-13T17:30:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 3, "role": "customer", "text": "那等6点看看吧哈哈哈", "observed_at": "2026-11-13T17:31:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 4, "role": "customer", "text": "我还是想打4小时", "observed_at": "2026-11-13T17:31:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 5, "role": "customer", "text": "晚上回去太晚了好冷哦", "observed_at": "2026-11-13T17:31:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 6, "role": "boss", "text": "现在天气是冷了", "observed_at": "2026-11-13T17:31:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 7, "role": "customer", "text": "嗯呢", "observed_at": "2026-11-13T17:31:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 8, "role": "customer", "text": "630可以打个4小时，帮忙问下人哇", "observed_at": "2026-11-27T13:50:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 9, "role": "customer", "text": "晚上630", "observed_at": "2026-11-27T13:51:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 10, "role": "boss", "text": "okk", "observed_at": "2026-11-27T13:53:00+08:00", "source_image": "codex-clipboard-42d22a61-9723-4ed5-8d2a-0f2d7aa8d984.png"},
+    {"turn": 11, "role": "boss", "text": "可以5个小时吗", "observed_at": "2026-11-27T16:52:00+08:00", "source_image": "codex-clipboard-281f8832-bf65-43c7-9427-d3b4fd0420fd.png"},
+    {"turn": 12, "role": "customer", "text": "哪几个人呀", "displayed_time_anchor": "2026-11-27T16:52:00+08:00", "source_image": "codex-clipboard-281f8832-bf65-43c7-9427-d3b4fd0420fd.png"},
+    {"turn": 13, "role": "boss", "text": "牌友甲，嗯，和牌友乙", "displayed_time_anchor": "2026-11-27T16:52:00+08:00", "source_image": "codex-clipboard-281f8832-bf65-43c7-9427-d3b4fd0420fd.png"},
+    {"turn": 14, "role": "customer", "text": "稍等一下哈", "displayed_time_anchor": "2026-11-27T16:52:00+08:00", "source_image": "codex-clipboard-281f8832-bf65-43c7-9427-d3b4fd0420fd.png"},
+    {"turn": 15, "role": "boss", "text": "嗯嗯", "displayed_time_anchor": "2026-11-27T16:52:00+08:00", "source_image": "codex-clipboard-281f8832-bf65-43c7-9427-d3b4fd0420fd.png"}
+  ],
+  "episodes": [
+    {
+      "id": "owner_chat_duration_preference_20261113",
+      "start_turn": 1,
+      "end_turn": 7,
+      "started_at": "2026-11-13T17:30:00+08:00",
+      "topic": "比较四小时和五小时局，客户想再等四小时",
+      "business_exchange_rounds": 2,
+      "outcome": "pending_unknown",
+      "completion_note": "只记录当日选择与原因。人数、时间和任务均归属 11 月 13 日。"
+    },
+    {
+      "id": "owner_chat_duration_fallback_20261127",
+      "start_turn": 8,
+      "end_turn": 15,
+      "started_at": "2026-11-27T13:50:00+08:00",
+      "topic": "客户委托晚六点半凑四小时局，老板约三小时后主动征询五小时备选",
+      "business_exchange_rounds": 2,
+      "outcome": "pending_unknown",
+      "completion_note": "消息结束于客户表示稍等，老板回应。客户是否同意五小时、五小时局的开场和实际缺位、最终是否成局均未知。"
+    }
+  ],
+  "timeline_metrics": {
+    "message_count": 15,
+    "customer_message_count": 9,
+    "boss_message_count": 6,
+    "episode_count": 2,
+    "round_definition": "按一个业务动作及其相关连续往返计一轮。11 月 27 日是委托与承接、备选征询与澄清两轮。"
+  },
+  "supplemental_context": [
+    {
+      "id": "owner_chat_duration_fallback_context_20261127",
+      "source": "user_account",
+      "episode_id": "owner_chat_duration_fallback_20261127",
+      "before_turn": 11,
+      "fact": "老板找不到符合原条件的人，手上有一个五小时备选，因此等了几小时后主动征询客户能否打五小时。",
+      "unknown": ["具体查找路径和尝试次数", "五小时备选的开场、缺位与其他场次条件", "可对客户公开的成员范围", "最后是否同意或成局"]
+    }
+  ],
+  "business_facts": [
+    {
+      "id": "duration_preference_is_historical_context_20261113",
+      "evidence_turns": [1, 2, 3, 4, 5],
+      "fact": "11 月 13 日老板分别描述两个局加上客户后的预计人数。客户选择再等，说明当天想打四小时，因为打晚了回去冷。"
+    },
+    {
+      "id": "fragmented_evening_recruitment_request_20261127",
+      "evidence_turns": [8, 9, 10],
+      "fact": "客户明确委托帮忙找人，分两条补足晚 18:30 和四小时时长。老板以 okk 承接，截图内可见的承接语没有提供实际执行记录。"
+    },
+    {
+      "id": "proactive_duration_question_before_consent_20261127",
+      "evidence_turns": [11, 12, 13, 14, 15],
+      "fact": "老板主动问五小时，客户随后了解人员并表示稍等。‘嗯嗯’来自老板。这个片段停在等待客户决定。"
+    }
+  ],
+  "eval_cases": [
+    {
+      "id": "duration_fallback_primary_requirement_persists_20261127",
+      "context_turns": [8],
+      "input_turn": 9,
+      "expected": {"local_start_time": "18:30", "requested_duration_hours": 4, "goal": "delegated_recruitment", "same_business_task": true}
+    },
+    {
+      "id": "duration_fallback_proactive_offer_requires_revalidation_20261127",
+      "context_turns": [8, 9, 10],
+      "input_turn": 11,
+      "expected": {"reference_kind": "boss_proactive_offer", "requested_duration_hours": 4, "alternative_duration_hours": 5, "requires_current_viable_option_and_active_request": true, "requires_authorized_delivery": true, "customer_choice_pending": true}
+    },
+    {
+      "id": "duration_fallback_lineup_query_is_not_consent_20261127",
+      "context_turns": [8, 9, 10, 11],
+      "input_turn": 12,
+      "expected": {"intent": "ask_about_alternative_lineup", "only_authorized_public_names": true, "requested_duration_hours": 4, "customer_choice_pending": true, "forbidden_actions": ["join_game", "record_candidate_acceptance", "reserve_room", "broadcast_lineup"]}
+    },
+    {
+      "id": "duration_fallback_customer_pause_is_pending_20261127",
+      "context_turns": [8, 9, 10, 11, 12, 13],
+      "input_turn": 14,
+      "expected": {"intent": "ask_for_time_to_consider", "requested_duration_hours": 4, "customer_choice_pending": true, "forbidden_actions": ["join_game", "record_candidate_acceptance", "reserve_room", "cancel_request"]}
+    }
+  ],
+  "replay_scenarios": [
+    {
+      "id": "owner_chat_duration_fallback_20261127",
+      "executable_checks": {
+        "exact_duration_lookup": "tests/test_current_game_duration_constraints.py::test_no_four_hour_match_can_still_have_verified_five_hour_inventory",
+        "after_owner_offer": "scripts/run_owner_duration_fallback_probe.py"
+      },
+      "coverage_gap": "仍需回放从四小时未匹配到授权私聊送达五小时征询的自动触发链路。",
+      "events": [
+        {"actor": "customer", "text": "630可以打个4小时，帮忙问下人哇", "source_turn": 8},
+        {"actor": "customer", "text": "晚上630", "source_turn": 9},
+        {"actor": "boss", "text": "okk", "source_turn": 10},
+        {"actor": "system", "text": "推进到计划开场前 98 分钟。用户补充的观察是原条件未找到人，有一个五小时备选。", "source_context_id": "owner_chat_duration_fallback_context_20261127"},
+        {"actor": "boss", "text": "可以5个小时吗", "source_turn": 11},
+        {"actor": "customer", "text": "哪几个人呀", "source_turn": 12},
+        {"actor": "boss", "text": "牌友甲，嗯，和牌友乙", "source_turn": 13},
+        {"actor": "customer", "text": "稍等一下哈", "source_turn": 14},
+        {"actor": "boss", "text": "嗯嗯", "source_turn": 15}
+      ],
+      "expected": {
+        "primary_request": {"local_start_time": "18:30", "duration_hours": 4},
+        "alternative": {"duration_hours": 5, "status": "awaiting_customer_decision"},
+        "join_or_booking_confirmed": false,
+        "historical_episode_used_as_active_inventory": false
+      }
+    }
+  ]
+}

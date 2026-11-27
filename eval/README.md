@@ -12,6 +12,7 @@
 - `golden/real_owner_chat_transcript_20260705_20260718.md`：上述多日时间线的可读转写，说明简单/复杂场景所需轮次、取消边界和推荐测试输入。
 - `golden/real_owner_chat_timeline_20260627_20260719_owner_b.json`：第二组 11 张真实老板聊天截图清洗出的机器可读时间线，保留 80 条文本、7 个业务片段和 8 个评测 case，重点覆盖代约角色纠正、取消恢复、档位冲突及条件认领。
 - `golden/real_owner_chat_transcript_20260627_20260719_owner_b.md`：第二组时间线的可读转写；第三方昵称已匿名，表情包、图片和不可恢复的撤回内容不进入消息正文。
+- `golden/real_owner_chat_timeline_20261127.json` 与 `golden/real_owner_chat_transcript_20261127.md` 记录客户委托找四小时局、老板隔约三小时征询五小时备选，以及客户询问同桌后表示稍等。11 月 13 日的历史片段保留在独立场景中。
 - `golden/fragmented_input_golden.jsonl`：碎片化输入边界样本，验证等待、超时重触发、发送者隔离和聚合后一次处理。
 - `golden/real_group_chat_20260722.jsonl`：真实微信群观察数据清洗出的高置信群聊 Gold，覆盖看板解析、状态演进、碎片聚合、引用更新、撤回和确定性噪声过滤。
 - `adversarial/privacy_isolation.jsonl`：跨会话隐私对抗样本，一条一个攻击 case，与执行脚本解耦。
@@ -62,6 +63,17 @@ PYTHONPATH=src .venv/bin/python scripts/run_real_owner_chat_live_eval.py --stric
 ```
 
 手测新场景时，记录脱敏输入、前置状态、实际表现与期望结果。例如“客户只问现在几个人”要同时核对回复人数及占座数未变。后端不变量接入确定性测试；模型选工具或理解多轮语义的场景进入 golden 并接入真实回放。若发现失败，再在 badcase 中关联原始证据及修复后的可执行用例。只录入数据、尚未接入回放的场景应继续标记为待覆盖。
+
+### 四小时需求与五小时备选
+
+确定性回归验证同一开场时刻没有四小时匹配时，五小时局仍可通过单独查询核实，并核对局况、预约和外发草稿。定向真模型回放把截图中的老板提议作为历史，按原顺序处理客户问同桌和表示稍等，检查时长、席位及其他业务状态，使用独立语义判定。五小时夹具的开场及可公开名单用于测试，实际局况见 [时间线](golden/real_owner_chat_timeline_20261127.json)。
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_current_game_duration_constraints.py
+PYTHONPATH=src .venv/bin/python scripts/run_owner_duration_fallback_probe.py
+```
+
+定向回放使用本机模型配置，在 `runtime_data/owner_duration_fallback/` 为每次执行保留 SQLite、原始 trace 和语义报告。自动发现备选、触发征询和授权私聊送达仍待接入端到端回放。运营取舍见 [复查与备选征询](../docs/duration_fallback_follow_up_20261127.md)。
 
 日常提交、合入、推送和发布按受影响层选择验证。仅新增或改动单个评测用例时，检查它的源资产、本例及相邻反例。改动共享执行逻辑、模型输入或安全边界时，按依赖关系扩大相关检查。影响面仍不清楚时，列出待验范围，由维护者决定是否启动完整门禁。
 

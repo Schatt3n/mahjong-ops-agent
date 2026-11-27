@@ -79,6 +79,31 @@ def test_exact_duration_and_limit_are_applied_before_results_are_truncated(durat
     assert payload['customer_reply_contract']['evidence_scope']['applied_filter_fields'] == ['duration_hours']
 
 
+def test_no_four_hour_match_can_still_have_verified_five_hour_inventory(duration_store):
+    """四小时查空时，另一次只读查询仍能核实五小时的可选局。"""
+    store, ids = duration_store
+    for label in ('four', 'unknown'):
+        store.update_game_status(game_id=ids[label], status='cancelled',
+            reason='fixture-unavailable', trace_id=f'close-seed-{label}')
+    five_hour_game = store.require_game(ids['five'])
+    opening = {'planned_start_at': five_hour_game.planned_start_at.isoformat()}
+    scheduled_tasks = deepcopy(store.scheduled_tasks)
+
+    four_hours = query(duration_store, {**opening, 'duration_hours': 4})
+    assert not four_hours['matches'] and not four_hours['alternatives']
+    assert four_hours['requirement']['duration_hours'] == 4
+    scope = four_hours['customer_reply_contract']['evidence_scope']
+    assert scope['unfiltered_available_pool_empty'] is False
+    assert scope['supports_narrower_empty_claim'] is False
+
+    five_hours = query(duration_store, {**opening, 'duration_hours': 5})
+    assert [row['game']['game_id'] for row in five_hours['matches']] == [ids['five']]
+    assert five_hours['matches'][0]['game']['requirement']['duration_hours'] == 5
+    assert not five_hours['alternatives']
+    assert store.scheduled_tasks == scheduled_tasks
+    assert not store.room_reservations
+
+
 def test_unknown_duration_requires_confirmation_even_with_supporting_profile(duration_store):
     _, ids = duration_store
     payload = query(duration_store, {'game_type': 'hangzhou_mahjong', 'max_duration_hours': 2})

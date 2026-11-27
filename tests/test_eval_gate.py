@@ -1118,9 +1118,13 @@ def test_owner_source_contract_loads_real_catalog_and_all_golden_fragments():
     assert "known_three_person_party_matches_capacity" in contract["scenario_ids"]
     assert all(ids and len(ids) == len(set(ids)) for ids in contract["criterion_ids"].values())
     assert contract["timeline_assets"]["live_status"] == "not_run"
-    assert len(contract["timeline_assets"]["files"]) == 2
-    assert sum(asset["eval_case_count"] for asset in contract["timeline_assets"]["files"]) == 17
-    assert sum(asset["replay_scenario_count"] for asset in contract["timeline_assets"]["files"]) == 13
+    timeline_counts = {asset["file"]: (asset["eval_case_count"], asset["replay_scenario_count"])
+                       for asset in contract["timeline_assets"]["files"]}
+    assert timeline_counts == {
+        "real_owner_chat_timeline_20260627_20260719_owner_b.json": (8, 7),
+        "real_owner_chat_timeline_20260705_20260718.json": (9, 6),
+        "real_owner_chat_timeline_20261127.json": (4, 1),
+    }
 
 
 def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_artifacts(gate, monkeypatch, capsys):
