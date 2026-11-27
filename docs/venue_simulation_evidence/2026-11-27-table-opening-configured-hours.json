@@ -1,0 +1,20 @@
+{
+  "baseline": "3c435ad",
+  "source": "controlled SQLite reproduction through VenueTableOpening",
+  "original_default_venue": {"opens": "12:00", "closes": "23:50"},
+  "before_fix": {
+    "table_kind": "asap_when_full",
+    "opening_not_before_at": null,
+    "votes_for_impossible_opening": 4,
+    "stored_start": "2026-11-27T20:15:00+08:00",
+    "stored_end": "2026-11-28T00:15:00+08:00"
+  },
+  "verified_controls": [
+    "未设开场下界的桌也需遵守营业时段、已约定时长及原招募到期。营业前和无法在关门前散场的提议均不发送。",
+    "12:00 至次日 06:00 与连续营业两种配置下，尚有效的普通桌可经四票约为 00:30 至 04:30，送达文字含明确日期。",
+    "有原当日到店下界的桌仍以原店家业务库的午夜到期为准。23:50 至 03:50 可在提前确认后跨日结束，次日 00:30 才开始超出原有效期。",
+    "开场已过或恰好到期不能提议。定了更早开场后，既有提议仍按原送达记录回放，不能被新的生命周期当成新提议。"
+  ],
+  "test": "tests/simulation/test_venue_table_opening.py",
+  "scope": "模拟桌群提议、四票及正式开场约定。跨日物理占房需要另一项验证。"
+}

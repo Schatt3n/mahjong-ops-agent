@@ -28,6 +28,19 @@ def table_opening_confirmation_text(start: datetime, *, at: datetime) -> str:
     return f"那就 {when} 开，大家按这个时间到哈。"
 
 
+def _within_venue_hours(start: datetime, end: datetime | None) -> bool:
+    """按配置区分正常关门、跨日关门和全天营业。"""
+    opens = time.fromisoformat(VENUE["opens"])
+    closes = time.fromisoformat(VENUE["closes"])
+    if opens == closes:
+        return end is None or end > start
+    overnight = closes < opens
+    business_date = start.date() - timedelta(days=1) if overnight and start.time() < closes else start.date()
+    opened_at = datetime.combine(business_date, opens, tzinfo=DEFAULT_TZ)
+    closed_at = datetime.combine(business_date + timedelta(days=int(overnight)), closes, tzinfo=DEFAULT_TZ)
+    return opened_at <= start < closed_at and (end is None or start < end <= closed_at)
+
+
 class VenueTableOpening:
     """仿真中从人齐开确定开场的窄入口，保留同一 Game 的原四个席位。"""
 
@@ -55,40 +68,41 @@ class VenueTableOpening:
 
     def proposal_message(self, message_id: str, *, at: datetime, start_at: datetime) -> MessageEnvelope:
         """生成有绝对日期的明确提议，发给当前小群供四人分别表态。"""
+        message = self._proposal_envelope(message_id, at=at, start_at=start_at)
+        if not self.accepts_bounded_proposal(start_at):
+            raise ValueError("table opening proposal falls outside the verified opening or venue hours")
+        return message
+
+    def _proposal_envelope(self, message_id: str, *, at: datetime, start_at: datetime) -> MessageEnvelope:
+        """回放先核对当时发送的原文，旧版预约不会被当前到期时间改写。"""
         stamp, start = _local(at), _local(start_at)
         if start <= stamp or start.second or start.microsecond:
             raise ValueError("table opening proposal must be a future minute boundary")
-        if not self.accepts_bounded_proposal(start):
-            raise ValueError("table opening proposal falls outside the verified opening or venue hours")
         when = start.strftime("%H:%M" if start.date() == stamp.date() else "%m月%d日 %H:%M")
         return MessageEnvelope(message_id, AGENT_ID, f"{when} 开大家能到吗？都行的话就定这个时间。",
                                stamp, "group", self.group.room_id)
 
     def accepts_bounded_proposal(self, start: datetime, *, same_day_as: datetime | None = None) -> bool:
-        """核对牌局开场边界。按到店下界重提议时也核对当日营业时长。"""
+        """核对牌局、营业与明确时长，跨日修订须仍在同一连续营业时段。"""
         start = _local(start)
-        if same_day_as is not None and _local(same_day_as).date() != start.date():
-            return False
-        return self._within_bounded_opening(self.store.require_game(self.game_id), start,
-                                            check_venue_hours=same_day_as is not None)
+        if same_day_as is not None:
+            previous = _local(same_day_as)
+            if previous.date() != start.date() and not _within_venue_hours(previous, start):
+                return False
+        return self._within_bounded_opening(self.store.require_game(self.game_id), start)
 
     @staticmethod
-    def _within_bounded_opening(game, start: datetime, *, check_venue_hours: bool = False) -> bool:
+    def _within_bounded_opening(game, start: datetime) -> bool:
         floor = flexible_opening_not_before(game.requirement)
-        if floor is None and not check_venue_hours:
-            return True
-        closing = datetime.combine(start.date(), time.fromisoformat(VENUE["closes"]), tzinfo=DEFAULT_TZ)
         end = (start + timedelta(hours=duration_hours_from_requirement(game.requirement))
                if has_agreed_game_duration(game.requirement) else None)
-        return ((floor is None or floor.date() == start.date() and floor <= start) and start < closing
-                and start.time() >= time.fromisoformat(VENUE["opens"])
-                and (game.expires_at is None or start < game.expires_at)
-                and (end is None or end <= closing))
+        return ((floor is None or floor <= start) and (game.expires_at is None or start < game.expires_at)
+                and _within_venue_hours(start, end))
 
     def record_proposal(self, receipt: TableGroupReceipt, *, start_at: datetime) -> None:
         """只有四席主人实际收到的那份店家提议才成为有效版本。"""
         message = receipt.message
-        expected = self.proposal_message(message.message_id, at=message.sent_at, start_at=start_at)
+        expected = self._proposal_envelope(message.message_id, at=message.sent_at, start_at=start_at)
         if (replace(message, sent_at=_local(message.sent_at), quoted_message_id=None) != expected
                 or receipt not in self.group.delivered_receipts()):
             raise ValueError("table opening proposal needs its exact delivered shop message")

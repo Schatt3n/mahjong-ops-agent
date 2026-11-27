@@ -10,6 +10,7 @@ from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.models import DEFAULT_TZ, GameStatus, using_clock
 
 from .venue_channel import AGENT_ID, MessageEnvelope
+from .venue_scenario import VENUE
 from .venue_table_group import VenueTableGroup
 from .venue_table_opening import VenueTableOpening
 
@@ -20,7 +21,7 @@ _EARLY = _OPEN.replace(hour=19, minute=0)
 _LATE = _EARLY + timedelta(minutes=30)
 
 
-def _table(tmp_path, *, anonymous=False, duration_hours=4, opening_floor=None):
+def _table(tmp_path, *, anonymous=False, duration_hours=4, opening_floor=None, opened_at=_OPEN):
     """经正式建桌和报名形成一张尚未定时的人齐开局。"""
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
     requirement = {"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
@@ -29,7 +30,7 @@ def _table(tmp_path, *, anonymous=False, duration_hours=4, opening_floor=None):
         requirement["duration_hours"] = duration_hours
     if opening_floor is not None:
         requirement["opening_not_before_at"] = opening_floor.isoformat()
-    with using_clock(lambda: _OPEN - timedelta(minutes=3)):
+    with using_clock(lambda: opened_at - timedelta(minutes=3)):
         store.configure_rooms(["room"])
         game, _ = store.create_game(
             conversation_id="owner-dm-a", organizer_id="a", organizer_name="A",
@@ -40,7 +41,7 @@ def _table(tmp_path, *, anonymous=False, duration_hours=4, opening_floor=None):
         for actor in _MEMBERS[1:3] if anonymous else _MEMBERS[1:]:
             store.join_game(game_id=game.game_id, customer_id=actor, display_name=actor, trace_id=f"join:{actor}")
     group = VenueTableGroup(store, tmp_path / "table.sqlite3", game.game_id,
-                           actor_ids=(*_MEMBERS, "outsider"), opened_at=_OPEN)
+                           actor_ids=(*_MEMBERS, "outsider"), opened_at=opened_at)
     return store, game.game_id, group, VenueTableOpening(group)
 
 
@@ -139,6 +140,60 @@ def test_four_delivered_answers_set_the_same_opening_and_preserve_the_four_hour_
     end = _LATE + timedelta(hours=4)
     ended, _ = reopened.finish_game_play(game_id, at=end, trace_id="physical-finish")
     assert ended.actual_ended_at == end and reopened.room_reservations[reservation.reservation_id].status == "released"
+
+
+@pytest.mark.parametrize("opened_hour,invalid_hour", [(18, 20), (9, 10)])
+def test_no_floor_cannot_offer_a_game_outside_configured_venue_hours(tmp_path, opened_hour, invalid_hour):
+    opened_at = _OPEN.replace(hour=opened_hour)
+    store, game_id, group, opening = _table(tmp_path, opened_at=opened_at)
+    invalid = _OPEN.replace(hour=invalid_hour, minute=15)
+    assert not opening.accepts_bounded_proposal(invalid)
+    with pytest.raises(ValueError, match="verified opening or venue hours"):
+        opening.proposal_message("outside-venue", at=opened_at, start_at=invalid)
+    assert not group.delivered_receipts() and store.require_game(game_id).planned_start_at is None
+
+
+@pytest.mark.parametrize("closes", ["06:00", "12:00"])
+@pytest.mark.parametrize("bounded", [False, True])
+def test_opening_can_cross_midnight_within_configured_hours_and_original_expiry(tmp_path, monkeypatch, closes, bounded):
+    monkeypatch.setitem(VENUE, "closes", closes)
+    opened_at = _OPEN.replace(hour=22, minute=30)
+    floor = opened_at.replace(hour=23, minute=40) if bounded else None
+    after_midnight = (opened_at + timedelta(days=1)).replace(hour=0, minute=30)
+    start = opened_at.replace(hour=23, minute=50) if bounded else after_midnight
+    store, game_id, group, opening = _table(tmp_path, opening_floor=floor, opened_at=opened_at)
+    assert opening.accepts_bounded_proposal(start, same_day_as=opened_at.replace(hour=23))
+    assert opening.accepts_bounded_proposal(after_midnight, same_day_as=opened_at.replace(hour=23)) is not bounded
+    expiry = store.require_game(game_id).expires_at
+    assert expiry > start and not opening.accepts_bounded_proposal(expiry)
+    with pytest.raises(ValueError, match="future minute boundary"):
+        opening.proposal_message("elapsed", at=opened_at, start_at=opened_at - timedelta(minutes=1))
+    proposal = group.send(opening.proposal_message("overnight", at=opened_at, start_at=start))
+    assert proposal.message.text.startswith("23:50" if bounded else "11月28日 00:30")
+    opening.record_proposal(proposal, start_at=start)
+    for minute, member in enumerate(_MEMBERS, 1):
+        reply = group.send(MessageEnvelope(f"reply:{member}", member, "这个时间可以。", opened_at + timedelta(minutes=minute),
+                                          "group", group.room_id, proposal.message.message_id))
+        result = opening.record_vote(reply, proposal_id=proposal.message.message_id, accepts=True)
+    game = store.require_game(game_id)
+    assert result == "committed" and game.planned_start_at == start and game.planned_end_at == start + timedelta(hours=4)
+
+
+def test_replaying_an_old_proposal_uses_its_saved_receipt_after_an_earlier_opening(tmp_path):
+    opened_at = _OPEN.replace(hour=12)
+    first, latest = (opened_at.replace(hour=hour, minute=minute) for hour, minute in ((15, 0), (12, 30)))
+    store, game_id, group, opening = _table(tmp_path, duration_hours=1, opened_at=opened_at)
+    old = group.send(opening.proposal_message("old", at=opened_at, start_at=first))
+    opening.record_proposal(old, start_at=first)
+    updated = group.send(opening.proposal_message("latest", at=opened_at + timedelta(minutes=1), start_at=latest))
+    opening.record_proposal(updated, start_at=latest)
+    for minute, member in enumerate(_MEMBERS, 2):
+        reply = group.send(MessageEnvelope(f"yes:{member}", member, "这个时间可以。", opened_at + timedelta(minutes=minute),
+                                          "group", group.room_id, updated.message.message_id))
+        opening.record_vote(reply, proposal_id=updated.message.message_id, accepts=True)
+    assert store.require_game(game_id).expires_at < first and opening.current()["committed"]
+    opening.record_proposal(old, start_at=first)
+    assert opening.current()["proposal_id"] == updated.message.message_id
 
 
 def test_unseen_or_inaccurate_proposal_cannot_supply_opening_authority(tmp_path):
