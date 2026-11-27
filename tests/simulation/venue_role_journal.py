@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 from hashlib import sha256
 import json
@@ -13,6 +13,9 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Literal
 from uuid import uuid4
+
+
+ROLE_REPLY_DELAY = timedelta(minutes=2)
 
 
 class RoleSchedulerBusyError(RuntimeError):

@@ -16,6 +16,10 @@ from .venue_table_group import TableGroupReceipt, VenueTableGroup
 from .venue_scenario import VENUE
 
 
+TABLE_OPENING_OFFER_PREFIX = "table-opening-offer|"
+TABLE_OPENING_OFFER_LIMIT = 3
+
+
 class VenueTableOpening:
     """仿真中从人齐开确定开场的窄入口，保留同一 Game 的原四个席位。"""
 
@@ -52,19 +56,23 @@ class VenueTableOpening:
         return MessageEnvelope(message_id, AGENT_ID, f"{when} 开大家能到吗？都行的话就定这个时间。",
                                stamp, "group", self.group.room_id)
 
-    def accepts_bounded_proposal(self, start: datetime) -> bool:
-        """只为有明确下界的试点牌局核对开场和已约定的营业时长。"""
-        return self._within_bounded_opening(self.store.require_game(self.game_id), _local(start))
+    def accepts_bounded_proposal(self, start: datetime, *, same_day_as: datetime | None = None) -> bool:
+        """核对牌局开场边界。按到店下界重提议时也核对当日营业时长。"""
+        start = _local(start)
+        if same_day_as is not None and _local(same_day_as).date() != start.date():
+            return False
+        return self._within_bounded_opening(self.store.require_game(self.game_id), start,
+                                            check_venue_hours=same_day_as is not None)
 
     @staticmethod
-    def _within_bounded_opening(game, start: datetime) -> bool:
+    def _within_bounded_opening(game, start: datetime, *, check_venue_hours: bool = False) -> bool:
         floor = flexible_opening_not_before(game.requirement)
-        if floor is None:
+        if floor is None and not check_venue_hours:
             return True
         closing = datetime.combine(start.date(), time.fromisoformat(VENUE["closes"]), tzinfo=DEFAULT_TZ)
         end = (start + timedelta(hours=duration_hours_from_requirement(game.requirement))
                if has_agreed_game_duration(game.requirement) else None)
-        return (floor.date() == start.date() and floor <= start < closing
+        return ((floor is None or floor.date() == start.date() and floor <= start) and start < closing
                 and start.time() >= time.fromisoformat(VENUE["opens"])
                 and (game.expires_at is None or start < game.expires_at)
                 and (end is None or end <= closing))

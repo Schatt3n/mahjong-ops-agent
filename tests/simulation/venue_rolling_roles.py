@@ -19,13 +19,14 @@ from .venue_actors import COMPANION_ACTION_STAGES, ActorContext, ModelActor
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
 from .venue_judging import ROLLING_REVIEW_INSTRUCTIONS, review_dialogue, shop_reply_verdicts
-from .venue_role_journal import RoleEvent, VenueRoleJournal
+from .venue_role_journal import ROLE_REPLY_DELAY, RoleEvent, VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
 from .venue_rolling_companions import TABLE_COMPANION_WAKE, VenueRollingCompanions
 from .venue_rolling_history import deliver_rolling_group_history
 from .venue_rolling_play_link import PLAY_ROLE_KINDS, PLAY_TICK_KIND, VenueRollingPlayLink
 from .venue_rolling_world import VenueRollingWorld
 from .venue_table_group import StaleTableGroupRoster, VenueTableGroup
+from .venue_table_opening import TABLE_OPENING_OFFER_LIMIT, TABLE_OPENING_OFFER_PREFIX
 from .venue_world import VenueWorld
 
 
@@ -33,7 +34,6 @@ _WORLD_WAKES = {"rain", "traffic"}
 _OVERTIME_WAKE = "overtime"
 _TABLE_RECEIPT_WAKE = "table_receipt"
 _RECEIPT_WAKES = {"private_receipt", "group_attention", "peer_receipt", _TABLE_RECEIPT_WAKE}
-_WAIT_FOR_REPLY = timedelta(minutes=2)
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
 _ROLE_GOALS = {"lookup", "try_join", "organize_new", "wait_or_leave", "group"}
 _BOARD_WAKE = "board_publication"
@@ -95,7 +95,7 @@ class VenueRollingRoles:
         self.journal = VenueRoleJournal(self.run_dir / VenueRoleJournal.filename)
         cutoff = (start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
         self.companions = (VenueRollingCompanions(channel, self.journal, self.actors,
-                           response_delay=_WAIT_FOR_REPLY, cutoff=cutoff) if table_groups else None)
+                           response_delay=ROLE_REPLY_DELAY, cutoff=cutoff) if table_groups else None)
         self.play = (VenueRollingPlayLink(VenueRollingWorld(channel.runtime.store, self.run_dir), channel, self.journal,
                     active_actors=self.actors, allow_controlled=not isinstance(actor, ModelActor)) if physical_play else None)
         self._private_world: dict[tuple, dict] = {}
@@ -407,9 +407,9 @@ class VenueRollingRoles:
         return actor_id, at.astimezone(self.start_at.tzinfo).date()
 
     def _receipt_budget(self, actor_id: str, at: datetime, kind: str, room_id: str | None,
-                        *, from_shop: bool = False, revision_id: str | None = None) -> tuple:
-        """每个小群分别给同桌来话和店家来话留额度，避免同桌表态挤掉新版提议。"""
-        table_bucket = (room_id, from_shop, revision_id) if kind == _TABLE_RECEIPT_WAKE else None
+                        *, from_shop: bool = False, revision_id: str | None = None, opening_offer: bool = False) -> tuple:
+        """每个小群分别给同桌来话、店家通知及需要独立投票的开场提议留额度。"""
+        table_bucket = (room_id, from_shop, revision_id, opening_offer) if kind == _TABLE_RECEIPT_WAKE else None
         return self._day_key(actor_id, at), kind, table_bucket
 
     def _seed_timers(self) -> None:
@@ -481,6 +481,7 @@ class VenueRollingRoles:
                 self._receipt_counts[self._receipt_budget(
                     event.actor_id, event.due_at, event.kind, room_id, from_shop=bool(from_shop),
                     revision_id=event.details.get("table_roster_revision"),
+                    opening_offer=bool(from_shop and event.origin_id.startswith(TABLE_OPENING_OFFER_PREFIX)),
                 )] += 1
             elif event.kind in _TABLE_FIRST_CONTACTS:
                 self._table_openings.add(event.origin_id)
@@ -589,8 +590,11 @@ class VenueRollingRoles:
         elif event.kind == _TABLE_RECEIPT_WAKE:
             private["case_intent"] = (
                 "这是同桌小群真正收到的消息。按自己日程和小群内容提出可行时间、回应别人或先等。"
+                "如果店家已在这个小群说明本桌人齐，你已有席位，可以谈开场和出行，不必再次找位。"
+                "同行提醒只接自己确实登记或认识的同行，别替别人的同行作答。"
                 "已经明确答复过当前提议时，其他人只报自己的意见，你可以等店家定下来。"
-                "有新时间、条件变化或别人真在问你，再回需要补充的那件事。"
+                "以前的到店估计还适用时不用反复更新。现在出发的推算随时间前移，不代表已经出门或路况变了。"
+                "新提议确实赶不上时可以说清现在最早能到的时间。"
             )
         private_cue = overtime or event.kind in {*PLAY_ROLE_KINDS, TABLE_COMPANION_WAKE}
         groups = (self.channel.room_id,) if event.actor_id in self.group_members else ()
@@ -755,7 +759,7 @@ class VenueRollingRoles:
         # 桌群店家处理事件已沿顾客来话加了一次深度。同一时刻的店家回复沿用这次深度。
         if parent.kind != _TABLE_SHOP_WAKE:
             depth += 1
-        due = parent.due_at + _WAIT_FOR_REPLY
+        due = parent.due_at + ROLE_REPLY_DELAY
         within_run = due.astimezone(self.start_at.tzinfo).date() <= (self.start_at + timedelta(days=1)).date()
         scheduled = []
         for item in sorted(messages, key=lambda entry: entry["kind"] != "private"):
@@ -767,7 +771,11 @@ class VenueRollingRoles:
                     due_at=parent.due_at, caused_by=message_id, details={"game_id": item["table_game_id"], "depth": depth})
                 scheduled.append(shop.event_id)
             turns = max(self.dialogue_turns, _MIN_TABLE_DIALOGUE_TURNS) if table_room else self.dialogue_turns
-            if depth >= turns or not within_run:
+            from_shop = item["sender_id"] == AGENT_ID
+            opening_offer = bool(table_room and from_shop and message_id.startswith(TABLE_OPENING_OFFER_PREFIX))
+            # 店家提议有自己的版本上限，深一层的同桌讨论也须让四席看到新版并独立表态。
+            wake_depth = min(depth, turns - 1) if opening_offer else depth
+            if wake_depth >= turns or not within_run:
                 continue
             if item["kind"] == "private":
                 audience = (item["recipient_id"],)
@@ -783,13 +791,13 @@ class VenueRollingRoles:
                 if saved := self._receipts.get(key):
                     scheduled.append(saved)
                     continue
-                from_shop = item["sender_id"] == AGENT_ID
                 budget = self._receipt_budget(actor_id, due, kind, table_room, from_shop=from_shop,
-                                              revision_id=revision_id)
+                                              revision_id=revision_id, opening_offer=opening_offer)
+                receipt_limit = TABLE_OPENING_OFFER_LIMIT if opening_offer else turns - 1
                 if (actor_id not in self.actors or actor_id == item["sender_id"]
-                        or self._receipt_counts[budget] >= turns - 1):
+                        or self._receipt_counts[budget] >= receipt_limit):
                     continue
-                details = {"depth": depth}
+                details = {"depth": wake_depth}
                 if table_room:
                     details.update(table_room_id=table_room, table_shop_delivery=from_shop, table_roster_revision=revision_id)
                 wake = self.journal.enqueue(actor_id=actor_id, kind=kind, origin_id=message_id,
@@ -807,7 +815,7 @@ class VenueRollingRoles:
             return row
         if event.details.get("depth", 0) + 1 >= self.dialogue_turns:
             row["private_followup_boundary"] = "dialogue_turn_limit"
-        elif (event.due_at + _WAIT_FOR_REPLY).astimezone(self.start_at.tzinfo).date() > (
+        elif (event.due_at + ROLE_REPLY_DELAY).astimezone(self.start_at.tzinfo).date() > (
             self.start_at + timedelta(days=1)
         ).date():
             row["private_followup_boundary"] = "observation_day_limit"

@@ -1,0 +1,362 @@
+{
+  "source_run": "table-opening-g3avprap",
+  "source_revision": "7463491",
+  "game_id": "game_39e9ced687ab",
+  "observed_checks": {
+    "captain_has_one_anonymous_seat_and_one_known_companion": true,
+    "peer_terms_actually_delivered_to_both": true,
+    "peer_history_private_to_captain_and_friend": true,
+    "fixture_calendars_match_case": true,
+    "real_model_actions": true,
+    "companion_saw_peer_terms": true,
+    "exact_private_invitation_source": true,
+    "bystander_cannot_see_table_chat": true,
+    "confirmed_once_with_four_real_votes": false,
+    "opening_fits_every_actual_calendar": false
+  },
+  "observed_settlement": {
+    "proposal_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+    "start_at": "2026-11-27T18:12:00+08:00",
+    "accepted_count": 3,
+    "declined_count": 0,
+    "committed": false
+  },
+  "verified_cards": [
+    {
+      "action": {
+        "action": "invite_companion"
+      },
+      "cause": "table-companion-inquiry:game_39e9ced687ab",
+      "card": {
+        "accepted": null,
+        "invitation_id": "table-invite:role-event:54ab713dd261bc5dde6e3b5bc001117507b5ba150fa9bd6964e0f558a9682e22",
+        "invited_at": "2026-11-27T09:32:00+00:00",
+        "inviter_id": "venue-sender-0013",
+        "recipient_id": "venue-sender-0001",
+        "response_at": null
+      },
+      "response_source": {
+        "call_id": "llm_call_b174abb8800c46a1bdd2550b4c7d6285",
+        "http_response_complete": true,
+        "raw_response_sha256": "dc573e4d6b3968c6778ee6860871ce0e2e72bf381cbb48028cf34556f160311d",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_2ad9d5f5180c49ee9150193eb4ce0df9",
+        "trace_id": "role:role-event:54ab713dd261bc5dde6e3b5bc001117507b5ba150fa9bd6964e0f558a9682e22"
+      }
+    },
+    {
+      "action": {
+        "action": "accept_companion"
+      },
+      "cause": "table-invite:role-event:54ab713dd261bc5dde6e3b5bc001117507b5ba150fa9bd6964e0f558a9682e22",
+      "card": {
+        "accepted": true,
+        "invitation_id": "table-invite:role-event:54ab713dd261bc5dde6e3b5bc001117507b5ba150fa9bd6964e0f558a9682e22",
+        "invited_at": "2026-11-27T09:32:00+00:00",
+        "inviter_id": "venue-sender-0013",
+        "recipient_id": "venue-sender-0001",
+        "response_at": "2026-11-27T09:34:00+00:00"
+      },
+      "response_source": {
+        "call_id": "llm_call_d7e198b3c1094051b8bb091096049e1f",
+        "http_response_complete": true,
+        "raw_response_sha256": "94bffddc74b090a3f6956b0b5262f4315b4e9250d23440b93409c0b24c7d52ae",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_a2f75783f3064abbb47c304d22f0d14a",
+        "trace_id": "role:role-event:c864195c62a4efcfc2e18ec4d3722381f4429aa77907acbd4afec8ad43695c2b"
+      }
+    }
+  ],
+  "related_chat": [
+    {
+      "sequence": 1,
+      "message_id": "companion-probe-peer-1",
+      "sender_id": "venue-sender-0013",
+      "kind": "private",
+      "sent_at": "2026-11-27T01:30:00+00:00",
+      "text": "今晚想一起去打无烟杭麻不？一块底，大概打四个小时，想六点半到七点之间开。你要是想去我先找老板帮咱俩留位置。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 2,
+      "message_id": "companion-probe-peer-2",
+      "sender_id": "venue-sender-0001",
+      "kind": "private",
+      "sent_at": "2026-11-27T01:31:00+00:00",
+      "text": "我有兴趣，你先问吧。几点开还得看我排班，有群了叫我一声。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 3,
+      "message_id": "table-companion-inquiry:game_39e9ced687ab",
+      "sender_id": "simulation-agent",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:30:00+00:00",
+      "text": "带朋友来的，麻烦把还没进群的同行拉进来哈。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 7,
+      "message_id": "table-opening-inquiry:game_39e9ced687ab",
+      "sender_id": "simulation-agent",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:34:00+00:00",
+      "text": "人齐了，这桌打 4 小时。大家各自几点能到？咱们在这儿定个开场。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 10,
+      "message_id": "customer:role-event:649fa160bd3590fcabc11f00116c86fb66d035b4e58c698009c20fc64505043b",
+      "sender_id": "venue-sender-0015",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:36:00+00:00",
+      "text": "老板好，我从城另一头过去，最早18:10到，能搭一桌吗",
+      "quoted_message_id": "table-opening-inquiry:game_39e9ced687ab"
+    },
+    {
+      "sequence": 13,
+      "message_id": "customer:role-event:347b9d95fe685b0055a8b4cf527a27254a321c22a7917056b225d5262e3123ae",
+      "sender_id": "venue-sender-0015",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:38:00+00:00",
+      "text": "我也在等老板回开场，我这边最早18:12到，四小时的桌能搭上吗",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 18,
+      "message_id": "customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+      "sender_id": "venue-sender-0013",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:38:00+00:00",
+      "text": "我这边六点前能到，不用等我太早，老板定开就成。",
+      "quoted_message_id": "customer:role-event:649fa160bd3590fcabc11f00116c86fb66d035b4e58c698009c20fc64505043b"
+    },
+    {
+      "sequence": 20,
+      "message_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+      "sender_id": "simulation-agent",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:38:00+00:00",
+      "text": "18:12 开大家能到吗？都行的话就定这个时间。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 21,
+      "message_id": "customer:role-event:6371d44f26fe1db2401791d6677e8812c384f74c0f333926c7197737f1f08a28",
+      "sender_id": "venue-sender-0001",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:40:00+00:00",
+      "text": "好，18:12 我能到。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 22,
+      "message_id": "customer:role-event:3e5936d2ed15bbc903b61efe0028f62aed04b4d9a8759302ca59a4ada9432ea8",
+      "sender_id": "venue-sender-0013",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:40:00+00:00",
+      "text": "18:12 我能到，就定这个时间吧。",
+      "quoted_message_id": null
+    },
+    {
+      "sequence": 23,
+      "message_id": "customer:role-event:aecf11134083a9cf7fc944932d9164a8a9ff8f55d4f584e99d48b2d3256697e0",
+      "sender_id": "venue-sender-0015",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:40:00+00:00",
+      "text": "老板好，18:12 我这边最早 18:14 才能到，晚两分钟能搭一桌吗？",
+      "quoted_message_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e"
+    },
+    {
+      "sequence": 24,
+      "message_id": "customer:role-event:0ad706f70ebe39f937cee2ce610e09a5c96d537130823a7786a4b510e33e5a90",
+      "sender_id": "venue-sender-0018",
+      "kind": "group",
+      "sent_at": "2026-11-27T09:40:00+00:00",
+      "text": "老板，18:12 我能到。",
+      "quoted_message_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e"
+    }
+  ],
+  "shop_ballots_and_original_proposal": [
+    {
+      "message_id": "customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+      "active_proposal": null,
+      "raw_result": {
+        "vote": "other",
+        "proposed_start": "2026-11-27T18:12:00+08:00"
+      },
+      "call_id": "llm_call_e1485e4a3d134ca382ff7aa724ae58e1",
+      "terminal_attempt_id": "llm_attempt_c0c08421356d42de8cc70d2122a31393",
+      "raw_response_sha256": "062d20d18a20a81a264ccac64ec147dbfd697ff44cf6849aaf85ebff680941f6",
+      "http_response_complete": true
+    },
+    {
+      "message_id": "customer:role-event:6371d44f26fe1db2401791d6677e8812c384f74c0f333926c7197737f1f08a28",
+      "active_proposal": {
+        "proposal_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+        "start_at": "2026-11-27T18:12:00+08:00",
+        "accepted_count": 0,
+        "declined_count": 0,
+        "committed": false
+      },
+      "raw_result": {
+        "vote": "accept",
+        "proposed_start": null
+      },
+      "call_id": "llm_call_bfa66f0713f44aa38075e3d9af573d0e",
+      "terminal_attempt_id": "llm_attempt_f021c654ba324ea5858726644dc9b061",
+      "raw_response_sha256": "df27ebbc7e06f29e8a82df26c9cbc00f3bbc8c1c2a2a98732eb56f884301741d",
+      "http_response_complete": true
+    },
+    {
+      "message_id": "customer:role-event:3e5936d2ed15bbc903b61efe0028f62aed04b4d9a8759302ca59a4ada9432ea8",
+      "active_proposal": {
+        "proposal_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+        "start_at": "2026-11-27T18:12:00+08:00",
+        "accepted_count": 1,
+        "declined_count": 0,
+        "committed": false
+      },
+      "raw_result": {
+        "vote": "accept",
+        "proposed_start": "2026-11-27T18:12:00+08:00"
+      },
+      "call_id": "llm_call_8645ff6f44fa4c14b8541c4356ecffa5",
+      "terminal_attempt_id": "llm_attempt_48f62e23d96948989db3777e330165c0",
+      "raw_response_sha256": "3af0af30f50304dbdf7235ef3ebdd329e6868b78611c908b54b49cf8223324a0",
+      "http_response_complete": true
+    },
+    {
+      "message_id": "customer:role-event:aecf11134083a9cf7fc944932d9164a8a9ff8f55d4f584e99d48b2d3256697e0",
+      "active_proposal": {
+        "proposal_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+        "start_at": "2026-11-27T18:12:00+08:00",
+        "accepted_count": 2,
+        "declined_count": 0,
+        "committed": false
+      },
+      "raw_result": {
+        "vote": "other",
+        "proposed_start": null
+      },
+      "call_id": "llm_call_547028de535a4ae187493673b9bee513",
+      "terminal_attempt_id": "llm_attempt_dab7428dcc4641e49c96cedd367fa523",
+      "raw_response_sha256": "5306492f3767015fe77374074a9ef159d659db0a98dbaf3d0e7359e09a9ce08b",
+      "http_response_complete": true
+    },
+    {
+      "message_id": "customer:role-event:0ad706f70ebe39f937cee2ce610e09a5c96d537130823a7786a4b510e33e5a90",
+      "active_proposal": {
+        "proposal_id": "table-opening-offer|2026-11-27T18:12:00+08:00|customer:role-event:68f749f792769b623971ba29e76e879d2be286e7e3490f8144a1b4b5adca2a7e",
+        "start_at": "2026-11-27T18:12:00+08:00",
+        "accepted_count": 2,
+        "declined_count": 0,
+        "committed": false
+      },
+      "raw_result": {
+        "vote": "accept",
+        "proposed_start": null
+      },
+      "call_id": "llm_call_b2576e5e871440d29a10e60e814ba5ee",
+      "terminal_attempt_id": "llm_attempt_58e176955ddf45efa9a90540cbadeb4d",
+      "raw_response_sha256": "df27ebbc7e06f29e8a82df26c9cbc00f3bbc8c1c2a2a98732eb56f884301741d",
+      "http_response_complete": true
+    }
+  ],
+  "actor_timing_diagnostics_for_evaluation_only": [
+    {
+      "message_id": "customer:role-event:649fa160bd3590fcabc11f00116c86fb66d035b4e58c698009c20fc64505043b",
+      "virtual_at": "2026-11-27T17:36:00+08:00",
+      "role_only_earliest_if_departing": "2026-11-27T18:10:00+08:00",
+      "travel_minutes": 34,
+      "event_condition": "ordinary_day",
+      "visible_quote_review": [
+        {
+          "kind": "arrival",
+          "local_at": "2026-11-27T18:10:00+08:00",
+          "local_date": "2026-11-27",
+          "quote": "最早18:10到"
+        }
+      ],
+      "quote_review_source": {
+        "call_id": "llm_call_2107e63fcca140b9a998390094bd5bdb",
+        "http_response_complete": true,
+        "raw_response_sha256": "d2d149fbf9d4889b63abf203fd6b9a5f89c6c4d559627f341627caecbd0c0340",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 3,
+        "terminal_attempt_id": "llm_attempt_a30bbdb31e014a998bd8467309a0d7e5",
+        "trace_id": "role:role-event:649fa160bd3590fcabc11f00116c86fb66d035b4e58c698009c20fc64505043b"
+      }
+    },
+    {
+      "message_id": "customer:role-event:347b9d95fe685b0055a8b4cf527a27254a321c22a7917056b225d5262e3123ae",
+      "virtual_at": "2026-11-27T17:38:00+08:00",
+      "role_only_earliest_if_departing": "2026-11-27T18:12:00+08:00",
+      "travel_minutes": 34,
+      "event_condition": "ordinary_day",
+      "visible_quote_review": [
+        {
+          "kind": "arrival",
+          "local_at": "2026-11-27T18:12:00+08:00",
+          "local_date": "2026-11-27",
+          "quote": "我这边最早18:12到"
+        }
+      ],
+      "quote_review_source": {
+        "call_id": "llm_call_2a9db85b4ee240d0a17390b7d8e4d65d",
+        "http_response_complete": true,
+        "raw_response_sha256": "619476e4c55f783cbf83a44278b498af60ceefaa2e27f94f76191a243240d586",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 2,
+        "terminal_attempt_id": "llm_attempt_9d6fd70bafd54acfa4726d3ae2830f76",
+        "trace_id": "role:role-event:347b9d95fe685b0055a8b4cf527a27254a321c22a7917056b225d5262e3123ae"
+      }
+    },
+    {
+      "message_id": "customer:role-event:aecf11134083a9cf7fc944932d9164a8a9ff8f55d4f584e99d48b2d3256697e0",
+      "virtual_at": "2026-11-27T17:40:00+08:00",
+      "role_only_earliest_if_departing": "2026-11-27T18:14:00+08:00",
+      "travel_minutes": 34,
+      "event_condition": "ordinary_day",
+      "visible_quote_review": [
+        {
+          "kind": "arrival",
+          "local_at": "2026-11-27T18:14:00+08:00",
+          "local_date": "2026-11-27",
+          "quote": "18:14 才能到"
+        }
+      ],
+      "quote_review_source": {
+        "call_id": "llm_call_05ea0419905c4ee7a5607c8f5671c5bc",
+        "http_response_complete": true,
+        "raw_response_sha256": "e1bdad8dc1e13da03db31e6b3b4e0a415abc11eb2a6a7933a9357c37c151c9a4",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 2,
+        "terminal_attempt_id": "llm_attempt_1af8f9512d084bce924e73a851245546",
+        "trace_id": "role:role-event:aecf11134083a9cf7fc944932d9164a8a9ff8f55d4f584e99d48b2d3256697e0"
+      }
+    }
+  ],
+  "diagnosis": [
+    "同行本人已接受并绑定原有席位。18:12 的开场有三位同意，0015 明确最早 18:14 可到，店家完整响应却返回 other 且无新提议。",
+    "0015 的最早可到每轮依当时出发与固定 34 分钟路程递增。三次均无新的出行事件，不能当成顾客真的迟到或临时改口。",
+    "第一份提议由一轮同桌消息后产生。原规则下，新提议即使送达也可能因因果深度及前三位已用完店家收件预算而无人收到投票唤醒。"
+  ],
+  "offline_replay_expectation": [
+    "用原话和原 other 响应保存旧提议的冲突。经过营业时间、牌局到期、已定时长和当前同桌原话约束后，18:20 只作新版候选。",
+    "新版真实送达后从中断续跑，四个角色各有一份新的已送达回复。只有新版本有四张同意票，旧票不得继承。",
+    "单纯询问、带可能的估计、模糊点号、报出额外冲突钟点或不能满足营业时段与明确时长时，保留待协商。"
+  ]
+}
