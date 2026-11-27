@@ -681,9 +681,13 @@ def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdi
     if mode in {'public_options','unsupported_fit'}:
         result=search_current_games(store,ToolCall(name='search_current_games',arguments={'requirement':{}}),
                                     'read','current','customer','客户')
-        tools=[result.to_dict()]
-        public=[{'summary':item['game']['requirement']['user_visible_summary']} for item in result.result['matches']]
-        assert len(public)==2 and [game.to_dict() for game in store.games.values()]==before
+        tools=judge_module.project_inquiry_tool_results([result.to_dict()])
+        public=[tools[0]['result']]
+        requirements=[match['public_requirement'] for match in public[0]['matches']]
+        assert {(row['game_type'], row['stake'], row['known_player_count'], row['needed_seats'])
+                for row in requirements} == {('national_standard_mahjong', '1', 3, 1), ('red_center_mahjong', '0.5', 2, 2)}
+        assert len(requirements)==2 and all('user_visible_summary' not in row for row in requirements)
+        assert [game.to_dict() for game in store.games.values()]==before
     if mode=='unauthorized_write':
         call=ToolCall(name='create_game',arguments={'organizer_id':'customer','organizer_name':'客户',
             'requirement':{'game_type':'national_standard_mahjong','stake':'1','start_time_kind':'asap_when_full'},
