@@ -1,0 +1,537 @@
+{
+  "run": "2026-11-25-real-1d158698ce",
+  "start_commit": "e36bae0",
+  "case_scope": "运行中只读核对两份实际建局及送达。两局仍各自招募，不作为桌群已建或整场通过。",
+  "cases": [
+    {
+      "trace_id": "trace_84dd27da94d44ea788044669",
+      "local_game_id": "game_8d09a26278c3",
+      "sqlite_status": "forming",
+      "planned_start_at": null,
+      "business_requirement": {
+        "game_type": "sichuan_mahjong",
+        "stake_range": null,
+        "start_time_kind": "asap_when_full",
+        "opening_not_before_at": "2026-11-25T19:30:00+08:00",
+        "duration_hours": null,
+        "smoke_preference": "no_smoking"
+      },
+      "actual_chat": [
+        {
+          "sequence": 40,
+          "message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+          "source_message_id": null,
+          "text": "行 帮我组一桌 无烟的 0.5块底 我七点半能到 打四川麻将",
+          "direction": "inbound",
+          "sent_at": "2026-11-25T11:02:00+00:00"
+        },
+        {
+          "sequence": 41,
+          "message_id": "outbound:trace_84dd27da94d44ea788044669:1",
+          "source_message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+          "text": "给你记上了，无烟四川麻将0.5底，人齐开，现在差三位，我这就帮你找着。",
+          "direction": "outbound",
+          "sent_at": "2026-11-25T11:02:00+00:00"
+        }
+      ],
+      "trace_steps": [
+        {
+          "attempt": 1,
+          "conversation_version": 2,
+          "decision": {
+            "accepted_stake_range": {
+              "max": 0.5,
+              "min": 0.5
+            },
+            "agreed_duration_hours": null,
+            "arrival_lookup_floor_at": "2026-11-25T19:30:00+08:00",
+            "clock_role": "arrival_estimate",
+            "current_ref": 3,
+            "has_fixed_opening_authority": false,
+            "known_cap_score": null,
+            "lookup_scope": "personal",
+            "max_duration_hours": null,
+            "opening_customer_ref": null,
+            "opening_dayparts": null,
+            "opening_window": null,
+            "supporting_customer_refs": [
+              1,
+              3
+            ]
+          },
+          "diagnostics": {
+            "attempts": [
+              {
+                "api": "responses",
+                "attempt_id": "llm_attempt_303d5598f8e44dfc9996f3be5d47f5bb",
+                "attempt_index": 1,
+                "body_complete": true,
+                "choice_count": null,
+                "content": {
+                  "empty": false,
+                  "kind": "output_text_blocks",
+                  "length": 341,
+                  "present": true,
+                  "sha256": "ef20b23ff5e317c86c9f7c8e1ff5e3a811350df92c2e25e6bfc70ddf3a6bf72a",
+                  "text_block_count": 1,
+                  "whitespace_only": false
+                },
+                "finish_reason": null,
+                "http_elapsed_ms": 2202.33,
+                "http_status": 200,
+                "incomplete_reason": null,
+                "output_count": 1,
+                "reasoning_fields": {},
+                "refusal_count": 0,
+                "request_ids": {
+                  "x-opencode-log-id": "01a21a7f-7573-75c6-8faa-4fdc87a97f51"
+                },
+                "response_id": "resp_affa7d5685c04a58b25dbf5c81528cc7",
+                "response_json_parsed": true,
+                "response_status": "completed",
+                "returned_model": "deepseek-v4.1-flash",
+                "timeout_seconds": 9.999898625072092,
+                "usage": {
+                  "completion_tokens": 108,
+                  "completion_tokens_details": {
+                    "reasoning_tokens": 0
+                  },
+                  "prompt_tokens": 2619,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  },
+                  "total_tokens": 2727
+                }
+              }
+            ],
+            "call_id": "llm_call_55b9889057ec414583883651888ef64c",
+            "provider": "opencode_go",
+            "queue_wait_ms": 0.006,
+            "request": {
+              "api_protocol": "responses",
+              "max_tokens": 1200,
+              "reasoning_effort": "none",
+              "response_format": "json_object",
+              "thinking_mode": null
+            },
+            "requested_model": "deepseek-v4.1-flash",
+            "route": "primary",
+            "schema_version": 1,
+            "timeout_budget_seconds": 20.0,
+            "total_elapsed_ms": 2203.71
+          },
+          "input_sha256": "6ca8cbb91d6d8a50375c2ca078258a9b53aaa3b6e50d6f23d9c513e73d2c4c57",
+          "raw": "{\"clock_role\":\"arrival_estimate\",\"lookup_scope\":\"personal\",\"opening_window\":null,\"opening_dayparts\":null,\"accepted_stake_range\":{\"min\":0.5,\"max\":0.5},\"known_cap_score\":null,\"max_duration_hours\":null,\"agreed_duration_hours\":null,\"has_fixed_opening_authority\":false,\"opening_customer_ref\":null,\"current_ref\":3,\"supporting_customer_refs\":[1,3]}",
+          "response_source": {
+            "call_id": "llm_call_55b9889057ec414583883651888ef64c",
+            "http_response_complete": true,
+            "raw_response_sha256": "ef20b23ff5e317c86c9f7c8e1ff5e3a811350df92c2e25e6bfc70ddf3a6bf72a",
+            "response_route": [],
+            "route": "primary",
+            "schema_version": 1,
+            "step_index": 1,
+            "terminal_attempt_id": "llm_attempt_303d5598f8e44dfc9996f3be5d47f5bb",
+            "trace_id": "trace_84dd27da94d44ea788044669:table-availability:1"
+          },
+          "source_message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+          "step": "table_availability_authorization_result",
+          "step_index": 1,
+          "task_context_id": "task_context_706b76806f22"
+        },
+        {
+          "opening_not_before_at": "2026-11-25T19:30:00+08:00",
+          "source_message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+          "step": "sandbox_flexible_opening_bound_verified"
+        },
+        {
+          "attempt": 1,
+          "decision": {
+            "customer_ref": 3,
+            "scope": "create",
+            "shop_offer_ref": 2
+          },
+          "diagnostics": {
+            "attempts": [
+              {
+                "api": "responses",
+                "attempt_id": "llm_attempt_3d474bdc30f646ecbff0d0b0a7a9471d",
+                "attempt_index": 1,
+                "body_complete": true,
+                "choice_count": null,
+                "content": {
+                  "empty": false,
+                  "kind": "output_text_blocks",
+                  "length": 54,
+                  "present": true,
+                  "sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75",
+                  "text_block_count": 1,
+                  "whitespace_only": false
+                },
+                "finish_reason": null,
+                "http_elapsed_ms": 1882.649,
+                "http_status": 200,
+                "incomplete_reason": null,
+                "output_count": 1,
+                "reasoning_fields": {},
+                "refusal_count": 0,
+                "request_ids": {
+                  "x-opencode-log-id": "01a21a80-0fe4-7508-aa0c-344840204912"
+                },
+                "response_id": "resp_ce0a3da3d39f4dc1be60b475e7d73a95",
+                "response_json_parsed": true,
+                "response_status": "completed",
+                "returned_model": "deepseek-v4.1-flash",
+                "timeout_seconds": 22.499936041538604,
+                "usage": {
+                  "completion_tokens": 18,
+                  "completion_tokens_details": {
+                    "reasoning_tokens": 0
+                  },
+                  "prompt_tokens": 1256,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  },
+                  "total_tokens": 1274
+                }
+              }
+            ],
+            "call_id": "llm_call_c189454f6e7e454cb14414417713a300",
+            "provider": "opencode_go",
+            "queue_wait_ms": 0.004,
+            "request": {
+              "api_protocol": "responses",
+              "max_tokens": 1200,
+              "reasoning_effort": "none",
+              "response_format": "json_object",
+              "thinking_mode": null
+            },
+            "requested_model": "deepseek-v4.1-flash",
+            "route": "primary",
+            "schema_version": 1,
+            "timeout_budget_seconds": 44.99999920895789,
+            "total_elapsed_ms": 1883.31
+          },
+          "input_sha256": "28a352fb2f9cdd169978ccec538065eeeb11b750ef63047e2fa6a037ab88e3b3",
+          "raw": "{\"scope\":\"create\",\"customer_ref\":3,\"shop_offer_ref\":2}",
+          "response_source": {
+            "call_id": "llm_call_c189454f6e7e454cb14414417713a300",
+            "http_response_complete": true,
+            "raw_response_sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75",
+            "response_route": [],
+            "route": "primary",
+            "schema_version": 1,
+            "step_index": 401,
+            "terminal_attempt_id": "llm_attempt_3d474bdc30f646ecbff0d0b0a7a9471d",
+            "trace_id": "trace_84dd27da94d44ea788044669:creation:401:1"
+          },
+          "step": "creation_authorization_result",
+          "step_index": 401
+        },
+        {
+          "step": "tool_result",
+          "name": "create_game",
+          "called": true,
+          "allowed": true,
+          "call_id": "c1",
+          "result": {
+            "game_id": "game_8d09a26278c3",
+            "status": "forming",
+            "planned_start_at": null,
+            "opening_not_before_at": "2026-11-25T19:30:00+08:00",
+            "remaining_seats": 3
+          }
+        },
+        {
+          "step": "tool_result",
+          "name": "search_customers",
+          "called": true,
+          "allowed": true,
+          "call_id": "c1",
+          "result": {
+            "game_id": "game_8d09a26278c3",
+            "status": null,
+            "planned_start_at": null,
+            "opening_not_before_at": null,
+            "remaining_seats": null
+          }
+        },
+        {
+          "objective_status": "completed",
+          "reply": "给你记上了，无烟四川麻将0.5底，人齐开，现在差三位，我这就帮你找着。",
+          "step": "final_output"
+        }
+      ]
+    },
+    {
+      "trace_id": "trace_d0b37ad7424df77effe7c95c",
+      "local_game_id": "game_a13b1e83305e",
+      "sqlite_status": "forming",
+      "planned_start_at": "2026-11-25T19:30:00+08:00",
+      "business_requirement": {
+        "game_type": "hangzhou_mahjong",
+        "stake_range": {
+          "max": 3.0,
+          "min": 1.0
+        },
+        "start_time_kind": "scheduled",
+        "opening_not_before_at": null,
+        "duration_hours": null,
+        "smoke_preference": "no_smoking"
+      },
+      "actual_chat": [
+        {
+          "sequence": 35,
+          "message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+          "source_message_id": null,
+          "text": "老板 19点半开可以吗 就打杭州麻将 底注一到三块都行 无烟最好 先帮我组 我19点15分到",
+          "direction": "inbound",
+          "sent_at": "2026-11-25T11:02:00+00:00"
+        },
+        {
+          "sequence": 38,
+          "message_id": "outbound:trace_d0b37ad7424df77effe7c95c:1",
+          "source_message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+          "text": "19点半那桌给你记上了，杭麻一到三块无烟的，现在还差三个人，我先帮你挂着找人。",
+          "direction": "outbound",
+          "sent_at": "2026-11-25T11:02:00+00:00"
+        }
+      ],
+      "trace_steps": [
+        {
+          "attempt": 1,
+          "conversation_version": 3,
+          "decision": {
+            "accepted_stake_range": {
+              "max": 3.0,
+              "min": 1.0
+            },
+            "agreed_duration_hours": null,
+            "arrival_lookup_floor_at": "2026-11-25T19:15:00+08:00",
+            "clock_role": "arrival_estimate",
+            "clock_roles": [
+              {
+                "clock_ref": 1,
+                "role": "opening"
+              },
+              {
+                "clock_ref": 2,
+                "role": "arrival_estimate"
+              }
+            ],
+            "current_ref": 5,
+            "has_fixed_opening_authority": true,
+            "known_cap_score": null,
+            "lookup_scope": "personal",
+            "max_duration_hours": null,
+            "opening_customer_ref": 5,
+            "opening_dayparts": null,
+            "opening_window": {
+              "end_at": "2026-11-25T19:30:00+08:00",
+              "start_at": "2026-11-25T19:30:00+08:00"
+            },
+            "supporting_customer_refs": [
+              3,
+              5
+            ]
+          },
+          "diagnostics": {
+            "attempts": [
+              {
+                "api": "responses",
+                "attempt_id": "llm_attempt_774c107c798c4b0b9f6d81657074c90b",
+                "attempt_index": 1,
+                "body_complete": true,
+                "choice_count": null,
+                "content": {
+                  "empty": false,
+                  "kind": "output_text_blocks",
+                  "length": 538,
+                  "present": true,
+                  "sha256": "8be0490dc93d0bfc121a3e4b97f54da80a7898036596819435ab576a989f8729",
+                  "text_block_count": 1,
+                  "whitespace_only": false
+                },
+                "finish_reason": null,
+                "http_elapsed_ms": 2465.316,
+                "http_status": 200,
+                "incomplete_reason": null,
+                "output_count": 1,
+                "reasoning_fields": {},
+                "refusal_count": 0,
+                "request_ids": {
+                  "x-opencode-log-id": "01a21a7d-ebcd-7d46-9e4f-078e8a007af1"
+                },
+                "response_id": "resp_15071f1b9cc841a09b2641a27063831d",
+                "response_json_parsed": true,
+                "response_status": "completed",
+                "returned_model": "deepseek-v4.1-flash",
+                "timeout_seconds": 9.999868478509597,
+                "usage": {
+                  "completion_tokens": 185,
+                  "completion_tokens_details": {
+                    "reasoning_tokens": 0
+                  },
+                  "prompt_tokens": 3057,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 2304
+                  },
+                  "total_tokens": 3242
+                }
+              }
+            ],
+            "call_id": "llm_call_411ed69687e94c57a4d5ea0ec71dfd0f",
+            "provider": "opencode_go",
+            "queue_wait_ms": 0.006,
+            "request": {
+              "api_protocol": "responses",
+              "max_tokens": 1200,
+              "reasoning_effort": "none",
+              "response_format": "json_object",
+              "thinking_mode": null
+            },
+            "requested_model": "deepseek-v4.1-flash",
+            "route": "primary",
+            "schema_version": 1,
+            "timeout_budget_seconds": 20.0,
+            "total_elapsed_ms": 2467.053
+          },
+          "input_sha256": "2e21c72c7899940b774586994b12235faac5779734cdadb53f5ff28fa6e0e190",
+          "raw": "{\"clock_role\":\"other\",\"clock_roles\":[{\"clock_ref\":1,\"role\":\"opening\"},{\"clock_ref\":2,\"role\":\"arrival_estimate\"}],\"lookup_scope\":\"personal\",\"opening_window\":{\"start_at\":\"2026-11-25T19:30:00+08:00\",\"end_at\":\"2026-11-25T19:30:00+08:00\"},\"opening_dayparts\":null,\"accepted_stake_range\":{\"min\":1,\"max\":3},\"known_cap_score\":null,\"max_duration_hours\":null,\"agreed_duration_hours\":null,\"has_fixed_opening_authority\":true,\"opening_customer_ref\":5,\"current_ref\":5,\"supporting_customer_refs\":[3,5],\"prior_play_until\":{\"customer_ref\":3,\"clock_ref\":2}}",
+          "response_source": {
+            "call_id": "llm_call_411ed69687e94c57a4d5ea0ec71dfd0f",
+            "http_response_complete": true,
+            "raw_response_sha256": "8be0490dc93d0bfc121a3e4b97f54da80a7898036596819435ab576a989f8729",
+            "response_route": [],
+            "route": "primary",
+            "schema_version": 1,
+            "step_index": 1,
+            "terminal_attempt_id": "llm_attempt_774c107c798c4b0b9f6d81657074c90b",
+            "trace_id": "trace_d0b37ad7424df77effe7c95c:table-availability:1"
+          },
+          "source_message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+          "step": "table_availability_authorization_result",
+          "step_index": 1,
+          "task_context_id": "task_context_5a13a175af0b"
+        },
+        {
+          "attempt": 1,
+          "decision": {
+            "customer_ref": 3,
+            "scope": "create",
+            "shop_offer_ref": 2
+          },
+          "diagnostics": {
+            "attempts": [
+              {
+                "api": "responses",
+                "attempt_id": "llm_attempt_222a9786de6645519a2f5ea013c5201d",
+                "attempt_index": 1,
+                "body_complete": true,
+                "choice_count": null,
+                "content": {
+                  "empty": false,
+                  "kind": "output_text_blocks",
+                  "length": 54,
+                  "present": true,
+                  "sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75",
+                  "text_block_count": 1,
+                  "whitespace_only": false
+                },
+                "finish_reason": null,
+                "http_elapsed_ms": 1488.345,
+                "http_status": 200,
+                "incomplete_reason": null,
+                "output_count": 1,
+                "reasoning_fields": {},
+                "refusal_count": 0,
+                "request_ids": {
+                  "x-opencode-log-id": "01a21a7e-1f16-7f15-81e2-c07d0fe355d2"
+                },
+                "response_id": "resp_ce7407e115544d4eb02b29fbd835462b",
+                "response_json_parsed": true,
+                "response_status": "completed",
+                "returned_model": "deepseek-v4.1-flash",
+                "timeout_seconds": 22.499926250078715,
+                "usage": {
+                  "completion_tokens": 18,
+                  "completion_tokens_details": {
+                    "reasoning_tokens": 0
+                  },
+                  "prompt_tokens": 1398,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  },
+                  "total_tokens": 1416
+                }
+              }
+            ],
+            "call_id": "llm_call_57756223c04443ff808df336f3f713bf",
+            "provider": "opencode_go",
+            "queue_wait_ms": 0.005,
+            "request": {
+              "api_protocol": "responses",
+              "max_tokens": 1200,
+              "reasoning_effort": "none",
+              "response_format": "json_object",
+              "thinking_mode": null
+            },
+            "requested_model": "deepseek-v4.1-flash",
+            "route": "primary",
+            "schema_version": 1,
+            "timeout_budget_seconds": 44.999999208026566,
+            "total_elapsed_ms": 1489.081
+          },
+          "input_sha256": "c23b4cff478d5b18b68c4165888d2d94289669161c9227df0b501037ca4b2a2a",
+          "raw": "{\"scope\":\"create\",\"customer_ref\":3,\"shop_offer_ref\":2}",
+          "response_source": {
+            "call_id": "llm_call_57756223c04443ff808df336f3f713bf",
+            "http_response_complete": true,
+            "raw_response_sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75",
+            "response_route": [],
+            "route": "primary",
+            "schema_version": 1,
+            "step_index": 201,
+            "terminal_attempt_id": "llm_attempt_222a9786de6645519a2f5ea013c5201d",
+            "trace_id": "trace_d0b37ad7424df77effe7c95c:creation:201:1"
+          },
+          "step": "creation_authorization_result",
+          "step_index": 201
+        },
+        {
+          "step": "tool_result",
+          "name": "create_game",
+          "called": true,
+          "allowed": true,
+          "call_id": "create_g1",
+          "result": {
+            "game_id": "game_a13b1e83305e",
+            "status": "forming",
+            "planned_start_at": "2026-11-25T19:30:00+08:00",
+            "opening_not_before_at": null,
+            "remaining_seats": 3
+          }
+        },
+        {
+          "step": "tool_result",
+          "name": "search_customers",
+          "called": true,
+          "allowed": true,
+          "call_id": "search_cand_1",
+          "result": {
+            "game_id": "game_a13b1e83305e",
+            "status": null,
+            "planned_start_at": null,
+            "opening_not_before_at": null,
+            "remaining_seats": null
+          }
+        },
+        {
+          "objective_status": "completed",
+          "reply": "19点半那桌给你记上了，杭麻一到三块无烟的，现在还差三个人，我先帮你挂着找人。",
+          "step": "final_output"
+        }
+      ]
+    }
+  ],
+  "finding": "0178 说七点半能到并委托组织，后端保存最早开场但暂不写具体开场。0437 明确按 19:30 办，独立核实后直接保留固定开场。两位都收到据实回复。"
+}
