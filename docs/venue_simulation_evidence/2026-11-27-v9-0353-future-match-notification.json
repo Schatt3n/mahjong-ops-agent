@@ -1,0 +1,157 @@
+{
+  "source_run": "2026-11-25-real-7cd18c8d46",
+  "trace_id": "trace_8867cb6a1f5eb8c84fbe829f",
+  "role": "0353",
+  "business_time": "2026-11-25T19:00:00+08:00",
+  "conversation_ledger": [
+    {
+      "sequence": 15,
+      "direction": "inbound",
+      "message_id": "customer:role-event:79f404a2050ee977ade1c63f774c6f1ffb9177f3415de6f85a3b2fc977fe6726",
+      "text": "老板晚上好 现在有四川麻将1块的桌吗 还有位吗",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_33549d12539483b5cebf7055"
+    },
+    {
+      "sequence": 16,
+      "direction": "outbound",
+      "message_id": "outbound:trace_33549d12539483b5cebf7055:1",
+      "text": "现在还没有能搭的四川麻将1块的桌诶，要不我帮你组一桌？",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:79f404a2050ee977ade1c63f774c6f1ffb9177f3415de6f85a3b2fc977fe6726",
+      "trace_id": "trace_33549d12539483b5cebf7055"
+    },
+    {
+      "sequence": 23,
+      "direction": "inbound",
+      "message_id": "customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281",
+      "text": "老板 我这边能到要到晚上十点以后了 今晚就不组了吧 改天有合适的四川麻将1块桌再喊我",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_8867cb6a1f5eb8c84fbe829f"
+    },
+    {
+      "sequence": 25,
+      "direction": "outbound",
+      "message_id": "outbound:trace_8867cb6a1f5eb8c84fbe829f:1",
+      "text": "好嘞，那今晚就不安排了。以后想打四川麻将1块的，直接来问我，我这边暂时没法主动喊你哈。",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281",
+      "trace_id": "trace_8867cb6a1f5eb8c84fbe829f"
+    }
+  ],
+  "preflight": {
+    "status": "no_permission",
+    "raw": "{\"permissions\":[]}",
+    "response_source": {
+      "schema_version": 1,
+      "trace_id": "venue-write-guard:customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281",
+      "step_index": 1,
+      "raw_response_sha256": "a4475f102675fe599e2e1184f669b9246b7ebe113c351d514e635018a1f53cf8",
+      "call_id": "llm_call_cca5c8749c2e410cbd007d099d4e54d4",
+      "terminal_attempt_id": "llm_attempt_8f24c9daf081401ba06357180c5e0e45",
+      "route": "primary",
+      "response_route": [],
+      "http_response_complete": true
+    }
+  },
+  "state_after_observed_turn": {
+    "status": "completed",
+    "customer_waiting_demands": 0,
+    "customer_outbound_drafts": 0,
+    "customer_conversation_tasks": 0
+  },
+  "business_tool_attempts": [],
+  "reply_reviews": [
+    {
+      "approved": false,
+      "commitments": [
+        {
+          "arrangement_ref": null,
+          "kind": "match_notification",
+          "quote": "改天有合适的四川麻将1块的桌再喊你"
+        }
+      ],
+      "violations": [
+        "unsupported_follow_up_commitment"
+      ]
+    },
+    {
+      "approved": false,
+      "commitments": [
+        {
+          "arrangement_ref": null,
+          "kind": "match_notification",
+          "quote": "有合适的局匹配到了再跟你说"
+        }
+      ],
+      "violations": [
+        "unsupported_follow_up_commitment",
+        "semantic_contradiction"
+      ]
+    },
+    {
+      "approved": true,
+      "commitments": [],
+      "violations": []
+    }
+  ],
+  "assessment": {
+    "current_reply": "店家承接今晚不组。前一轮只有组桌提议，没有已组牌局要撤销。今后的通知没有登记和实际送达依据，最后如实说明暂时无法主动喊这位顾客。",
+    "request_intent": "顾客另有改天收到一块底川麻通知的明确意愿，当前来话没有指定日期、时段或有限的失效时间。沙盒四范围核验实际返回空列表；这份执行结果不能抹掉顾客的通知意愿。今晚十点后才能到是已取消的当晚条件。",
+    "bounded_reply_when_supported": "好，今晚就不组啦。改天你想哪天打、哪个时段方便？",
+    "coverage": "这次证明了未安排的通知不被承诺。候补从登记、匹配到同收件人实际私聊送达仍待覆盖。"
+  },
+  "offline_gateway_and_matcher": {
+    "opening_order": [
+      "2026-11-25T20:00:00+08:00",
+      "2026-11-26T20:00:00+08:00"
+    ],
+    "results": [
+      {
+        "time_preference": "改天",
+        "expires_at_argument": null,
+        "actual_expiry": "2026-11-25T23:59:59+08:00",
+        "match_reasons_in_opening_order": [
+          "match",
+          "match"
+        ]
+      },
+      {
+        "time_preference": "改天",
+        "expires_at_argument": "2026-11-26T23:59:59+08:00",
+        "actual_expiry": "2026-11-26T23:59:59+08:00",
+        "match_reasons_in_opening_order": [
+          "match",
+          "match"
+        ]
+      },
+      {
+        "time_preference": "明天晚上",
+        "expires_at_argument": "2026-11-26T23:59:59+08:00",
+        "actual_expiry": "2026-11-26T23:59:59+08:00",
+        "match_reasons_in_opening_order": [
+          "time_mismatch",
+          "match"
+        ]
+      }
+    ],
+    "notes": "按 V9 原业务钟通过正式网关登记，在内存存储里核对同玩法、同底注的两张测试桌。匹配器单项结果独立于外层活跃期扫描。改天这段文字不提供起始日期；延长 expires_at 只改变登记到期。"
+  },
+  "dispatch_capability": {
+    "runtime": "MatchTrigger 能生成 waiting_match_notification 待发草稿。沙盒候补使用 internal 通道标记，草稿本身不构成送达。",
+    "rolling_sandbox": "滚动通道现有定时私聊派送接入已有桌的组满通知和晚到收据，未接入候补匹配草稿的实际送达。",
+    "sources": [
+      "src/mahjong_agent_runtime/domains/tools/waiting_tools.py",
+      "src/mahjong_agent_runtime/matching.py",
+      "tests/simulation/venue_channel.py"
+    ]
+  },
+  "future_acceptance": [
+    "只说改天时，先确认今晚停止。询问有意义的日期与时段或诚实说明当前能力，保留川麻一块底，不把当晚可到时间带到以后，也不登记未经确认的无限候补。",
+    "给出可执行的将来时段并明确同意候补时，记录适用开场下界和有限失效时间。排除今晚、错误档位和玩法。日期、烟况或其他匹配条件的默认值须有已确认口径或实际来源。",
+    "有符合条件的局后，仅在实际好友私聊可用且联系时段允许时发给同一顾客。同一请求和匹配事件多次重试只送达一次，账本能关联原请求、匹配局和送达回执，仍须顾客另行确认才能占席。",
+    "到期、撤销、没有合适桌或触达受阻时没有虚假送达或占席。仅有草稿不能记为通知成功。单独跑成局与合理未匹配对照。"
+  ]
+}
