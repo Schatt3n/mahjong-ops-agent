@@ -61,6 +61,31 @@ def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRolling
     return scenario, client
 
 
+@pytest.mark.parametrize(("depth", "at", "status", "wakes", "expected"), [
+    (1, "2026-11-25T11:07:00+08:00", "waiting_user", [], "dialogue_turn_limit"),
+    (0, "2026-11-25T23:59:00+08:00", "waiting_user", [], "observation_day_limit"),
+    (0, "2026-11-25T11:07:00+08:00", "waiting_user", [], None),
+    (1, "2026-11-25T11:07:00+08:00", "waiting_user", ["wake"], None),
+    (1, "2026-11-25T11:07:00+08:00", "needs_help", [], None),
+])
+def test_archived_private_followup_observation_requires_actual_scheduler_limit(tmp_path, depth, at, status, wakes, expected):
+    """从完成事件恢复上限依据。单有 waiting_user、失败或已唤醒，都不足以标为截断。"""
+    people = generate_personas(42)[:1]
+    scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
+    with scenario.journal.run_owner():
+        scenario.journal.enqueue(actor_id=people[0].sender_id, kind="private_receipt", origin_id="shop-first",
+                                 due_at=datetime.fromisoformat(at), details={"depth": depth})
+        event, = scenario.journal.claim_wave(1)
+        event = scenario.journal.save_decision(event, {"decision": {"status": "valid"}})
+        scenario.journal.finish(event, {"runtime_status": status, "reply_message_id": "shop-last",
+                                       "channel": "private", "scheduled_wakes": wakes})
+    reopened, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
+    event, = reopened.journal.events()
+    archived = reopened._archived_role_row(event)
+    assert archived.get("private_followup_boundary") == expected
+    assert event.result.get("private_followup_boundary") is None
+
+
 def test_v6_timer_quotes_delivered_board_even_after_group_history_crowding(tmp_path, monkeypatch):
     """复现真实原稿和16条群历史压力，只为一个真实看板原件留位置。"""
     people = generate_personas(42)[:3]

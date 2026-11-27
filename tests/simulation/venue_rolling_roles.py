@@ -168,7 +168,7 @@ class VenueRollingRoles:
             journal = self.journal.events()
             events = tuple(event for event in journal if event.kind not in _CONTROL_WAKES)
             records = self.channel.events()
-            rows = [{**item.decision, **item.result} for item in events if item.status == "finished"]
+            rows = [self._archived_role_row(item) for item in events if item.status == "finished"]
             for name, replay in (("events", rows), ("chat", records)):
                 with self.run_dir.joinpath(f"{name}.jsonl").open("w", encoding="utf-8") as handle:
                     for row in replay:
@@ -798,6 +798,20 @@ class VenueRollingRoles:
                 self._receipt_counts[budget] += 1
                 scheduled.append(wake.event_id)
         return scheduled
+
+    def _archived_role_row(self, event: RoleEvent) -> dict:
+        """从真正确认的调度上限记录末条私聊的观察边界，供恢复和补判使用。"""
+        row = {**event.decision, **event.result}
+        if (row.get("runtime_status") != "waiting_user" or row.get("channel") != "private"
+                or not row.get("reply_message_id") or row.get("scheduled_wakes") != []):
+            return row
+        if event.details.get("depth", 0) + 1 >= self.dialogue_turns:
+            row["private_followup_boundary"] = "dialogue_turn_limit"
+        elif (event.due_at + _WAIT_FOR_REPLY).astimezone(self.start_at.tzinfo).date() > (
+            self.start_at + timedelta(days=1)
+        ).date():
+            row["private_followup_boundary"] = "observation_day_limit"
+        return row
 
     def _report(self, events: tuple[RoleEvent, ...], rows: list[dict], records: list[dict]) -> dict:
         """按独立决策、实际消息、因果唤醒和营业日分别验收与采样。"""

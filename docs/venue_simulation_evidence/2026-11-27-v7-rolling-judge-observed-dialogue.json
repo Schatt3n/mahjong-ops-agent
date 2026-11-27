@@ -1,0 +1,556 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_commit": "a87e461",
+  "report_sha256": "31b1697742f942e7f2062dd3d8f0223fe56080cc071873f365e3fbb0bf98e72d",
+  "original_report_status": "failed",
+  "max_turns": 2,
+  "cases": [
+    {
+      "role": "0102",
+      "original_verdict": "fail",
+      "original_status": "valid",
+      "judge_response_source": {
+        "trace_id": "judge:venue-sender-0102",
+        "call_id": "llm_call_49283a44c24e44f98b06ac44df0012a8",
+        "terminal_attempt_id": "llm_attempt_f14552ddbd6b472eb6cde18b61d7e055",
+        "raw_response_sha256": "12732826749adde1da372acae0f6f5c676bafdca1b7097ecc7b7dcf01c3c5685"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "fail",
+          "reason": "顾客第1天私聊问「0.5档有合适的吗，七点半」，收到无局后改说晚班七点五十才空、请组八点后，属自然补约束；但E09中主动向店家报出「上晚班」「七点五十才空」这类私人安排细节，且E04已把档位+点钟一次报全后又逐条改口，整体像替店家录入。更关键的是次日E13问「1块档有合适的吗，八点以后」，E14无局后E17又复述「一块档，八点以后都行」再委托组局，且全段没有一次对时长、烟况等做独立核实，报名条件自述完整但缺少真实沟通理由，显得机械。",
+          "references": [
+            "E04",
+            "E09",
+            "E13",
+            "E17"
+          ]
+        },
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "pass",
+          "reason": "店家每轮都按来话实际查局：E04问0.5档七点半，E06查询为空并回「七点半 0.5 档现在没有能搭的局诶，要不我帮你组一桌？」；E09改八点后，E11查询范围20:00-06:00为空，回「八点以后现在没有能搭的 0.5 档局诶」；E13问1块档八点后，E15查询为空后E14如实告知并提议组局；E17明确委托「帮我组一桌吧，一块档，八点以后都行」，E18「行，给你组一桌。想打什么玩法呢？」承接组局并追问未给的玩法，属可推进的追问，未误报现成桌或做无依据承诺。各轮均未重复追问已知档位与时间。",
+          "references": [
+            "E05",
+            "E10",
+            "E14",
+            "E18"
+          ]
+        }
+      ],
+      "observed_evidence": [
+        {
+          "evidence_alias": "E04",
+          "evidence_id": "customer:role-event:25889846360f7af568d7d753be3abe13b16708ee4d455906a545eb270243eb53",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板，0.5档有合适的吗，七点半",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E05",
+          "evidence_id": "outbound:trace_f9543970d42e01d6ae0f6f2e:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "七点半 0.5 档现在没有能搭的局诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:25889846360f7af568d7d753be3abe13b16708ee4d455906a545eb270243eb53"
+        },
+        {
+          "evidence_alias": "E07",
+          "evidence_id": "role:role-event:f2cbe8b31c23edebe21f0dc7f2cede130871a5f541cb0c3a90c4daf8eae20b53",
+          "kind": "customer_action",
+          "action": "wait"
+        },
+        {
+          "evidence_alias": "E09",
+          "evidence_id": "customer:role-event:8b6777efb04348a917ab7fcccb10d5c1ef313a879de549540926df0cd6781e3c",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "老板，今晚我上晚班，要到七点五十才空出来，七点半赶不上，能帮组个八点后的吗",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E10",
+          "evidence_id": "outbound:trace_accf48592ea6a950db8d8ea2:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "八点以后现在没有能搭的 0.5 档局诶。想打什么玩法？",
+          "answers": "customer:role-event:8b6777efb04348a917ab7fcccb10d5c1ef313a879de549540926df0cd6781e3c"
+        },
+        {
+          "evidence_alias": "E13",
+          "evidence_id": "customer:role-event:128000051946296a39089d01b63640ddd53d2e6bbbd3e9ef201f870b1284ba54",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:05:00+00:00",
+          "text": "老板，1块档有合适的吗，八点以后",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E14",
+          "evidence_id": "outbound:trace_4a9a97bcc10e199c1b06ccf3:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:05:00+00:00",
+          "text": "八点以后现在没有一块档的现成桌诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:128000051946296a39089d01b63640ddd53d2e6bbbd3e9ef201f870b1284ba54"
+        },
+        {
+          "evidence_alias": "E17",
+          "evidence_id": "customer:role-event:a30973ec15f3ce24a73681b83aa8e467b3c9ef7928fd8c64558b17700de4aa11",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:07:00+00:00",
+          "text": "老板，那就帮我组一桌吧，一块档，八点以后都行",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E18",
+          "evidence_id": "outbound:trace_305af92b09aa9786cdad3d32:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:07:00+00:00",
+          "text": "行，给你组一桌。想打什么玩法呢？",
+          "answers": "customer:role-event:a30973ec15f3ce24a73681b83aa8e467b3c9ef7928fd8c64558b17700de4aa11"
+        }
+      ],
+      "calibration_note": "顾客说今晚晚班、赶不上七点半，是在解释为何改约。第二天从询现成桌转为明确委托组桌，简短重提一块档和八点以后。原话未表明烟况或时长是这次的待答条件。",
+      "last_private_reply_schedule": {
+        "event_id": "role-event:a30973ec15f3ce24a73681b83aa8e467b3c9ef7928fd8c64558b17700de4aa11",
+        "kind": "private_receipt",
+        "due_at": "2026-11-26T11:07:00.000000+00:00",
+        "depth": 1,
+        "runtime_status": "waiting_user",
+        "scheduled_wakes": []
+      }
+    },
+    {
+      "role": "0235",
+      "original_verdict": "fail",
+      "original_status": "valid",
+      "judge_response_source": {
+        "trace_id": "judge:venue-sender-0235",
+        "call_id": "llm_call_a7495d893619452ebac9c42ea7b4b5fd",
+        "terminal_attempt_id": "llm_attempt_0cce2c3bbdae47ceb7d27e0f02da2d38",
+        "raw_response_sha256": "2f3befb96e2374b5c8e42668ca5cad37656dd98c705946cab5974885806b0353"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "fail",
+          "reason": "顾客先问底注1块杭麻有没有位（E04），得知无位后告知晚班过不来并婉拒组局（E09），这些自然。但第二天回复「好 帮我组一桌吧 一块底无烟杭州麻将 我从七点半打到十点半左右 要到齐了叫我」（E17）几乎照单复述店家条件，属替店家录入式来话；此外 E07 的行为与 E02 群话题相关，但整体顾客来话不够自然。",
+          "references": [
+            "E04",
+            "E09",
+            "E13",
+            "E17",
+            "E07"
+          ]
+        },
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "fail",
+          "reason": "顾客明确委托组一桌并向店家交代了玩法、档位、烟况、时段（E17），店家回复仅「稍等一下」（E18），执行记录显示 check_room_availability 与 search_current_games 均成功却 runtime_status=needs_help（E19），未给出任何可回答的核实结果或组局进展，也未说明阻塞来源，属于对已明确需求只回「稍等」而无实际推进。",
+          "references": [
+            "E14",
+            "E15",
+            "E17",
+            "E18",
+            "E19"
+          ]
+        }
+      ],
+      "observed_evidence": [
+        {
+          "evidence_alias": "E04",
+          "evidence_id": "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板晚上好 底注1块的杭州麻将现在还有位吗",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E05",
+          "evidence_id": "outbound:trace_7063fe0a33998ba163c2a3da:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "晚上好，现在没有一块底的杭麻空位诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f"
+        },
+        {
+          "evidence_alias": "E09",
+          "evidence_id": "customer:role-event:d56899b218e293ea444f4a16dff3b9074334040c7cf0e71ca53692ada94c4edb",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "老板好 我今晚晚班 人还在城另一头 今天过不来 不用帮我组了 改天再来",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E10",
+          "evidence_id": "outbound:trace_eb16aa541181ad2b140de43a:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "好嘞，那今天就先不安排了，改天有空再过来哈～",
+          "answers": "customer:role-event:d56899b218e293ea444f4a16dff3b9074334040c7cf0e71ca53692ada94c4edb"
+        },
+        {
+          "evidence_alias": "E13",
+          "evidence_id": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:05:00+00:00",
+          "text": "老板晚上好 底注1块的杭州麻将现在还有位吗",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E14",
+          "evidence_id": "outbound:trace_8189f6f59755852704bdacc9:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:05:00+00:00",
+          "text": "现在没有能搭的一块底杭州麻将桌诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f"
+        },
+        {
+          "evidence_alias": "E17",
+          "evidence_id": "customer:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:07:00+00:00",
+          "text": "好 帮我组一桌吧 一块底无烟杭州麻将 我从七点半打到十点半左右 要到齐了叫我",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E18",
+          "evidence_id": "outbound:trace_e2f61824ed635f7347475367:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:07:00+00:00",
+          "text": "稍等一下",
+          "answers": "customer:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255"
+        },
+        {
+          "evidence_alias": "E19",
+          "evidence_id": "trace_e2f61824ed635f7347475367",
+          "kind": "agent_execution",
+          "runtime_status": "needs_help",
+          "responds_to": "customer:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255"
+        }
+      ],
+      "calibration_note": "E14 没有提到烟况、可打的时段或凑齐通知。E17 在接受组局的同时补了这三项。店家项仍应独立核对 E18 的等待语和 E19 的 needs_help。",
+      "last_private_reply_schedule": {
+        "event_id": "role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255",
+        "kind": "private_receipt",
+        "due_at": "2026-11-26T11:07:00.000000+00:00",
+        "depth": 1,
+        "runtime_status": "needs_help",
+        "scheduled_wakes": []
+      }
+    },
+    {
+      "role": "0437",
+      "original_verdict": "inconclusive",
+      "original_status": "valid",
+      "judge_response_source": {
+        "trace_id": "judge:venue-sender-0437",
+        "call_id": "llm_call_0229a657a6d14438b76d76498d80054c",
+        "terminal_attempt_id": "llm_attempt_d17da51ede8a4d789ec42e8747a354d5",
+        "raw_response_sha256": "677403069d68d2d873a15322818462900679a50acc9ad439b125e857b76ee13c"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "inconclusive",
+          "reason": "顾客行为整体自然：E03当天无参与意愿、选择等待，属于有效决定；E05在群内就公开条目追问开场时间，理由充分；E07次日私聊主动问局，条件（杭州麻将、底注1-3、傍晚、有空位否）简洁实用；E11接受组局并给出「傍晚六点后」的可打时段。没有出现无理由报全名、照抄条件清单、逐点探测或重复询问的迹象。但缺少E05之后的店家回复、以及E11之后顾客对开场钟点的最终答复，无法判断收尾是否闭环，因此判 inconclusive。",
+          "references": [
+            "E03",
+            "E05",
+            "E07",
+            "E11"
+          ]
+        },
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "inconclusive",
+          "reason": "E08和E12都直接承接了顾客已送达的需求：E08复述已核实的1-3档并诚实告知无现成桌、提出组局；E12接受组局并合理追问开场钟点。但E12要求的开场时间顾客尚未答复，会话在等待状态结束，时段未最终确定，无法判断是否误报或无依据承诺，因此判 inconclusive。缺少实际组局落库的手工执行证据，不足以证明已挂出。",
+          "references": [
+            "E08",
+            "E12",
+            "E09",
+            "E13"
+          ]
+        }
+      ],
+      "observed_evidence": [
+        {
+          "evidence_alias": "E03",
+          "evidence_id": "role:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661",
+          "kind": "customer_action",
+          "action": "wait"
+        },
+        {
+          "evidence_alias": "E05",
+          "evidence_id": "customer:role-event:94ec843a3c1cd1abe61568f051febde6f13e07695f1a0996fad740f2d8185771",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "371 七点半 0.5 是几点开场",
+          "channel_kind": "group"
+        },
+        {
+          "evidence_alias": "E07",
+          "evidence_id": "customer:role-event:ab78e5d668e196ec385511ae4d3a69f06d427aa5d17433c3b181046880011f6e",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T03:05:00+00:00",
+          "text": "老板你好 今天傍晚还有杭州麻将的位吗 底注1到3都行",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E08",
+          "evidence_id": "outbound:trace_94f89f593a426eaad485ae69:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T03:05:00+00:00",
+          "text": "傍晚这会儿没有能搭的杭州麻将1-3块的现成桌诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:ab78e5d668e196ec385511ae4d3a69f06d427aa5d17433c3b181046880011f6e"
+        },
+        {
+          "evidence_alias": "E11",
+          "evidence_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T03:07:00+00:00",
+          "text": "老板你好 组一桌可以 杭州麻将 底注1到3 我从傍晚六点后都能打",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E12",
+          "evidence_id": "outbound:trace_37c191b34a42768cfcc13106:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T03:07:00+00:00",
+          "text": "行，杭麻1-3块这桌我给你组。六点以后哪个点开场方便？你说个钟点，我就按这个时间挂出去找人。",
+          "answers": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845"
+        },
+        {
+          "evidence_alias": "E13",
+          "evidence_id": "trace_37c191b34a42768cfcc13106",
+          "kind": "agent_execution",
+          "runtime_status": "waiting_user",
+          "responds_to": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845"
+        }
+      ],
+      "calibration_note": "原评审认为实际顾客行为自然、店家最后追问合理，却因缺后续答复将两项判为待定。下一回合被两轮上限截断。此前群里重复确认开场的问法仍可逐条对照原话判断。",
+      "last_private_reply_schedule": {
+        "event_id": "role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+        "kind": "private_receipt",
+        "due_at": "2026-11-26T03:07:00.000000+00:00",
+        "depth": 1,
+        "runtime_status": "waiting_user",
+        "scheduled_wakes": []
+      }
+    },
+    {
+      "role": "0402",
+      "original_verdict": "pass",
+      "original_status": "valid",
+      "judge_response_source": {
+        "trace_id": "judge:venue-sender-0402",
+        "call_id": "llm_call_46ef9bfe06f8487d8f9d964a0f487164",
+        "terminal_attempt_id": "llm_attempt_9c6c675960b642b583797597443c97c8",
+        "raw_response_sha256": "6f926289e91728c5122f2a4156769a14f6adceec11179274b77be25b0b95a625"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "pass",
+          "reason": "顾客来话均自然简短，符合真人问局节奏：首日先问「一底两底的局有合适的吗？我晚上七点四十能到」，被店家告知无现成桌并提议组局后明确委托「组一桌吧」，被问玩法时自然补充「杭州麻将」并因现实行程变化改口「我七点四十到不了，最早八点过一点」，属于真实改期而非无理由改条件；次日重新按当日情况询问「一底两底的杭州麻将，有合适的吗？我八点过一点能到」，收到无局回复后同意组局「那就组一桌吧」。没有主动报全名、没有照抄店家条件逐项录入、无无理由的逐小时探问，续轮均有实际新信息或回应店家的追问。",
+          "references": [
+            "E04",
+            "E08",
+            "E12",
+            "E16",
+            "E20"
+          ]
+        },
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "pass",
+          "reason": "店家承接均基于已送达来话且不重复追问：首轮对「一底两底」「七点四十到」查局（E06）为空后如实告知并提供组局选项「要不我帮你组一桌？」；顾客委托后询问玩法「你想打什么玩法？」属必要澄清；顾客改为八点过一点并告知杭麻后，如实回复「这会儿还没能给你组上，先跟你说一声，别白等着」，未虚构已组好；次日按当日情况查局（E18）为空再报并提议组局；最后委托后确认「八点过一点是你到店的时间吧？这桌想定几点开？」属于对时间含义的有依据澄清，未把到店时间当成开局时间做无依据肯定，也无虚假占座或开场承诺。全段未出现对时长、档位的误报或无依据承诺。",
+          "references": [
+            "E05",
+            "E09",
+            "E13",
+            "E17",
+            "E21"
+          ]
+        }
+      ],
+      "observed_evidence": [
+        {
+          "evidence_alias": "E08",
+          "evidence_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "老板，组一桌吧。一底两底的，我七点四十能到。",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E09",
+          "evidence_id": "outbound:trace_4b84e1633c4b01139ba1ec18:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "行，一底两底的我帮你组。你想打什么玩法？",
+          "answers": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f"
+        },
+        {
+          "evidence_alias": "E12",
+          "evidence_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:35:00+00:00",
+          "text": "杭州麻将。我七点四十到不了，最早八点过一点。",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E13",
+          "evidence_id": "outbound:trace_68b5c8e3f35af0516156a264:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:35:00+00:00",
+          "text": "杭州麻将一底两底的，八点过一点以后现在没有能搭的现成桌，得新组一桌。这桌我这边这会儿还没能给你组上，先跟你说一声，别白等着。",
+          "answers": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0"
+        },
+        {
+          "evidence_alias": "E16",
+          "evidence_id": "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:35:00+00:00",
+          "text": "老板，一底两底的杭州麻将，有合适的吗？我八点过一点能到。",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E17",
+          "evidence_id": "outbound:trace_b4fbdd9562e7b8952fdc6965:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:35:00+00:00",
+          "text": "八点以后现在没有能搭的1-2底杭麻局诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54"
+        },
+        {
+          "evidence_alias": "E20",
+          "evidence_id": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:37:00+00:00",
+          "text": "老板，那就组一桌吧。一底两底的杭麻，我八点过一点能到。",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E21",
+          "evidence_id": "outbound:trace_88bfa78ebd42bc9f7080ca8a:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:37:00+00:00",
+          "text": "行，那就给你组一桌一底两底的杭麻。八点过一点是你到店的时间吧？这桌想定几点开？",
+          "answers": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a"
+        },
+        {
+          "evidence_alias": "E22",
+          "evidence_id": "trace_88bfa78ebd42bc9f7080ca8a",
+          "kind": "agent_execution",
+          "runtime_status": "waiting_user",
+          "responds_to": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a"
+        }
+      ],
+      "calibration_note": "对照案例。同样用尽两轮预算，店家最后区分到店时间和开场，原评审两项通过。这里只记录原判和事实，调度边界不证明任何具体组局动作。",
+      "last_private_reply_schedule": {
+        "event_id": "role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+        "kind": "private_receipt",
+        "due_at": "2026-11-26T11:37:00.000000+00:00",
+        "depth": 1,
+        "runtime_status": "waiting_user",
+        "scheduled_wakes": []
+      }
+    },
+    {
+      "role": "0405",
+      "original_verdict": "fail",
+      "original_status": "valid",
+      "judge_response_source": {
+        "trace_id": "judge:venue-sender-0405",
+        "call_id": "llm_call_e75e14b87eb8467cada9cfe8aa5a6793",
+        "terminal_attempt_id": "llm_attempt_6db1ef9ff9e843aa8b3e3d311334d382",
+        "raw_response_sha256": "7269c531d61acf7505d40c38babc5d625072e367088e3ab9d3a776b8d30d59a0"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "fail",
+          "reason": "顾客先私聊问「老板晚上好 七点半那桌是无烟吗」，店家回「没看到七点半有登记开着的桌…你说的是哪一桌」，顾客随后在群里以 E08 补充「371那桌七点半是无烟的 得看无烟才坐 我最早晚上七点五十能到 还能搭一桌吗」，又在 E10 重述「群里看板写的371 七点半 0.5底 想问问那桌是无烟吗 我这边最早七点五十能到 能搭一桌吗」，把「那桌是不是无烟」和「能不能搭一桌」两件事压在同一桌的要求上，且在群聊与私聊各发一遍相同询问，显得机械复制、对收件人辨识没有帮助；次日无参与意愿等待可接受，但整体询问与收尾不合自然聊天。",
+          "references": [
+            "E04",
+            "E05",
+            "E08",
+            "E10",
+            "E13"
+          ]
+        },
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "fail",
+          "reason": "首轮 E05 回复「我这边没看到七点半有登记开着的桌诶，你说的是哪一桌呀？」与 E06 查询空结果一致，追问哪桌合理；但顾客在 E10 已明确给出「371 七点半 0.5底」及「无烟」「最早七点五十到」的条件后，E11 仅回「暂时还是没看到对应的登记桌，那桌是不是无烟我这边也确认不了。要是你想打 0.5 无烟的，我帮你重新组一桌？」，既未针对无烟条件说明已核实的范围，也未对「七点五十能到是否可搭」给出可操作答复，只把问题推回重新组桌，未能承接已知条件。",
+          "references": [
+            "E05",
+            "E06",
+            "E11",
+            "E12"
+          ]
+        }
+      ],
+      "observed_evidence": [
+        {
+          "evidence_alias": "E01",
+          "evidence_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+          "kind": "group_history",
+          "sent_at": "2026-11-25T10:20:11+00:00",
+          "text": "371 七点半 0.5"
+        },
+        {
+          "evidence_alias": "E02",
+          "evidence_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+          "kind": "group_history",
+          "sent_at": "2026-11-25T10:58:00+00:00",
+          "text": "有烟还是无烟"
+        },
+        {
+          "evidence_alias": "E04",
+          "evidence_id": "customer:role-event:7b0200a66c507bbbe06503f8bdb1192cee094e836f30900ae2edbc83e223a900",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板晚上好 七点半那桌是无烟吗",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E05",
+          "evidence_id": "outbound:trace_9f4e27b5c0fd70c2bd7953db:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "我这边没看到七点半有登记开着的桌诶，你说的是哪一桌呀？",
+          "answers": "customer:role-event:7b0200a66c507bbbe06503f8bdb1192cee094e836f30900ae2edbc83e223a900"
+        },
+        {
+          "evidence_alias": "E08",
+          "evidence_id": "customer:role-event:88b1e020e1443ef614fb3b574dcf373e1a44cc74ee9a895a1e1686bae1375acd",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "371那桌七点半是无烟的 得看无烟才坐 我最早晚上七点五十能到 还能搭一桌吗",
+          "channel_kind": "group"
+        },
+        {
+          "evidence_alias": "E10",
+          "evidence_id": "customer:role-event:d83417789e6f3d5d8c24e1f1cfb285c09d2051da9d2e50d4620e009bf657772c",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "老板好 就是群里看板写的371 七点半 0.5底 想问问那桌是无烟吗 我这边最早七点五十能到 能搭一桌吗",
+          "channel_kind": "private"
+        },
+        {
+          "evidence_alias": "E11",
+          "evidence_id": "outbound:trace_19fdece86f1d64e1b13359a1:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "我按七点半、0.5 底查了下，暂时还是没看到对应的登记桌，那桌是不是无烟我这边也确认不了。要是你想打 0.5 无烟的，我帮你重新组一桌？",
+          "answers": "customer:role-event:d83417789e6f3d5d8c24e1f1cfb285c09d2051da9d2e50d4620e009bf657772c"
+        }
+      ],
+      "calibration_note": "反例。公开原话只问烟况，未确认是无烟。E08 把无烟写成事实，并把原桌核实和个人另找的目标挤在一句里。新增个人条件和合理结束并不能消掉这些证据。"
+    }
+  ],
+  "change_scope": "独立评审新增可从调度账本复核的私聊观察边界，按已经发生的往来判断。既有判定、证据、扩容门槛和业务状态由原档保留。"
+}

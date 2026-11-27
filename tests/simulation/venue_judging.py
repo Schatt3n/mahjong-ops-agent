@@ -24,12 +24,23 @@ ROLE_CHECK = "顾客像真人一样处理自己的目标，询问范围和续轮
 AGENT_CHECK = "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺"
 FIRST_CONTACT_CHECK = "首次联系店家的顾客说话自然，未无故报姓名、照列字段或复述条件"
 DURATION_CHECK = "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据"
-DIALOGUE_PROJECTION_VERSION = 11
+DIALOGUE_PROJECTION_VERSION = 12
 ROLLING_REVIEW_INSTRUCTIONS = (
     "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
     "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
     "先给各项独立定判。顾客说得清楚而店家漏答时，顾客项可以通过；顾客表述含糊而店家恰当处理时，店家项可以通过。"
     "每项 reason 只解释本项的事实和影响，写入和理由一致的本项 verdict。最后再按各项结果汇总总 verdict。"
+)
+_ROLLING_OBSERVATION_CALIBRATION = (
+    "顾客自然解释改时间的原因（如晚班赶不上），或在查现成转为明确委托组局时顺手重提几项关键条件，都有沟通理由。"
+    "判断是否照抄时，逐项对照顾客前句和店家刚送达的话。新增的无烟、可打到几点、到齐通知等要单独识别，"
+    "顾客没有要求核对的烟况和时长也无需额外追问。无缘由反复照抄、把公开消息里仅提问的条件说成事实、"
+    "或混淆所问原桌与另找一桌，仍根据实际危害和引文判断。"
+    "followup_observation_ended 标记滚动调度因轮次或观察日期上限，没有为这条已送达私聊安排下一回合。"
+    "按已观察到的行为评两项。顾客无需对没有观察机会的后续表现负责。"
+    "店家针对确实未知的玩法、开场或指代做具体澄清时，若本轮已妥善处理能答的内容，可据已送达原话判店家项通过。"
+    "有线索时可以提出带不确定性的猜测，也可以直接问清。没有后续答复时不推断是否完成组局、占席或通知。"
+    "缺少本轮必要证据仍判待定；已知遗漏、反复追问、误把猜测当事实和无依据承诺仍按证据判，轮次上限不抵消已发生的问题。"
 )
 _CHECKS = (ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK)
 ROLLING_CHECK_IDS = {
@@ -373,6 +384,10 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
             seen_messages.add(identifier)
             text_and_time = _pick(row, ("text", "sent_at"))
             if is_reply:
+                boundary = turn.get("private_followup_boundary")
+                if (projection_version >= 12 and identifier == turn.get("reply_message_id") and row["kind"] == "private"
+                        and boundary in {"dialogue_turn_limit", "observation_day_limit"}):
+                    text_and_time["followup_observation_ended"] = boundary
                 evidence.add("message_id", identifier, {"kind": "agent_reply", "answers": row["source_message_id"],
                              **text_and_time}, targets=(AGENT_CHECK,), context=(ROLE_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK))
                 own_reply_ids.add(identifier)
@@ -528,6 +543,8 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
         instructions += f"\n{_PEER_CITATION_RULES}"
     wire_checks = {(ROLLING_CHECK_IDS[check] if rolling_check_ids else check): check for check in prepared.checks}
     if rolling_check_ids:
+        if prepared.projection_version >= 12:
+            instructions += f"\n{_ROLLING_OBSERVATION_CALIBRATION}"
         instructions += f"\n{_rolling_citation_instructions(prepared)}"
     if additional_instructions:
         instructions += f"\n{additional_instructions}"

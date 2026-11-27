@@ -657,7 +657,9 @@ def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
     client = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E03", "E04", "E05"))
     result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn], records=records,
                              rolling_check_ids=True)
-    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 11)
+    assert (result["status"], result["verdict"], result["projection"]["version"]) == (
+        "valid", "pass", venue_judging.DIALOGUE_PROJECTION_VERSION,
+    )
     assert json.dumps(turn, sort_keys=True) == raw_before
     system, payload = client.messages
     assert "不要从查询参数反推某张结果桌的条件" in system["content"]
@@ -726,6 +728,45 @@ def test_review_hides_internal_end_when_same_table_duration_is_unknown(agreed):
         assert latest["planned_end_at"] == end and latest["terms"]["duration_hours"] == 4
     else:
         assert "planned_end_at" not in latest and latest["terms"] == {"max_duration_hours": 3}
+
+
+@pytest.mark.parametrize(("reply", "agent_verdict"), [
+    ("六点以后哪个点开场方便？你说个钟点，我就按这个时间挂出去找人。", "pass"),
+    ("你再从头说下吧。", "fail"),
+    ("已经挂出六点开场了。", "fail"),
+])
+def test_rolling_judge_sees_observation_limit_on_exact_last_delivered_reply(reply, agent_verdict):
+    """有限观察只补充送达证据。合理澄清、无关追问和虚假承诺仍由两项独立评审。"""
+    turn = _turn(1) | {"runtime_status": "waiting_user", "reply_message_id": "a1",
+                      "private_followup_boundary": "dialogue_turn_limit"}
+    records = [
+        _chat("u1", text="组一桌可以 杭州麻将 底注1到3 我从傍晚六点后都能打"),
+        _chat("other-reply", reply_to="u1", recipient="other", text="旁人的答复"),
+        _chat("earlier-ack", reply_to="u1", text="我看一下"),
+        _chat("a1", reply_to="u1", text=reply),
+    ]
+    args = {"customer_id": "a", "turns": [turn], "records": records}
+    prepared = prepare_dialogue_review(**args)
+    evidence = {row["evidence_id"]: row for row in prepared.archive}
+    assert "other-reply" not in evidence
+    assert "followup_observation_ended" not in evidence["earlier-ack"]
+    assert evidence["a1"]["followup_observation_ended"] == "dialogue_turn_limit"
+    previous = prepare_dialogue_review(**args, projection_version=11)
+    assert previous.aliases == prepared.aliases
+    assert all("followup_observation_ended" not in row for row in previous.archive)
+    client = _JudgeClient(role_evidence=("E02",), agent_evidence=("E04",), agent_verdict=agent_verdict)
+    result = review_dialogue(SemanticJudge(client), **args, rolling_check_ids=True,
+                             additional_instructions=venue_judging.ROLLING_REVIEW_INSTRUCTIONS)
+    prompt, payload = client.messages
+    assert "店家针对确实未知的玩法、开场或指代做具体澄清" in prompt["content"]
+    assert "轮次上限不抵消已发生的问题" in prompt["content"]
+    assert "逐项对照顾客前句和店家刚送达的话" in prompt["content"]
+    assert any(row.get("followup_observation_ended") == "dialogue_turn_limit"
+               for row in json.loads(payload["content"])["evidence"])
+    assert result["status"] == "valid"
+    assert {finding["check"]: finding["verdict"] for finding in result["findings"]} == {
+        ROLE_CHECK: "pass", AGENT_CHECK: agent_verdict,
+    }
 
 
 @pytest.mark.parametrize("owner, actual_owner", [("a", True), ("other", False)])
