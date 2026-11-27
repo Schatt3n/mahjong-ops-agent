@@ -100,7 +100,10 @@ from mahjong_agent_runtime.models import (  # noqa: E402
 )
 from mahjong_agent_runtime.channel_ingress import ChannelIngressWorker  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
-from agent_work_console import agent_work_snapshot, delivery_observation  # noqa: E402
+from agent_work_console import (  # noqa: E402
+    NATIVE_CALLBACK_BLOCK_REASONS, NATIVE_INGRESS_BLOCK_REASONS,
+    agent_work_detail, agent_work_snapshot, delivery_observation,
+)
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
     BOARD_TASK_TYPE,
     BoardEngine,
@@ -496,7 +499,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "agent_wechat_raw": ["/api/channels/agent-wechat/raw"],
             "reset_state": ["/api/reset-state"],
             "wechat_console": ["/api/wechat/health", "/api/wechat/recipients", "/api/wechat/recipients/refresh",
-                               "/api/wechat/conversations", "/api/wechat/conversation",
+                               "/api/wechat/conversations", "/api/wechat/conversation", "/api/wechat/message-work",
                                "/wechat-permissions", "/api/wechat/permission-roster", "/api/wechat/contact-policy",
                                "/api/wechat/contact-policy/refresh",
                                "/api/wechat/group-permission", "/api/wechat/send",
@@ -798,11 +801,21 @@ def persist_channel_observation(
         route_result=route_result,
         route_error=route_error,
     )
-    if deferred_reply and not observation["self_message"] and _channel_reply_for_delivery(route_result):
-        # 路由结果和待外发状态一起落库。进程异常后只恢复外发阶段，沿用首次模型结果。
-        observation["payload"]["deferred_reply"] = {"final_route_mode": observation["route_mode"]}
-        observation["conversation_id"] = wechat_conversation_id(payload, channel=channel)
-        observation["route_mode"] = "ingress_reply_pending"
+    withheld = None
+    block_reason = record.get("reply_block_reason")
+    if not observation["self_message"] and (deferred_reply or block_reason):
+        reply = _channel_reply_for_delivery(route_result)
+        if deferred_reply and reply:
+            # 路由结果和待外发状态一起落库。进程异常后只恢复外发阶段，沿用首次模型结果。
+            observation["payload"]["deferred_reply"] = {"final_route_mode": observation["route_mode"]}
+            observation["conversation_id"] = wechat_conversation_id(payload, channel=channel)
+            observation["route_mode"] = "ingress_reply_pending"
+        elif block_reason in NATIVE_INGRESS_BLOCK_REASONS:
+            # 入站已确定不开启外发，只给实际产生可外发候选的消息记录拦截。
+            text = _native_reply_text(reply, is_room=observation["is_room"])
+            if text:
+                withheld = {"delivery_state": "withheld", "reason": block_reason, "text": text.strip()}
+                observation["payload"]["deferred_reply"] = withheld
     stored = runtime.store.upsert_channel_observation(observation)
     runtime.trace_recorder.record(
         str(record.get("trace_id") or ""),
@@ -818,6 +831,8 @@ def persist_channel_observation(
             "semantic_action": stored["semantic_action"],
         },
     )
+    if withheld:
+        runtime.trace_recorder.record(stored["trace_id"], "agent_wechat_ingress_reply_completed", withheld)
     return stored
 
 
@@ -897,7 +912,8 @@ def process_channel_raw_record(
     return route_result
 
 
-def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict, *, deferred_reply: bool = False) -> dict:
+def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict, *, deferred_reply: bool = False,
+                          reply_block_reason: str = "") -> dict:
     """一次写事务同时保存原消息与待办状态；确认表示已持久接收。"""
     channel = "agent-wechat"
     record = build_channel_raw_record(
@@ -907,6 +923,8 @@ def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict, *, deferred_rep
     observation.update(route_mode="ingress_queue", conversation_id=wechat_conversation_id(payload, channel=channel))
     if deferred_reply:
         observation["payload"]["deferred_reply_requested"] = True
+    elif not observation["self_message"] and reply_block_reason in NATIVE_INGRESS_BLOCK_REASONS:
+        observation["payload"]["reply_block_reason"] = reply_block_reason
     saved, inserted = runtime.store.enqueue_channel_ingress(observation)
     if inserted:
         try:
@@ -939,6 +957,7 @@ def process_queued_channel_raw(runtime: AgentRuntime, observation: dict) -> None
         "source_message_id": observation["source_message_id"],
         "received_at": observation["received_at"],
         "payload": observation["payload"]["raw_payload"],
+        "reply_block_reason": observation["payload"].get("reply_block_reason"),
     }
     process_channel_raw_record(
         runtime, observation["channel"], record, queued=True,
@@ -961,14 +980,19 @@ def _channel_reply_for_delivery(route_result: dict | None) -> dict:
     return reply
 
 
+def _native_reply_text(reply: dict, *, is_room: bool) -> str | None:
+    """群内交付只使用逐群审查后的正文，避免把内部托管结果标为外发。"""
+    return (reply.get("scoped_group_reply", {}).get("text") if is_room
+            else reply.get("agent_result", {}).get("final_reply"))
+
+
 def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> None:
     """调用适配器既有外发审查边界；响应丢失后用同一源消息重试交接。"""
     evidence = observation["payload"]
     reply = evidence["deferred_reply"]
     attempts = reply.get("attempts", 0) + 1
     route_reply = _channel_reply_for_delivery(evidence["route_result"])
-    submitted_text = (route_reply.get("scoped_group_reply", {}).get("text") if observation["is_room"]
-                      else route_reply.get("agent_result", {}).get("final_reply"))
+    submitted_text = _native_reply_text(route_reply, is_room=observation["is_room"])
     rejection = {}
     receipt = {}
     runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_started", {})
@@ -994,6 +1018,9 @@ def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> No
             raise RuntimeError("agent-wechat did not acknowledge deferred delivery")
         if state == "accepted" and isinstance(result.get("message_id"), str) and result["message_id"]:
             receipt = {"message_id": result["message_id"]}
+        reason = result.get("reason")
+        if state == "withheld" and isinstance(reason, str) and reason in NATIVE_CALLBACK_BLOCK_REASONS:
+            rejection = {"reason": reason}
     except (OSError, ValueError, RuntimeError) as exc:
         if isinstance(exc, HTTPError) and exc.code in {400, 413}:
             # 适配器拒绝了输入或载荷大小；重复同一请求无法推进会话。
@@ -3942,6 +3969,7 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
     if not use_bridge and not outbound_token and path.partition("?")[0] in (
         "/deliver-ingress-reply", "/contacts/refresh", "/contact-policy", "/contact-policy/refresh",
         "/permission-roster", "/group-permission", "/console-conversations", "/console-conversation",
+        "/console-conversation-scope",
     ):
         outbound_token = runtime_api_token()
     if outbound_token:
@@ -4017,7 +4045,7 @@ def wechat_console_recipients(query: str) -> tuple[dict, int]:
         return {"ok": False, "error": "invalid_wechat_candidates", "message": "微信适配器返回了无效的候选。"}, 502
     return {"ok": True, "candidates": [
         {**{key: candidate.get(key) for key in WECHAT_RECIPIENT_FIELDS},
-         **{key: candidate[key] for key in BRIDGE_BINDING_FIELDS if isinstance(candidate.get(key), str)}}
+         **{key: candidate[key] for key in (*BRIDGE_BINDING_FIELDS, "work_scope") if isinstance(candidate.get(key), str)}}
         for candidate in candidates[:10]
         if isinstance(candidate, dict) and isinstance(candidate.get("id"), str) and candidate["id"]
         and candidate.get("kind") in ("direct", "group")
@@ -4214,6 +4242,9 @@ def valid_wechat_console_thread(thread_id: object, kind: object) -> bool:
 
 def wechat_console_active_conversations(runtime: AgentRuntime, *, at: datetime | None = None) -> tuple[dict, int]:
     """在本机白名单中合并最近两小时的实际消息和未完成的会话定时任务。"""
+    if os.getenv("MAHJONG_WECHATY_CONTROL_TRANSPORT") == "bridge":
+        return {"ok": False, "error": "wechat_history_unsupported",
+                "message": "当前备用桥接的入站与处理详情可在 Agent 工作记录查看。"}, 501
     data, status = wechat_console_bridge("/console-conversations", timeout_seconds=12)
     if status != 200:
         return data, status
@@ -4250,6 +4281,8 @@ def wechat_console_active_conversations(runtime: AgentRuntime, *, at: datetime |
             "id": thread_id, "kind": kind, "displayName": name if isinstance(name, str) and name.strip() else thread_id,
             "last_at": last.isoformat() if last is not None else None, "pending_tasks": count,
         })
+        if scope := wechat_console_work_scope(account_id, thread_id, kind):
+            active[thread_id][1]["work_scope"] = scope
     ranked = sorted(active.values(), key=lambda value: value[0], reverse=True)
     result = {"ok": True, "items": [item for _, item in ranked]}
     if data.get("partial") is True:
@@ -4261,6 +4294,49 @@ def valid_wechat_history_cursor(value: object) -> bool:
     """分页游标按原值传递，拒绝控制字符、孤立代理码位及超长输入。"""
     return (isinstance(value, str) and re.search(r"[\x00-\x1f\x7f\ud800-\udfff]", value) is None
             and len(value.encode("utf-8")) <= 8192)
+
+
+def wechat_console_work_scope(account_id: object, thread_id: str, kind: str) -> str:
+    """生成用于对照消息记录的账号与会话标识，避免将适配器的内部账号字段交给页面。"""
+    if not isinstance(account_id, str) or not account_id:
+        return ""
+    binding = json.dumps([account_id, thread_id, kind], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(binding.encode("utf-8")).hexdigest()
+
+
+def wechat_console_message_work(runtime: AgentRuntime, thread_id: str, kind: str,
+                                scope: str, message_id: str, *, include_model_io: bool) -> tuple[dict, int]:
+    """精确查询已接收的微信消息，账号或会话不一致时不返回处理详情。"""
+    if (not valid_wechat_console_thread(thread_id, kind) or not re.fullmatch(r"[a-f0-9]{64}", scope)
+            or not valid_wechat_console_message_id(message_id)):
+        return {"ok": False, "message": "请选择有效的微信消息。"}, 400
+    params = urlencode({"thread_id": thread_id, "kind": kind})
+    current, status = wechat_console_bridge(f"/console-conversation-scope?{params}", timeout_seconds=4)
+    if status != 200:
+        return current, status
+    account_id = current.get("account_id")
+    current_scope = wechat_console_work_scope(account_id, thread_id, kind)
+    if current.get("ok") is not True or not current_scope:
+        return {"ok": False, "message": "暂时无法核对当前微信账号。"}, 502
+    if scope != current_scope:
+        return {"ok": False, "message": "微信账号已切换，请重新选择会话。"}, 404
+    observation = runtime.store.get_channel_observation("agent-wechat", message_id)
+    result = {"ok": True, "detail": None, "server_time": datetime.now(DEFAULT_TZ).isoformat()}
+    if observation is None or observation.get("self_message"):
+        return result, 200
+    namespace = native_conversation_namespace("agent-wechat")
+    expected = f"{namespace}:{'room' if kind == 'group' else 'contact'}:{thread_id}"
+    raw = observation["payload"].get("raw_payload") or {}
+    account = _wechaty_nested_text(raw, "payload", "account_id")
+    if observation.get("conversation_id") == expected and account == account_id:
+        result["detail"] = agent_work_detail(runtime, observation, include_model_io=include_model_io)
+    return result, 200
+
+
+def valid_wechat_console_message_id(value: object) -> bool:
+    """采用适配器的 512 个 UTF-16 单元上限，按原值核对消息标识。"""
+    return (isinstance(value, str) and re.fullmatch(r"[^\x00-\x1f\x7f-\x9f\ud800-\udfff]{1,512}", value) is not None
+            and len(value.encode("utf-16-le")) <= 1024)
 
 
 def wechat_console_conversation(thread_id: str, kind: str, cursor: str, limit: str) -> tuple[dict, int]:
@@ -4280,7 +4356,7 @@ def wechat_console_conversation(thread_id: str, kind: str, cursor: str, limit: s
         return {"ok": False, "message": "暂时无法核对这页聊天记录。"}, 502
     items = []
     for row in rows[:int(limit)]:
-        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+        if not isinstance(row, dict) or not valid_wechat_console_message_id(row.get("id")):
             continue
         direction, author = row.get("direction"), row.get("author")
         if not (direction == "inbound" and author == "contact"
@@ -4314,8 +4390,11 @@ def wechat_console_conversation(thread_id: str, kind: str, cursor: str, limit: s
                 and isinstance(recipient.get("displayName"), str) and recipient["displayName"].strip()):
             # 仅投影适配器按群消息发送者、好友关系和本机白名单核对的精确私聊目标。
             item["direct_recipient"] = {key: recipient[key] for key in ("id", "kind", "displayName")}
+            if scope := wechat_console_work_scope(data.get("account_id"), recipient["id"], "direct"):
+                item["direct_recipient"]["work_scope"] = scope
         items.append(item)
-    return {"ok": True, "id": thread_id, "kind": kind, "items": items, "nextCursor": next_cursor}, 200
+    return {"ok": True, "id": thread_id, "kind": kind, "items": items, "nextCursor": next_cursor,
+            "work_scope": wechat_console_work_scope(data.get("account_id"), thread_id, kind)}, 200
 
 
 def wechat_console_set_group_permission(selection: dict) -> tuple[dict, int]:
@@ -4354,6 +4433,11 @@ def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict
         return {"ok": False, "error": "blocked_wechat_text", "message": "消息包含不允许外发的内容。"}, 422
 
     binding = {key: payload.get(key) for key in BRIDGE_BINDING_FIELDS if key in payload}
+    work_scope = payload.get("work_scope")
+    if "work_scope" in payload and (binding or not isinstance(work_scope, str) or not re.fullmatch(r"[a-f0-9]{64}", work_scope)):
+        return {"ok": False, "error": "invalid_wechat_binding", "message": "请重新选择当前微信账号的收件人。"}, 400
+    if work_scope and os.getenv("MAHJONG_WECHATY_CONTROL_TRANSPORT") == "bridge":
+        return {"ok": False, "error": "wechat_transport_changed", "message": "微信接入方式已变化，请重新选择收件人。"}, 409
     if binding and (len(binding) != len(BRIDGE_BINDING_FIELDS)
                     or not all(isinstance(value, str) and 0 < len(value) <= 256 for value in binding.values())):
         return {"ok": False, "error": "invalid_wechat_binding", "message": "请重新选择当前微信账号的收件人。"}, 400
@@ -4362,12 +4446,14 @@ def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict
         return {"ok": False, "error": "bridge_primary_account_mismatch",
                 "message": "Runtime 和微信桥接必须配置同一个 MAHJONG_AGENT_WECHAT_ACCOUNT"}, 409
     # 把正文与会话纳入幂等锚点，避免改稿后复用旧回执并把新正文写入上下文。
-    send_intent = json.dumps([request_id, kind, recipient, text, *binding.values()], ensure_ascii=True).encode("ascii")
+    send_identity = [work_scope] if work_scope else list(binding.values())
+    send_intent = json.dumps([request_id, kind, recipient, text, *send_identity], ensure_ascii=True).encode("ascii")
     trace_id = f"trace_manual_wechat_{hashlib.sha256(send_intent).hexdigest()[:32]}"
     runtime.trace_recorder.record(trace_id, "manual_wechat_send_requested", {"target_type": kind, "thread_id": recipient})
     result, status = wechat_console_bridge("/send", payload={
         "to": recipient, "target_type": kind, "exact_target": True, "text": text, "source_trace_id": trace_id, **binding,
         **({"agent_wechat_primary_account": primary} if binding else {}),
+        **({"work_scope": work_scope} if work_scope else {}),
     }, timeout_seconds=max(10, env_float("MAHJONG_AGENT_WECHAT_SEND_WAIT_SECONDS", 60) + 5))
     raw_state = result.get("state")
     native = bool(raw_state)
@@ -4376,6 +4462,8 @@ def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict
     receipt_revision = result.get("agent_wechat_revision")
     bound_receipt = bool(binding) and (receipt_account, receipt_revision) == tuple(binding.values())
     receipt_matches = bound_receipt or (not binding and not receipt_account and not receipt_revision)
+    if work_scope:
+        receipt_matches = native and result.get("work_scope") == work_scope
     accepted = (status == 200 and result.get("ok") is True and not result.get("suppressed")
                 and receipt_matches and received_id == recipient and (not native or raw_state == "accepted"))
     context_recorded = False
@@ -5648,17 +5736,24 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 return
             self._serve_wechat_media(parse_qs(parsed.query, keep_blank_values=True))
             return
-        if parsed.path in ("/api/wechat/conversations", "/api/wechat/conversation"):
+        if parsed.path in ("/api/wechat/conversations", "/api/wechat/conversation", "/api/wechat/message-work"):
             if not self._local_contact_policy():
                 self._json({"ok": False, "message": "请在运行机器上打开微信会话。"}, status=403, no_store=True)
                 return
             if parsed.path == "/api/wechat/conversations":
                 data, status = wechat_console_active_conversations(get_runtime())
-            else:
+            elif parsed.path == "/api/wechat/conversation":
                 params = parse_qs(parsed.query)
                 data, status = wechat_console_conversation(
                     params.get("thread_id", [""])[0], params.get("kind", [""])[0],
                     params.get("cursor", [""])[0], params.get("limit", ["40"])[0],
+                )
+            else:
+                params = parse_qs(parsed.query)
+                data, status = wechat_console_message_work(
+                    get_runtime(), params.get("thread_id", [""])[0], params.get("kind", [""])[0],
+                    params.get("scope", [""])[0], params.get("message_id", [""])[0],
+                    include_model_io=params.get("model_io") == ["1"],
                 )
             self._json(data, status=status, no_store=True)
             return
@@ -6034,6 +6129,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     accepted = queue_agent_wechat_raw(
                         get_runtime(), payload,
                         deferred_reply=self.headers.get("X-Mahjong-Agent-Wechat-Deferred-Reply") == "1",
+                        reply_block_reason=self.headers.get("X-Mahjong-Agent-Wechat-Reply-Blocked", ""),
                     )
                 except (sqlite3.Error, OSError):
                     logging.getLogger(__name__).exception("Could not store WeChat ingress")
@@ -6610,7 +6706,7 @@ def workspace_html(page: str) -> str:
 
 
 def index_html() -> str:
-    """首页只向老板展示经营数据和人工运营入口。"""
+    """首页以微信会话为入口，按消息查看处理过程，并提供经营和设置页。"""
     return workspace_html("owner")
 
 

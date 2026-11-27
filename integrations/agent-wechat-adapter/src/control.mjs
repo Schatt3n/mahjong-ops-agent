@@ -7,7 +7,7 @@
  * 必须经过鉴权，未配置控制 token 时使用共用的 Runtime token。
  */
 import http from 'node:http'
-import { timingSafeEqual } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { UpstreamError } from './client.mjs'
 import { readObservedMedia } from './media.mjs'
 import { displayNameOf, isChatroomId, isPersonalContact, sendIdempotencyKey } from './normalize.mjs'
@@ -18,6 +18,11 @@ import { consoleConversation, consoleConversations, consoleConversationScope } f
 import { recordConversationSend } from './conversation-sends.mjs'
 
 const MAX_TEXT_LENGTH = 10_000
+
+/** 与 Runtime 的会话标识一致。操作员只选定账号下的精确会话，切换账号必须重新选择。 */
+function conversationWorkScope(account, threadId, kind) {
+  return createHash('sha256').update(JSON.stringify([account, threadId, kind])).digest('hex')
+}
 
 class HttpError extends Error {
   constructor(status, message, details = {}) {
@@ -608,7 +613,8 @@ export async function startControlServer({ config, client, directory, switches, 
         sendJson(response, 200, await updateGroupPermission(body, client, directory))
         return
       }
-      if (['/console-conversations', '/console-conversation'].includes(pathname) && request.method === 'GET') {
+      if (['/console-conversations', '/console-conversation', '/console-conversation-scope'].includes(pathname) &&
+          request.method === 'GET') {
         const token = config.controlToken || config.agentToken
         if (!token || !tokenMatches(requestToken(request), token)) {
           sendJson(response, 401, { ok: false, error: 'unauthorized' })
@@ -621,11 +627,22 @@ export async function startControlServer({ config, client, directory, switches, 
         const params = new URL(request.url, 'http://127.0.0.1').searchParams
         const threadId = params.get('thread_id') || ''
         const kind = params.get('kind') || ''
+        if (!(kind === 'direct' && isDirectContactId(threadId) || kind === 'group' && isGroupPermissionId(threadId))) {
+          throw new HttpError(400, '请选择有效的微信会话。')
+        }
+        if (pathname === '/console-conversation-scope') {
+          // 处理记录轮询只复核当前阅读范围，不翻页或请求微信历史。
+          const accountId = client.accountId
+          const scope = await consoleConversationScope(client, accountId)
+          if (scope.get(threadId)?.kind !== kind) throw new HttpError(404, '当前本机白名单中没有这个会话。')
+          sendJson(response, 200, { ok: true, account_id: accountId })
+          return
+        }
         const cursor = params.get('cursor') || ''
         const limitText = params.get('limit') || '40'
         const limit = Number(limitText)
-        if (!(kind === 'direct' && isDirectContactId(threadId) || kind === 'group' && isGroupPermissionId(threadId)) ||
-          Buffer.byteLength(cursor) > 8192 || /\p{Cc}/u.test(cursor) || !/^\d{1,2}$/u.test(limitText) || limit < 1 || limit > 60) {
+        if (Buffer.byteLength(cursor) > 8192 || /\p{Cc}/u.test(cursor) ||
+            !/^\d{1,2}$/u.test(limitText) || limit < 1 || limit > 60) {
           throw new HttpError(400, '请选择有效的微信会话。')
         }
         const { status, payload } = await consoleConversation({ client, directory, ledgerPath: config.deliveryLedgerPath,
@@ -660,6 +677,7 @@ export async function startControlServer({ config, client, directory, switches, 
       }
 
       if (pathname === '/resolve' && request.method === 'GET') {
+        const account = client.accountId
         const url = new URL(request.url || '/', 'http://127.0.0.1')
         const query = url.searchParams.get('query') || ''
         const rawKind = url.searchParams.get('kind') || ''
@@ -670,7 +688,11 @@ export async function startControlServer({ config, client, directory, switches, 
             : ''
         const policy = await client.contactPolicy()
         const resolved = await directory.resolve(query, { kind, ...permissionLookup(policy, true) })
-        sendJson(response, 200, { ok: true, ...resolved })
+        if (account !== client.accountId) throw new HttpError(409, '微信账号已切换，请重新查找收件人。')
+        const candidates = account ? resolved.candidates.map(row => ({
+          ...row, work_scope: conversationWorkScope(account, row.id, row.kind),
+        })) : resolved.candidates
+        sendJson(response, 200, { ok: true, ...resolved, candidates })
         return
       }
 
@@ -754,6 +776,7 @@ async function deliverIngressReply(adapter, payload, result) {
     return { delivery_state: state, ...(typeof messageId === 'string' && messageId ? { message_id: messageId } : {}) }
   }
   if (state === 'accepted') return { delivery_state: 'needs_review' }
+  if (state === 'withheld') return { delivery_state: state, reason: outcome.reason }
   if (['failed', 'needs_review', 'cancelled', 'already_delivered', 'owner_already_replied'].includes(state)) {
     return { delivery_state: state }
   }
@@ -770,6 +793,8 @@ async function handleSend({ body, config, client, directory, switches, logger })
   if (config.dryRun) throw new HttpError(409, 'dry_run mode does not send messages')
   if (!switches.sendChannelEnabled) throw new HttpError(409, 'send channel is disabled')
   const manual = body.source == null || body.source === 'human_approved_invite'
+  const workScope = body.work_scope
+  const account = client.accountId
   const policy = await client.contactPolicy()
   const hasGroupOverlay = policy.groupPermissions?.some(entry => entry.mode === 'allowlist')
   if (!switches.autoSendReply && !(manual && (policy.direct || policy.group || hasGroupOverlay))) {
@@ -795,6 +820,10 @@ async function handleSend({ body, config, client, directory, switches, logger })
   if (exactOnly && (typeof target !== 'string' || !/^[^\s\p{Cc}]+$/u.test(target) ||
     !kind || isChatroomId(target) !== (kind === 'group'))) {
     throw new HttpError(400, 'exact target requires a matching conversation id and target_type')
+  }
+  if ('work_scope' in body && (!manual || !exactOnly || !account || typeof workScope !== 'string' ||
+      workScope !== conversationWorkScope(account, target, kind))) {
+    throw new HttpError(409, '微信账号或会话已变化，请重新选择收件人。')
   }
   const lookup = permissionLookup(policy, manual)
   const resolved = policy.group || (policy.direct && kind === 'direct')
@@ -824,6 +853,9 @@ async function handleSend({ body, config, client, directory, switches, logger })
     try {
       const existing = await client.getSendByKey(idempotencyKey)
       if (existing && String(existing.state || '') === 'accepted') {
+        if (workScope && (existing.accountId !== account || existing.destination !== resolved.threadId)) {
+          return { ok: false, state: 'needs_review' }
+        }
         if (author) recordConversationSend(config.deliveryLedgerPath, { client, threadId: resolved.threadId,
           state: existing, author, logger })
         return {
@@ -833,6 +865,7 @@ async function handleSend({ body, config, client, directory, switches, logger })
           target_type: resolved.kind,
           thread_id: resolved.threadId,
           ...statePayload(existing),
+          ...(workScope ? { work_scope: workScope } : {}),
           reference_pending: false,
         }
       }
@@ -855,6 +888,7 @@ async function handleSend({ body, config, client, directory, switches, logger })
     intent = await client.sendText({
       threadId: resolved.threadId, text, idempotencyKey,
       manual, requireManualScope: !switches.autoSendReply,
+      ...(workScope ? { expectedAccountId: account } : {}),
       ...(incomingReply ? { incomingReply, legacyManagedGroupReply } : {}),
       ...(!manual && body.native_reply_source ? { replySource: body.native_reply_source } : {}),
     })
@@ -874,6 +908,9 @@ async function handleSend({ body, config, client, directory, switches, logger })
     `manual send target=${resolved.threadId} kind=${resolved.kind} state=${payload.state || '-'} send=${payload.send_id || '-'}`,
   )
   if (payload.state === 'accepted') {
+    if (workScope && (state?.accountId !== account || state.destination !== resolved.threadId)) {
+      return { ok: false, state: 'needs_review' }
+    }
     if (author) recordConversationSend(config.deliveryLedgerPath, { client, threadId: resolved.threadId,
       state: state || intent, author, logger })
     return {
@@ -883,6 +920,7 @@ async function handleSend({ body, config, client, directory, switches, logger })
       thread_id: resolved.threadId,
       deduplicated: false,
       ...payload,
+      ...(workScope ? { work_scope: workScope } : {}),
       reference_pending: false,
     }
   }

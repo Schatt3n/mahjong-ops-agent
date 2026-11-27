@@ -174,6 +174,7 @@ test('自动回复开启后，持久接收确认即可推进游标，结果交�
       const headers = new Headers(init.headers)
       assert.equal(headers.get('Prefer'), 'respond-async')
       assert.equal(headers.get('X-Mahjong-Agent-Wechat-Deferred-Reply'), '1')
+      assert.equal(headers.get('X-Mahjong-Agent-Wechat-Reply-Blocked'), null)
       calls.push(JSON.parse(init.body).message_id)
       return Response.json({ ok: true, accepted: true, deferred_reply: true }, { status: 202 })
     },
@@ -203,7 +204,7 @@ test('本人消息和关闭任一外发开关时只要求持久接收', async (t
       const headers = new Headers(init.headers)
       assert.equal(headers.get('Prefer'), 'respond-async')
       assert.equal(headers.get('X-Mahjong-Agent-Wechat-Deferred-Reply'), null)
-      forwarded.push(JSON.parse(init.body))
+      forwarded.push({ ...JSON.parse(init.body), blockReason: headers.get('X-Mahjong-Agent-Wechat-Reply-Blocked') })
       return Response.json({ ok: true, accepted: true }, { status: 202 })
     },
   })
@@ -218,6 +219,7 @@ test('本人消息和关闭任一外发开关时只要求持久接收', async (t
   adapter.switches.autoSendReply = false
   await adapter.consumeEvent({ cursor: '3', kind: 'message.committed', data: { messageId: 'auto-off' } })
   assert.deepEqual(forwarded.map(payload => payload.message_id), ['owner', 'send-off', 'auto-off'])
+  assert.deepEqual(forwarded.map(payload => payload.blockReason), [null, 'send_channel_disabled', 'auto_send_disabled'])
   assert.equal(forwarded[0].message_origin, 'owner')
   assert.equal(loadCursor(config.cursorPath)?.cursor, '3')
 })
@@ -621,6 +623,30 @@ test('accepted 才写投递账本', async () => {
   const ledger = fs.readFileSync(config.deliveryLedgerPath, 'utf8').trim().split('\n')
   assert.equal(ledger.length, 1)
   assert.equal(JSON.parse(ledger[0]).source_message_id, 'm1')
+})
+
+test('重启后发送总闸关闭仍返回同一账号与会话的已确认回执', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const payload = { source_message_id: 'm1', payload: { account_id: 'acc', threadId: 'wxid_a' } }
+  const result = { route_result: { agent_result: { final_reply: '收到' } } }
+  const first = makeAdapter({ dir, switches: { sendChannelEnabled: true, autoSendReply: true },
+    clientOverrides: {
+      waitForSend: async () => ({ id: 'send-1', state: 'accepted', accountId: 'acc', destination: 'wxid_a', serverId: 'fixture-receipt' }),
+    },
+  }).adapter
+  assert.equal((await first.maybeSendReply(payload, result)).state, 'accepted')
+  const restored = makeAdapter({ dir, clientOverrides: {
+    sendText: async () => assert.fail('重试已确认回复时不能再次发送'),
+  } }).adapter
+  const receipt = await restored.maybeSendReply(payload, result)
+  assert.equal(receipt.state, 'accepted')
+  assert.equal(receipt.serverId, 'fixture-receipt')
+  for (const changed of [{ account_id: 'another' }, { threadId: 'wxid_b' }]) {
+    assert.equal((await restored.maybeSendReply({
+      ...payload, payload: { ...payload.payload, ...changed },
+    }, result)).state, 'withheld')
+  }
 })
 
 test('needs_review 不写账本且沿用同一幂等键', async () => {
