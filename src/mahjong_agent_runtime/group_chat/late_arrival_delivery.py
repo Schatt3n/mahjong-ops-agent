@@ -7,6 +7,7 @@ import json
 from ..budget import TokenBudget
 from ..customer_visible_contract import customer_visible_text_contract_violations
 from ..customer_visible_review import customer_visible_content_review_approved
+from ..domains.table_availability_authorization import stated_arrival_estimate
 from ..late_arrival import (
     LATE_ARRIVAL_QUESTION_TASK_TYPE,
     LATE_ARRIVAL_UPDATE_TASK_TYPE,
@@ -39,6 +40,7 @@ def _review_message(runtime, task, target, trace_id: str) -> str:
     """只提供这桌和到店时间，牌友看不到询局人身份、私聊原文或其他人的答复。"""
     game, recipient = target["game"], target["recipient"]
     with_question = task.task_type == LATE_ARRIVAL_QUESTION_TASK_TYPE
+    approximate = target.get("arrival_is_estimate") is True
     facts = {
         "table_start": public_game_start_display(game),
         "table_type": game.requirement.get("ruleset") or game.requirement.get("game_type"),
@@ -46,9 +48,10 @@ def _review_message(runtime, task, target, trace_id: str) -> str:
         "seat_reserved": False,
     }
     if with_question:
+        timing_question = "这桌有个人大概×点到，能等吗？" if approximate else "这桌有个人要到×点才来，能等吗？"
         scope = (
-            "当前收件人就是这桌已经报名的牌友。直接问收件人能不能接受有位顾客到这个钟点才到店。"
-            "请采用「这桌有个人要到×点才来，能等吗？」的直接问法，清楚区分原定开场与到店时间。"
+            "当前收件人就是这桌已经报名的牌友。直接问收件人是否接受有位顾客在这个钟点到店。"
+            f"请采用「{timing_question}」的直接问法，清楚区分原定开场与到店时间。"
             "禁止写「问下这桌」「我帮你问」或声称要转问第三方，本条就是直接发给牌友的问题。"
         )
         goal = "向同桌牌友确认能否接受顾客晚到"
@@ -63,6 +66,9 @@ def _review_message(runtime, task, target, trace_id: str) -> str:
         goal = "回告询局人这个到店时间未能谈妥"
         status = "completed"
         facts["late_arrival_decision"] = target["decision"]
+    if approximate:
+        facts["candidate_arrival_is_estimate"] = True
+        scope += "这是本人给出的到店估计，提到该钟点时说明大概或左右，不说确定会到或到此时才来。"
     boundary = "像麻将馆老板发微信，简短自然。使用给定事实，不提其他人的身份，不说已经占位、开打或改开场，不附带无关问题。"
     messages = [
         {"role": "system", "content": scope + boundary + "只输出一个 JSON 对象，唯一字段是字符串 text。"},
@@ -78,6 +84,10 @@ def _review_message(runtime, task, target, trace_id: str) -> str:
         if not isinstance(text, str) or not 0 < len(text.strip()) <= 100 or customer_visible_text_contract_violations(text):
             raise RuntimeError("late arrival message failed the text contract")
         text = text.strip()
+        if with_question and approximate and not stated_arrival_estimate(
+            text, sent_at=now(), estimate=target["arrival_at"],
+        ):
+            raise RuntimeError("late arrival question omitted the customer's estimated arrival qualification")
         action = AgentAction(goal=goal, objective_status=status, reasoning_summary=goal, reply_to_user=text)
         review = runtime.action_processor.review_customer_visible_content(
             message=system_message, trace_id=trace_id, action=action,

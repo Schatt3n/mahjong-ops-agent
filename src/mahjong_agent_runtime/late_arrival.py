@@ -6,11 +6,14 @@ from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
+from .domains.delivered_game_offer import DELIVERED_GAME_OFFER, delivered_reference_matches_game
 from .domains.game_domain import START_KIND_ASAP_WHEN_FULL
 from .domains.game_participants import participation_table_terms
 from .domains.model_context import has_agreed_game_duration
+from .domains.table_availability_authorization import customer_arrival_clock_evidence
 from .models import DEFAULT_TZ, ConversationRole, Game, GameStatus, ScheduledAgentTask, ScheduledTaskStatus, StateTransition, ToolResult, now
 
 if TYPE_CHECKING:
@@ -21,10 +24,18 @@ LATE_ARRIVAL_QUESTION_TASK_TYPE = "late_arrival_question"
 LATE_ARRIVAL_UPDATE_TASK_TYPE = "late_arrival_update"
 _ACTIVE_QUESTION_STATUSES = {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING, ScheduledTaskStatus.COMPLETED}
 _ORIGIN_LINK_TYPES = {"origin", "private_switch_created", "private_board_created"}
+_ARRIVAL_QUESTION = re.compile(
+    r"(?:^|[。！？!?，,])\s*(?:那(?:你)?|你)?\s*(?:大概|预计)?\s*几点\s*"
+    r"(?:能|会|可以)?\s*(?:到店|到场|过来|到)[？?]\s*$"
+)
 
 
 class LateArrivalLookupRequired(ValueError):
     """本轮尚无准确查桌凭据，事务计划在安排任何征询之前退出。"""
+
+
+class LateArrivalClockRequired(ValueError):
+    """没有本人支持的同一到店钟点，不能替本人向第三方转述。"""
 
 
 def _aware(value: Any) -> datetime | None:
@@ -82,6 +93,24 @@ def _contacts(game: Game) -> list[str]:
     })
 
 
+def _has_delivered_arrival_question(store, game: Game, source, *, conversation_id: str, sender_id: str) -> bool:
+    """只有实际送达且绑定同一桌的最后一条问话能解释本人的钟点短答。"""
+    turns = store.recent_turns(conversation_id, limit=60)
+    index = next((i for i, turn in enumerate(turns) if turn.role == ConversationRole.USER
+                  and turn.trace_id == source.trace_id and turn.sender_id == sender_id
+                  and turn.metadata.get("source_message_id") == source.metadata["source_message_id"]), 0)
+    prior = next((turn for turn in reversed(turns[:index]) if turn.role == ConversationRole.USER or
+                  (turn.role == ConversationRole.ASSISTANT and turn.metadata.get("delivery_status") == "delivered")), None)
+    if prior is None or prior.role != ConversationRole.ASSISTANT or prior.metadata.get("context_invalidated"):
+        return False
+    source_task = source.metadata.get("task_context_id")
+    if source_task and source_task != prior.metadata.get("task_context_id"):
+        return False
+    reference = prior.metadata.get(DELIVERED_GAME_OFFER)
+    return bool(isinstance(reference, dict) and delivered_reference_matches_game(reference, game=game, recipient_id=sender_id)
+                and _ARRIVAL_QUESTION.search(prior.content))
+
+
 def _terms(game: Game) -> dict:
     """同一轮征询固定牌局条件与现有承诺方，任何改期或承诺变动都会使旧同意失效。"""
     value = participation_table_terms(game)
@@ -136,7 +165,7 @@ def _route(store, game: Game, candidate_id: str, candidate_conversation_id: str,
     return None
 
 
-def _base_payload(game, policy, candidate, contacts, source, arrival_at: datetime) -> dict:
+def _base_payload(game, policy, candidate, contacts, source, arrival_at: datetime, *, approximate: bool) -> dict:
     """响应的稳定锚点覆盖候选人、整桌条件和到店约定，同方案重投复用原沟通。"""
     value = {
         "room_id": policy.room_id,
@@ -145,6 +174,7 @@ def _base_payload(game, policy, candidate, contacts, source, arrival_at: datetim
         "arrival_at": arrival_at.isoformat(),
         "table_terms": _terms(game),
         "required_contact_ids": sorted(contacts),
+        **({"arrival_is_estimate": True} if approximate else {}),
     }
     digest = sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     expiry = min(arrival_at, game.planned_end_at, game.expires_at or game.planned_end_at)
@@ -252,6 +282,7 @@ def late_arrival_delivery_context(store: AgentStore, task: ScheduledAgentTask, *
     if recipient is None or (recipient.customer_id, recipient.private_conversation_id) != (task.subject_id, task.conversation_id):
         return None
     return {"game": game, "policy": policy, "recipient": recipient, "arrival_at": arrival,
+            **({"arrival_is_estimate": True} if task.payload.get("arrival_is_estimate") is True else {}),
             "decision": task.payload.get("decision"), "status": status}
 
 
@@ -274,9 +305,20 @@ def plan_late_arrival_request(store: AgentStore, *, game_id: str, arrival_at: da
     if _aware(observed.get("planned_start_at")) != game.planned_start_at or _aware(observed.get("planned_end_at")) != game.planned_end_at:
         raise ValueError("该桌时间有变，请重新核实当前局况。")
     policy, candidate, contacts = route
-    payload = _base_payload(game, policy, candidate, contacts, source, arrival_at)
-    questions = _question_tasks(store, payload["negotiation_id"])
     previous = _latest_candidate_tasks(store, game_id=game_id, candidate_id=sender_id)
+    arrival_evidence = customer_arrival_clock_evidence(
+        source.content, sent_at=source.occurred_at,
+        replacing_existing=bool(previous and previous[0].payload.get("candidate_conversation_id") == conversation_id),
+    )
+    if arrival_evidence is None and _has_delivered_arrival_question(
+        store, game, source, conversation_id=conversation_id, sender_id=sender_id,
+    ):
+        arrival_evidence = customer_arrival_clock_evidence(source.content, sent_at=source.occurred_at,
+                                                          answering_arrival_question=True)
+    if arrival_evidence is None or arrival_at != arrival_evidence[0]:
+        raise LateArrivalClockRequired("尚未确认顾客本人说过这个到店钟点，未安排晚到征询。")
+    payload = _base_payload(game, policy, candidate, contacts, source, arrival_at, approximate=arrival_evidence[1])
+    questions = _question_tasks(store, payload["negotiation_id"])
     if questions:
         if previous and previous[0].payload["negotiation_id"] != payload["negotiation_id"]:
             raise ValueError("另一个到店时间正在核实，请以最近的协商为准。")
@@ -323,6 +365,8 @@ def _update_task(saved, questions, status, at):
     task_id = f"{payload['negotiation_id']}:update"
     private = {k: payload[k] for k in ("negotiation_id", "room_id", "candidate_id", "candidate_conversation_id",
         "arrival_at", "expires_at", "table_terms", "required_contact_ids", "source_message_id", "source_trace_id")}
+    if payload.get("arrival_is_estimate") is True:
+        private["arrival_is_estimate"] = True
     return ScheduledAgentTask(
         task_id=task_id, task_type=LATE_ARRIVAL_UPDATE_TASK_TYPE, aggregate_type="game",
         aggregate_id=saved.aggregate_id, conversation_id=payload["candidate_conversation_id"],
@@ -431,6 +475,8 @@ def _candidate_request_summary(question: ScheduledAgentTask, status: str) -> dic
     table = payload["table_terms"]
     summary = {"game_id": question.aggregate_id, "arrival_at": payload["arrival_at"],
                "planned_start_at": table["planned_start_at"], "status": status}
+    if payload.get("arrival_is_estimate") is True:
+        summary["arrival_is_estimate"] = True
     arrival = _aware(payload["arrival_at"])
     agreed_end = _aware(table["planned_end_at"]) if has_agreed_game_duration(table["terms"]) else None
     if arrival and agreed_end and arrival < agreed_end:
@@ -476,6 +522,12 @@ def request_late_arrival(store: AgentStore, call, trace_id, conversation_id, sen
                 validation_error={"code": "late_arrival_current_table_lookup_required", "message": str(exc)},
                 instruction="先按原条件查到同一张桌，再用本轮凭据重试。已明确委托的晚到征询无需再问。"
                             "等待真实回执前不要说已经联系或留位。",
+            )
+        if isinstance(exc, LateArrivalClockRequired):
+            details.update(
+                validation_error={"code": "late_arrival_customer_clock_required", "message": str(exc)},
+                instruction="没有登记或发送晚到征询，也未占席。顾客只说晚一些时，只问大概几点能到。"
+                            "已明确说了具体估计时，用本人原话里的钟点。不要猜分钟或重新征求已经明确的委托。",
             )
         return ToolResult(name=call.name, called=False, allowed=False, error=str(exc), result=details)
     status, started = _status(store, questions, stamp)

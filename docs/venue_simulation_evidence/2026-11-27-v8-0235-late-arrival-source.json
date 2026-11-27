@@ -1,0 +1,308 @@
+{
+  "case_id": "v8-0235-late-arrival-source",
+  "run": "runtime_data/venue_simulation/quality_real_12_gate_rev8_20261127/2026-11-25-real-1d158698ce",
+  "report_sha256": "1fa1a953bc463a900f819f7f56e53c3bde515faf14fb2cbbe86317f2b4f28513",
+  "trace_id": "trace_8189f6f59755852704bdacc9",
+  "messages_from_chat_ledger": [
+    {
+      "sequence": 86,
+      "message_id": "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+      "trace_id": "trace_afb2d1f66aed0ceea806b6db",
+      "direction": "inbound",
+      "sender_id": "venue-sender-0235",
+      "recipient_id": "simulation-agent",
+      "text": "老板好 今晚七点半那桌杭麻 一块的底 还有位吗",
+      "sent_at": "2026-11-26T03:09:30+00:00",
+      "source_message_id": null
+    },
+    {
+      "sequence": 88,
+      "message_id": "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+      "trace_id": "trace_afb2d1f66aed0ceea806b6db",
+      "direction": "outbound",
+      "sender_id": "simulation-agent",
+      "recipient_id": "venue-sender-0235",
+      "text": "七点半那桌杭麻还在呢，现在一个人，还差三位。",
+      "sent_at": "2026-11-26T03:09:30+00:00",
+      "source_message_id": "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666"
+    },
+    {
+      "sequence": 122,
+      "message_id": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+      "trace_id": "trace_8189f6f59755852704bdacc9",
+      "direction": "inbound",
+      "sender_id": "venue-sender-0235",
+      "recipient_id": "simulation-agent",
+      "text": "老板好 今晚七点半那桌杭麻一块的底 还有位吗 我到七点半稍晚一点 能先留一个吗",
+      "sent_at": "2026-11-26T11:05:00+00:00",
+      "source_message_id": null
+    },
+    {
+      "sequence": 124,
+      "message_id": "outbound:late-arrival:6170df61bcc512ce6b1e05ee7fe4b794ccff20554ec7a013cfc7824d16d7bfe9:question:1634c10a81c1a21d7ced294d",
+      "trace_id": "trace_scheduled_0f2cfa162b95",
+      "direction": "outbound",
+      "sender_id": "simulation-agent",
+      "recipient_id": "venue-sender-0437",
+      "text": "这桌有个人要到19:45才来，原定19:30开，能等吗？",
+      "sent_at": "2026-11-26T11:05:00+00:00",
+      "source_message_id": "customer:role-event:9207daa379bebd28d3fb27354ccd181bcf800930c9443d96e1ef93d354391baf"
+    },
+    {
+      "sequence": 125,
+      "message_id": "outbound:trace_8189f6f59755852704bdacc9:1",
+      "trace_id": "trace_8189f6f59755852704bdacc9",
+      "direction": "outbound",
+      "sender_id": "simulation-agent",
+      "recipient_id": "venue-sender-0235",
+      "text": "七点半那桌杭麻一块到三块、无烟，现在一个人，还缺三位。你说稍晚一点到，大概七点四十五左右；能不能等你这件事我记下了，目前还没问到答复。",
+      "sent_at": "2026-11-26T11:05:00+00:00",
+      "source_message_id": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f"
+    }
+  ],
+  "availability_verifier": {
+    "clock_observation": {
+      "candidates": [
+        {
+          "clock_ref": 1,
+          "clock_text": "七点半",
+          "local_candidate_at": "2026-11-26T19:30:00+08:00",
+          "qualifier": null,
+          "resolution": "explicit_daypart"
+        },
+        {
+          "clock_ref": 2,
+          "clock_text": "七点半",
+          "local_candidate_at": "2026-11-26T19:30:00+08:00",
+          "qualifier": null,
+          "resolution": "nearest_non_past_same_day"
+        },
+        {
+          "clock_ref": 3,
+          "clock_text": "一点",
+          "local_candidate_at": "2026-11-26T13:00:00+08:00",
+          "qualifier": null,
+          "resolution": "closest_past_requires_clarification"
+        }
+      ],
+      "clock_count": 3
+    },
+    "raw": "{\"clock_roles\": [{\"clock_ref\": 1, \"role\": \"opening\"}, {\"clock_ref\": 2, \"role\": \"opening\"}, {\"clock_ref\": 3, \"role\": \"other\"}], \"clock_role\": \"other\", \"lookup_scope\": \"specific_table\", \"opening_window\": null, \"opening_dayparts\": null, \"accepted_stake_range\": {\"min\": 1, \"max\": 1}, \"known_cap_score\": null, \"max_duration_hours\": null, \"agreed_duration_hours\": null, \"has_fixed_opening_authority\": false, \"opening_customer_ref\": null, \"current_ref\": 1, \"supporting_customer_refs\": [1]}",
+    "decision": {
+      "accepted_stake_range": {
+        "max": 1.0,
+        "min": 1.0
+      },
+      "agreed_duration_hours": null,
+      "clock_role": "other",
+      "clock_roles": [
+        {
+          "clock_ref": 1,
+          "role": "opening"
+        },
+        {
+          "clock_ref": 2,
+          "role": "opening"
+        },
+        {
+          "clock_ref": 3,
+          "role": "other"
+        }
+      ],
+      "current_ref": 1,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "specific_table",
+      "max_duration_hours": null,
+      "opening_customer_ref": null,
+      "opening_dayparts": null,
+      "opening_window": null,
+      "personal_clocks_not_opening": [],
+      "supporting_customer_refs": [
+        1
+      ]
+    },
+    "input_sha256": "9d3acccd6af1fadc3ecf8d955365f7e00d56fdda1b96d53aeda38eb117d31bf6",
+    "response_source": {
+      "call_id": "llm_call_0b1b672189654870a11d41b411711227",
+      "http_response_complete": true,
+      "raw_response_sha256": "e8a92a02d1813824f2bc7cefe54743b31d738abaeb911eaf44770a70a3cd5243",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_d187641c3cd140d88646311aab63243c",
+      "trace_id": "trace_8189f6f59755852704bdacc9:table-availability:1"
+    },
+    "http_status": 200
+  },
+  "same_turn_lookup": {
+    "tool_call": {
+      "arguments": {
+        "lookup_scope": "specific_table",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "stake": 1,
+          "start_time": "19:30",
+          "start_time_kind": "scheduled"
+        }
+      },
+      "call_id": "lookup_table",
+      "depends_on": null,
+      "idempotency_key": null,
+      "name": "search_current_games",
+      "reason": "定位七点半杭麻一块底现成桌况"
+    },
+    "match_count": 1,
+    "game": {
+      "game_id": "game_8aef6bf1423b",
+      "planned_start_at": "2026-11-26T19:30:00+08:00",
+      "planned_end_at": "2026-11-26T22:00:00+08:00",
+      "status": "forming",
+      "seat_summary": {
+        "claimed_seats": 1,
+        "remaining_seats": 3,
+        "seats_total": 4
+      },
+      "requirement": {
+        "game_type": "hangzhou_mahjong",
+        "known_player_count": 1,
+        "max_duration_hours": 2.5,
+        "needed_seats": 3,
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "recruitment_status": "open",
+        "seat_format": "173",
+        "smoke_preference": "no_smoking",
+        "stake_label": "1～3元",
+        "stake_range": {
+          "max": 3.0,
+          "min": 1.0
+        },
+        "start_time": "19:30",
+        "start_time_kind": "scheduled"
+      }
+    },
+    "agreed_duration": null
+  },
+  "late_arrival_tool": {
+    "call": {
+      "arguments": {
+        "arrival_at": "2026-11-26T19:45:00+08:00",
+        "game_id": "game_8aef6bf1423b"
+      },
+      "call_id": "late_check",
+      "depends_on": null,
+      "idempotency_key": null,
+      "name": "request_late_arrival",
+      "reason": "核实原桌能否接受稍晚到店"
+    },
+    "step_index": 2,
+    "receipt": {
+      "called": true,
+      "allowed": true,
+      "result": {
+        "contact_started": false,
+        "instruction": "按该桌实际状态说明进展。排队可以告知仍待确认，不能说已经问到；等牌友答复不要求申请人继续回答。原开场与空席不变。",
+        "late_arrival_request": {
+          "arrival_at": "2026-11-26T19:45:00+08:00",
+          "game_id": "game_8aef6bf1423b",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "status": "queued"
+        }
+      }
+    }
+  },
+  "persisted_external_task": {
+    "task_id": "late-arrival:6170df61bcc512ce6b1e05ee7fe4b794ccff20554ec7a013cfc7824d16d7bfe9:question:1634c10a81c1a21d7ced294d",
+    "task_type": "late_arrival_question",
+    "aggregate_id": "game_8aef6bf1423b",
+    "status": "completed",
+    "due_at": "2026-11-26T19:05:00+08:00",
+    "completed_at": "2026-11-26T19:05:00+08:00",
+    "attempts": 1,
+    "subject_id": "venue-sender-0437",
+    "payload": {
+      "source_message_id": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+      "arrival_at": "2026-11-26T19:45:00+08:00",
+      "expires_at": "2026-11-26T19:45:00+08:00"
+    },
+    "delivery_message_id": "outbound:late-arrival:6170df61bcc512ce6b1e05ee7fe4b794ccff20554ec7a013cfc7824d16d7bfe9:question:1634c10a81c1a21d7ced294d",
+    "delivery_trace_id": "trace_scheduled_0f2cfa162b95"
+  },
+  "original_independent_judge": {
+    "status": "valid",
+    "verdict": "fail",
+    "raw": "{\n  \"verdict\": \"fail\",\n  \"findings\": [\n    {\n      \"check\": \"role_behavior\",\n      \"verdict\": \"fail\",\n      \"evidence_ids\": [\"E04\", \"E05\", \"E08\", \"E11\", \"E12\", \"E16\", \"E17\", \"E19\"],\n      \"reason\": \"顾客E04只问7点半0.5那桌有没有位，店家查空后如实回复无位（E05、E06），顾客E08选择等待，合理；但次日E11问「一块的底」的杭麻桌是否有位，店家已答到位（E12）后，顾客在E16没有新约束、没有先前缺口、没有店家备选的情况下，又用几乎相同条件重复问同一桌并在未获留位答复前就提出留位，仅补充了「稍晚一点到」这一新信息但询问本身重复了已得答复的问题，不是自然追问；末轮E17已说明未问到答复，E19继续等待正常。整体顾客在已知桌位信息后重复探问同一桌，沟通效率不符合真人处理方式。\"\n    },\n    {\n      \"check\": \"shop_behavior\",\n      \"verdict\": \"fail\",\n      \"evidence_ids\": [\"E04\", \"E05\", \"E06\", \"E11\", \"E12\", \"E13\", \"E16\", \"E17\", \"E18\"],\n      \"reason\": \"店家E05对E04的查询有E06查询空结果支撑，回复准确；E12对E11回复「还在呢，现在一个人，还差三位」有E13的forming桌支撑，准确；但E16顾客提出「稍晚一点到 能先留一个吗」时，E17只说「能不能等你这件事我记下了，目前还没问到答复」，没有实际确认席位或给出任何处理进展，同时E18的request_late_arrival执行虽ok但未返回结果，店家在顾客明确请求留位且存在可占席位（claimed_seats=1, remaining_seats=3）的情况下，只口头记录而未说明是否可以留、也未说明需要等待谁确认，也未补报该桌实际时长（max_duration_hours=2.5），未对顾客的留位请求作闭环处理，属于未完成实际执行与交付。\"\n    }\n  ]\n}",
+    "findings": [
+      {
+        "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+        "verdict": "fail",
+        "evidence_ids": [
+          "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f",
+          "outbound:trace_7063fe0a33998ba163c2a3da:1",
+          "role:role-event:d56899b218e293ea444f4a16dff3b9074334040c7cf0e71ca53692ada94c4edb",
+          "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+          "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+          "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+          "outbound:trace_8189f6f59755852704bdacc9:1",
+          "role:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255"
+        ],
+        "reason": "顾客E04只问7点半0.5那桌有没有位，店家查空后如实回复无位（E05、E06），顾客E08选择等待，合理；但次日E11问「一块的底」的杭麻桌是否有位，店家已答到位（E12）后，顾客在E16没有新约束、没有先前缺口、没有店家备选的情况下，又用几乎相同条件重复问同一桌并在未获留位答复前就提出留位，仅补充了「稍晚一点到」这一新信息但询问本身重复了已得答复的问题，不是自然追问；末轮E17已说明未问到答复，E19继续等待正常。整体顾客在已知桌位信息后重复探问同一桌，沟通效率不符合真人处理方式。"
+      },
+      {
+        "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+        "verdict": "fail",
+        "evidence_ids": [
+          "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f",
+          "outbound:trace_7063fe0a33998ba163c2a3da:1",
+          "trace_7063fe0a33998ba163c2a3da",
+          "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+          "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+          "trace_afb2d1f66aed0ceea806b6db",
+          "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+          "outbound:trace_8189f6f59755852704bdacc9:1",
+          "trace_8189f6f59755852704bdacc9"
+        ],
+        "reason": "店家E05对E04的查询有E06查询空结果支撑，回复准确；E12对E11回复「还在呢，现在一个人，还差三位」有E13的forming桌支撑，准确；但E16顾客提出「稍晚一点到 能先留一个吗」时，E17只说「能不能等你这件事我记下了，目前还没问到答复」，没有实际确认席位或给出任何处理进展，同时E18的request_late_arrival执行虽ok但未返回结果，店家在顾客明确请求留位且存在可占席位（claimed_seats=1, remaining_seats=3）的情况下，只口头记录而未说明是否可以留、也未说明需要等待谁确认，也未补报该桌实际时长（max_duration_hours=2.5），未对顾客的留位请求作闭环处理，属于未完成实际执行与交付。"
+      }
+    ],
+    "response_source": {
+      "schema_version": 1,
+      "trace_id": "judge:venue-sender-0235",
+      "step_index": 1,
+      "raw_response_sha256": "93751d1640772c7b55784305e50e71fca775ae10291b5b71e909035ba76696e2",
+      "call_id": "llm_call_ab19b71c90be434294b2d5898334eff3",
+      "terminal_attempt_id": "llm_attempt_78a6017a8c6643dc9b8c42fafb938207",
+      "route": "primary",
+      "response_route": [],
+      "http_response_complete": true
+    },
+    "projection": {
+      "version": 12,
+      "rows": 19,
+      "evidence_bytes": 8235,
+      "source_turn_bytes": 150472,
+      "rolling_check_ids": true
+    },
+    "evidence_aliases": {
+      "E11": "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+      "E12": "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+      "E16": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+      "E17": "outbound:trace_8189f6f59755852704bdacc9:1",
+      "E18": "trace_8189f6f59755852704bdacc9",
+      "E19": "role:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255"
+    }
+  },
+  "analysis": [
+    "两处七点半有来源。稍晚一点说明比原开场晚，无法确定晚多久。可先确认空席并问顾客大概几点能到。",
+    "19:45 最早出现在店家提交的晚到征询工具参数。独立核验读到两个 19:30 和一个被错误视作 13:00 的「一点」，没有读到 19:45。旧工具核实了同一桌和物理时段，但没有核实客户是否亲自提供该到店钟点。",
+    "工具回执记录排队，当时尚未发出。独立调度随即把具体 19:45 告诉原桌发起人。外发的任务载荷绑定本顾客消息，可用任务 ID 对接聊天账本。账本外发触发来源是唤醒该队列的同批另一条事件。",
+    "原评审判顾客和店家均失败，遗漏了顾客原话没有 19:45，并把 2.5 小时上限描述为该桌实际时长。原评审样本没有收进另一人的私聊和完整排队回执，实际调度完成见 SQLite 与聊天账本。保留原评审结果。"
+  ],
+  "offline_regression": {
+    "blocked_original": "照原话请求 19:45 时返回需要顾客本人钟点的验证结果，任务队列不新增，原桌开场和席位保持不变。",
+    "explicit_exact_control": "V8 0022 的「我20点03分能到」仍可排队征询，承接真实同桌查档。",
+    "explicit_estimate_control": "本人给出「我大概19:45能到」可以排队。外发征询必须保留近似含义，收到错误的确定钟点草稿时实际发送被拒，重试可发出有近似表达的询问。"
+  }
+}

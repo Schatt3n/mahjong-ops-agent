@@ -963,8 +963,8 @@ def test_board_retry_recovers_snapshot_without_resending_durable_delivery(sandbo
     assert channel.events() == [delivery]
 
 
-@pytest.mark.parametrize("decision", ["accepted", "declined"])
-def test_late_arrival_notices_receive_scoped_private_receipts(sandbox, monkeypatch, decision):
+@pytest.mark.parametrize(("decision", "estimated"), [("accepted", False), ("declined", False), ("accepted", True)])
+def test_late_arrival_notices_receive_scoped_private_receipts(sandbox, monkeypatch, decision, estimated):
     """原桌联系人和询局人各收一条受审私聊，交付失败后同文案重试且不能提前占席。"""
     from mahjong_agent_runtime.customer_visible_review import CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME
     from mahjong_agent_runtime.group_chat.models import GameConversationLink
@@ -976,15 +976,19 @@ def test_late_arrival_notices_receive_scoped_private_receipts(sandbox, monkeypat
     at = now().replace(hour=18, minute=35, second=0, microsecond=0)
     arrival = at + timedelta(minutes=20)
     review_recipients = []
-    texts = iter(["我先帮你问问五点半那桌。",
-                  "五点半那桌，有人得六点五十五才到，能等吗？",
-                  "五点半那桌能等到六点五十五，你还来吗？" if decision == "accepted" else
-                  "五点半那桌等不了六点五十五，这次先不算。"])
+    precise_draft = "五点半那桌，有人得六点五十五才到，能等吗？"
+    texts = iter(
+        [precise_draft, "五点半那桌，有人大概六点五十五到，能等吗？", "五点半那桌能等到大概六点五十五，你还来吗？"]
+        if estimated else ["我先帮你问问五点半那桌。", precise_draft,
+                          "五点半那桌能等到六点五十五，你还来吗？" if decision == "accepted" else
+                          "五点半那桌等不了六点五十五，这次先不算。"]
+    )
     monkeypatch.setattr(type(client), "complete", lambda *_args, **_kwargs: json.dumps({"text": next(texts)}))
 
     def approve_review(_service, **kwargs):
         facts, = kwargs["context_payload"]["active_game_visible_summaries"]
         assert facts["candidate_arrival_time"] == "18:55" and facts["seat_reserved"] is False
+        assert facts.get("candidate_arrival_is_estimate", False) is estimated
         assert not {"candidate_id", "candidate_conversation_id", "required_contact_ids"} & facts.keys()
         item, = kwargs["review_items"]
         if item["text"] == "我先帮你问问五点半那桌。":
@@ -1003,7 +1007,8 @@ def test_late_arrival_notices_receive_scoped_private_receipts(sandbox, monkeypat
         store.link_game_conversation(GameConversationLink(
             "late-table", game.game_id, host, ROOM, "a", "private_board_created",
         ))
-        source = MessageEnvelope("late-ask", "b", "我六点五十五到，能帮我问问五点半那桌吗？", at, "private", AGENT_ID)
+        incoming = "我大概六点五十五到，能帮我问问五点半那桌吗？" if estimated else "我六点五十五到，能帮我问问五点半那桌吗？"
+        source = MessageEnvelope("late-ask", "b", incoming, at, "private", AGENT_ID)
         request = channel.deliver_private_history(source)
         store.append_tool_turn(candidate, json.dumps([{
             "name": "search_current_games", "called": True, "allowed": True, "result": {
@@ -1022,8 +1027,14 @@ def test_late_arrival_notices_receive_scoped_private_receipts(sandbox, monkeypat
         raise RuntimeError("injected receipt persistence failure after sandbox delivery")
 
     monkeypatch.setattr(type(store), "register_message_reference", interrupted_receipt)
+    if estimated:
+        assert channel.deliver_late_arrival_notice(question.task_id, source_message_id="estimate-first", sent_at=at) == []
+        assert channel.events_for("a") == [] and review_recipients == []
+        at, failed_attempt = channel.next_late_arrival_delivery()
+        assert failed_attempt == question.task_id
     first, = channel.deliver_late_arrival_notice(question.task_id, source_message_id="clock-question", sent_at=at)
     assert first["recipient_id"] == "a" and first["conversation_id"] == host
+    assert ("大概" in first["text"]) is estimated
     assert late_arrival_delivery_receipt(store, question, at=at) is None
     retry_at, retry_id = channel.next_late_arrival_delivery()
     assert retry_id == question.task_id and retry_at > at

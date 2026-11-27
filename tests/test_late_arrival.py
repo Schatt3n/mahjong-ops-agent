@@ -97,6 +97,50 @@ def _tasks(store, task_type):
     return [task for task in store.scheduled_tasks.values() if task.task_type == task_type]
 
 
+@pytest.mark.parametrize(("text", "asked", "expected"), [
+    ("老板好 今晚七点半那桌杭麻一块的底 还有位吗 我到七点半稍晚一点 能先留一个吗", None, None),
+    ("我19:45才下班 可能晚点到 这桌能等吗？", None, None),
+    ("我朋友19:45能到，我还不确定。", None, None),
+    ("我19:45到不了，帮我问下。", None, None),
+    ("我大概19:45能到，能不能等一下？", None, True),
+    ("大概19:45", "same_table", True),
+    ("大概19:45", "another_table", None),
+    ("大概19:45", None, None),
+])
+def test_late_arrival_requires_actual_customer_time_and_preserves_an_estimate(store, text, asked, expected):
+    """原话不含精确到店或同桌问话时，不能将模型指定的19:45写成待派发时点。"""
+    at = datetime.fromisoformat("2026-11-26T19:05:00+08:00")
+    arrival = at.replace(minute=45)
+    with using_clock(lambda: at):
+        game = _seed(store, duration_hours=None, start=at.replace(minute=30))
+        if asked:
+            lookup = {"game_type": "hangzhou_mahjong", "stake": "2", "base_stake": 2.0, "stake_label": "2",
+                      "start_time_kind": "scheduled"}
+            store.append_assistant_turn(_private("guest"), "七点半那桌还有位。你大概几点能到？", "prior",
+                metadata={"delivery_status": "delivered", "delivered_game_offer": {
+                    "recipient_id": "guest", "game_id": game.game_id if asked == "same_table" else "different",
+                    "terms": {**lookup, "planned_start_at": game.planned_start_at.isoformat()},
+                    "game_reference_only": True,
+                }})
+        _input(store, "guest", text, "v8-0235", "inquiry", at)
+        _query(store, game, "inquiry")
+        before = store.require_game(game.game_id).to_dict()
+        request = _request(store, game, eta=arrival)
+        assert store.require_game(game.game_id).to_dict() == before
+        questions = _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        if expected is None:
+            assert not request.called and not request.allowed and not questions
+            assert request.result["validation_error"]["code"] == "late_arrival_customer_clock_required"
+        else:
+            question, = questions
+            assert request.called and request.result["contact_started"] is False
+            assert request.result["late_arrival_request"]["arrival_is_estimate"] is expected
+            context = tool_result_for_context(request)["result"]["late_arrival_request"]
+            assert context["arrival_is_estimate"] is expected
+            assert question.payload["arrival_at"] == arrival.isoformat()
+            assert question.payload["arrival_is_estimate"] is expected
+
+
 def test_late_arrival_hides_unagreed_duration_and_rejects_incomplete_lookup(store):
     """截断搜索不能证明唯一，同桌的内部占用预估也不能冒充约定散场。"""
     with using_clock(lambda: TOUCH):

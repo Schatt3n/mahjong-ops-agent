@@ -212,6 +212,62 @@ def explicit_customer_play_deadline(text: str, *, sent_at: datetime) -> dict[str
     return {"must_end_by": deadline, "clock_text": found[deadline] if len(found) == 1 else None}
 
 
+_ARRIVAL_ESTIMATE_WORD = r"(?:大概|大约|差不多|预计|估计|大致|可能|约)"
+_ARRIVAL_ESTIMATE_PREFIX = re.compile(rf"{_ARRIVAL_ESTIMATE_WORD}\s*(?:在\s*)?$")
+_ARRIVAL_ESTIMATE_SUFFIX = re.compile(r"\s*(?:左右|前后)")
+_NON_CUSTOMER_ARRIVAL = re.compile(
+    rf"(?:他|她|别人|朋友|同伴|同事|对方|不是|不一定|不能|没法)\s*(?:{_ARRIVAL_ESTIMATE_WORD}\s*)?(?:在\s*)?$"
+)
+_ARRIVAL_ACTION_AFTER = re.compile(
+    r"\s*(?:(?:左右|前后)\s*)?(?:我(?:们)?\s*)?(?:才\s*)?(?:能|可以|会)?\s*"
+    r"(?:到店|到场|过来|到)(?!不|没|时|底|第)"
+)
+_ARRIVAL_ACTION_BEFORE = re.compile(
+    rf"我\s*(?:到店|到场|过来)(?:的?时间)?\s*(?:是|在)?\s*(?:{_ARRIVAL_ESTIMATE_WORD}\s*)?$"
+)
+_ARRIVAL_REVISION_BEFORE = re.compile(r"(?:改成|换成|问(?:问|一下|下)|能不能等(?:到)?)\s*$")
+_ARRIVAL_REVISION_AFTER = re.compile(r"\s*(?:行|可以)(?:吗|么|不)\s*$")
+
+
+def customer_arrival_clock_evidence(
+    text: str, *, sent_at: datetime, replacing_existing: bool = False, answering_arrival_question: bool = False,
+) -> tuple[datetime, bool] | None:
+    """核实本人实际说出的到店钟点，确定是口语估计时保留精度。"""
+    local_at = parse_context_datetime(sent_at)
+    normalized = unicodedata.normalize("NFKC", text)
+    candidates = {}
+    for clock in observe_clock_candidates(_source_clock_text(text), anchor=local_at, include_source_spans=True):
+        if clock["qualifier"] not in {None, "左右", "前后"}:
+            continue
+        start, end = clock["source_span"]
+        prefix = _CLAUSE_SEPARATOR.split(normalized[:start])[-1]
+        suffix = _CLAUSE_SEPARATOR.split(normalized[end:], maxsplit=1)[0]
+        if _NON_CUSTOMER_ARRIVAL.search(prefix):
+            continue
+        direct = _ARRIVAL_ACTION_AFTER.match(suffix) or _ARRIVAL_ACTION_BEFORE.search(prefix)
+        revision = replacing_existing and _ARRIVAL_REVISION_BEFORE.search(prefix) and _ARRIVAL_REVISION_AFTER.match(suffix)
+        answer = (answering_arrival_question
+                  and re.fullmatch(rf"\s*(?:{_ARRIVAL_ESTIMATE_WORD}\s*)?", normalized[:start])
+                  and re.fullmatch(r"\s*(?:(?:左右|前后)\s*)?[。!！]?", normalized[end:]))
+        if (direct or revision or answer) and (at := _supported_role_time(clock, normalized, local_at)):
+            approximate = bool(_ARRIVAL_ESTIMATE_PREFIX.search(prefix) or _ARRIVAL_ESTIMATE_SUFFIX.match(suffix))
+            candidates[at] = candidates.get(at, False) or approximate
+    return next(iter(candidates.items())) if len(candidates) == 1 else None
+
+
+def stated_arrival_estimate(text: str, *, sent_at: datetime, estimate: datetime) -> bool:
+    """候客通知中的近似词必须修饰那个实际的到店钟点。"""
+    stamp = parse_context_datetime(sent_at)
+    normalized = unicodedata.normalize("NFKC", text)
+    for clock in observe_clock_candidates(_source_clock_text(text), anchor=stamp, include_source_spans=True):
+        if parse_context_datetime(clock["local_candidate_at"]) != estimate:
+            continue
+        start, end = clock["source_span"]
+        if _ARRIVAL_ESTIMATE_PREFIX.search(normalized[:start]) or _ARRIVAL_ESTIMATE_SUFFIX.match(normalized[end:]):
+            return True
+    return False
+
+
 def _named_future_opening(message: UserMessage) -> dict[str, Any] | None:
     """找到本人明确用于约局的唯一未来时段，单纯问候、过去时段及跨日歧义不触发。"""
     stamp = parse_context_datetime(message.sent_at)

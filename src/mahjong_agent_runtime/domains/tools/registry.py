@@ -101,6 +101,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             "request_late_arrival",
             "顾客希望按本人明确表达的晚到时间参加一张现成桌时，登记向该桌相关报名联系人确认。"
             "只能使用本轮查到的原桌及本人实际提供的未来到店时间，arrival_at 必须是带时区的完整 ISO 时间。"
+            "顾客只说稍晚一点时先问大概几点，不猜分钟。本人已给出具体估计时保留大概或左右的含义。"
             "后端按桌况选择收件人与通道。只登记核实和回告责任，排队不代表已送达或已占座，不会改整桌开场。",
             "medium", "state_write",
             {"type": "object", "required": ["game_id", "arrival_at"], "additionalProperties": False,

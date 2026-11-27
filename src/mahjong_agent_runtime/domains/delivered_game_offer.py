@@ -175,10 +175,10 @@ def own_seat_fact_for_private_reply(
 def delivered_offer_matches_game(offer: Any, *, game: Game, recipient_id: str) -> bool:
     """正式推荐才可作为本人接受提议的证据；调用方仍须核实送达与报名权限。"""
     return (isinstance(offer, dict) and "game_reference_only" not in offer
-            and _delivered_reference_matches_game(offer, game=game, recipient_id=recipient_id))
+            and delivered_reference_matches_game(offer, game=game, recipient_id=recipient_id))
 
 
-def _delivered_reference_matches_game(reference: dict[str, Any], *, game: Game, recipient_id: str) -> bool:
+def delivered_reference_matches_game(reference: dict[str, Any], *, game: Game, recipient_id: str) -> bool:
     """定位也须对齐收件人、牌局和条款，防止旧条件或另一位顾客的引用被沿用。"""
     return (reference.get("recipient_id") == recipient_id and reference.get("game_id") == game.game_id
             and reference.get("terms") == _offer_terms(game.to_dict()))
@@ -208,7 +208,7 @@ def pending_game_offer_after_idle_reset(
     game = _available_game(store, game_id, message)
     if game is None:
         return None
-    if not _delivered_reference_matches_game(offer, game=game, recipient_id=message.sender_id):
+    if not delivered_reference_matches_game(offer, game=game, recipient_id=message.sender_id):
         return None
     reference_only = offer.get("game_reference_only") is True
     return {

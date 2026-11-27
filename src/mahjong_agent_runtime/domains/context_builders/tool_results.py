@@ -468,7 +468,8 @@ def compact_tool_payload(payload: Any, *, public_inventory: bool = False, public
         "queued", "pending", "accepted", "declined", "unavailable",
     }:
         compact["late_arrival_request"] = {key: late_request[key] for key in (
-            "status", "game_id", "arrival_at", "planned_start_at", "planned_end_at", "remaining_play_minutes",
+            "status", "game_id", "arrival_at", "arrival_is_estimate", "planned_start_at", "planned_end_at",
+            "remaining_play_minutes",
         ) if key in late_request}
         if type(payload.get("contact_started")) is bool:
             compact["contact_started"] = payload["contact_started"]
