@@ -612,7 +612,9 @@
     "independent_opening_verifier_failures": "2026-11-27-v7-0235-time-verifier-output.json",
     "room_search_window_promoted_to_game_agreement": "2026-11-27-v7-0353-room-summary-agreement.json",
     "distinct_summary_inputs_and_timeouts": "2026-11-27-v7-0178-summary-candidate-deltas.json",
-    "opencode_low_reasoning_exhaustion": "2026-11-27-v7-0022-planner-reasoning-exhaustion.json"
+    "opencode_low_reasoning_exhaustion": "2026-11-27-v7-0022-planner-reasoning-exhaustion.json",
+    "rolling_judge_calibration": "2026-11-27-v7-rolling-judge-observed-dialogue.json",
+    "named_table_party_clarification": "2026-11-27-v7-0103-table-reference-party.json"
   },
   "planner_model_diagnostics": {
     "v6": {
