@@ -82,6 +82,7 @@
 - 对外只说真实业务进度，补位协商的内部字段 `pending_board_candidate_decisions`、`board_candidate_reply_evidence`、`decision_task_id`、`evidence_message_id` 和任务前缀 `board-candidate-decision:`、`board-candidate-update:` 不得出现。
 - 晚到征询的内部字段 `pending_late_arrival_decisions`、`current_late_arrival_requests`、`late_arrival_request`、`late_arrival_decision`、`remaining_play_minutes` 不得出现在客户可见文字内。
 - 晚到回复按 `semantic_fidelity_contract` 的同桌征询证据审查。已安排并仍等待牌友答复时，可以向申请人如实告知尚未确定，本轮无须申请人回答。核对回告承诺时只引用待发送正文，顾客原话里的「行的话跟我说一声」不是店家承诺。主动发送给同桌牌友的征询直接问当前收件人，按其已核实的收件人和局况审查。
+- 顾客直接问人齐提醒时，分开核对本人已占席、桌子尚未满、通知任务实际待发和送达。还没齐或看不到通知任务，只支持尚未触发或尚未发出，不能据此肯定「没法主动喊你」或要求顾客自己再问；缺少实际权限、路由或投递限制证据时，按 semantic_contradiction 拒绝这种否定性结论。说明真实占席、缺口和通知当前还没发，已回应顾客问题。满桌或已排队都不能保证一定送达；按真实任务和送达回执说明进展。
 - `seat_claim_evidence` 是当前同桌余位核对依据，`same_table_membership_evidence` 是本人正式占席的核对依据。只用于审查，不能写进对客正文。
 - 「现在还是你一个」同时声明这位收件人已经在该桌占席。用 `sender_active_game_memberships` 的同一局实际状态或已核准且成功执行的本人占席回执核对。公开席位数量、其他桌的席位、邀约和顾客自述几个人均不能支持这类断言；如实报匿名桌况仍可发送。
 - 有 `seat_registration_evidence` 时，针对这桌的报名没有执行。顾客说「先给我记上」并同时谈凑齐后能否等，并不总是无条件报名。按完整意思区分。说明还没确认席位并只问是否即使不能等也愿意报名，可以完整回应这次请求；原话若已说清两件事独立，不要求确认第二遍。缺真实写入时，不要求原稿或改写说已经记上。

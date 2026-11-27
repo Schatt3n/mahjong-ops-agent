@@ -782,6 +782,55 @@ def test_main_prompt_grounds_organizer_receipt_in_table_state_and_delivery():
     assert "保留实际进展" in copywriting
 
 
+@pytest.mark.parametrize("wrong", [
+    "好，给你占上了，现在两个，还差两个。人齐我这边没法主动喊你，你要不临近了再问我一声？",
+    "好，给你占上了，还差两位。等人齐了你肯定会收到消息。",
+])
+def test_v8_waiting_for_full_table_notice_keeps_actual_seat_and_delivery_state(tmp_path, wrong):
+    """原始 0353 回合与保证收到的反例走同一 SQLite 报名和发前审查合同。"""
+    stamp = datetime.fromisoformat("2026-11-26T17:07:00+08:00")
+    store = SQLiteAgentStore(tmp_path / "notice-0353.sqlite3")
+    with using_clock(lambda: stamp):
+        game, _ = store.create_game(conversation_id="owner", organizer_id="owner", organizer_name="桌主", trace_id="seed",
+            requirement={"game_type": "sichuan_mahjong", "stake": 0.5, "smoke_preference": "no_smoking",
+                         "start_time_kind": "scheduled", "planned_start_at": "2026-11-26T19:30:00+08:00"},
+            known_players=[])
+    inbound = "好 那我报一个 七点半到 川麻0.5无烟这桌 人齐了喊我一声"
+    corrected = "给你留好了，现在还差两位，满桌通知还没发。"
+    main = StaticAgentClient([
+        _call("search_current_games", {"requirement": {"game_type": "sichuan_mahjong", "stake": 0.5},
+                                       "lookup_scope": "specific_table"}),
+        _call("join_game", {"game_id": game.game_id, "customer_id": "guest", "display_name": "顾客"}),
+        _reply(wrong), _reply(corrected),
+    ])
+    responses = []
+    for text, violations in ((wrong, ["semantic_contradiction"]), (corrected, [])):
+        responses.append(json.dumps({
+            "approved": not violations, "needs_human": False, "violations": violations, "reasoning_summary": "核对满桌和通知状态",
+            "item_reviews": [{"item_id": "reply_to_user", "approved": not violations, "violations": violations,
+                              "reasoning_summary": "按观测到的通知证据", "suggested_safe_text": text,
+                              "follow_up_commitments": []}],
+        }, ensure_ascii=False))
+    reviewer = StaticAgentClient(responses)
+    runtime = AgentRuntime(llm_client=main, store=store, reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="notice-0353", identities={"owner": "桌主", "guest": "顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    with using_clock(lambda: stamp):
+        result = channel.send(MessageEnvelope("v8-0353", "guest", inbound, stamp, "private", AGENT_ID))
+    assert result["final_reply"] == corrected
+    assert store.require_game(game.game_id).remaining_seats() == 2
+    assert not any(task.task_type == "group_game_full_notice" for task in store.scheduled_tasks.values())
+    assert "已排队也只说明待发，已送达才说已通知" in main.calls[-1]["messages"][0]["content"]
+    first_review = reviewer.calls[0]["messages"]
+    assert "满桌或已排队都不能保证一定送达" in first_review[0]["content"]
+    assert "不能据此肯定「没法主动喊你」" in first_review[0]["content"]
+    payload = json.loads(first_review[-1]["content"])
+    assert payload["review_items"][0]["text"] == wrong
+    assert payload["follow_up_commitment_evidence"] == []
+    receipt, = result["archive_outputs"]
+    assert receipt["source_message_id"] == "v8-0353" and receipt["text"] == corrected
+
+
 def test_current_room_query_contract_uses_backend_default_instead_of_forcing_a_time_question():
     _, payload = main_context()
     guidance = payload["planning_contract"]["tool_selection_hints"]["game_lookup_vs_room_availability"]

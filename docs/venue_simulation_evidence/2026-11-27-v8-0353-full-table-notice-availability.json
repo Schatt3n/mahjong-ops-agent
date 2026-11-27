@@ -1,0 +1,47 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "trace_id": "trace_bcc40b26fe1c15c6dc17852f",
+  "role": "0353",
+  "actual_message_and_reply": [
+    {
+      "sequence": 109,
+      "message_id": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+      "source_message_id": null,
+      "text": "好 那我报一个 七点半到 川麻0.5无烟这桌 人齐了喊我一声",
+      "sent_at": "2026-11-26T09:07:00+00:00"
+    },
+    {
+      "sequence": 110,
+      "message_id": "outbound:trace_bcc40b26fe1c15c6dc17852f:1",
+      "source_message_id": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+      "text": "好，给你占上了，现在两个，还差两个。人齐我这边没法主动喊你，你要不临近了再问我一声？",
+      "sent_at": "2026-11-26T09:07:00+00:00"
+    }
+  ],
+  "join_game": {
+    "game_id": "game_aea7b51ef7c4",
+    "called": true,
+    "recorded_status": "confirmed",
+    "remaining_seats": 2,
+    "planned_start_at": "2026-11-26T19:30:00+08:00"
+  },
+  "contact_policy": {
+    "room_id": "venue-group",
+    "link_type": "private_board_created",
+    "managed": true,
+    "board_enabled": true,
+    "outbound_enabled": true,
+    "is_friend": true,
+    "can_private_message": true
+  },
+  "actual_review": {
+    "approved": true,
+    "reason": "回复确认占席与同桌实况一致，人数缺口准确，向顾客如实说明无法主动喊人并建议临近再问，未承诺无依据的后续通知；无内部信息或未发生动作泄露，状态与纯告知一致（completed 无待答）。",
+    "follow_up_commitment_evidence": [],
+    "call_id": "llm_call_ba1a02771c9b4918bd1eab121a658e55",
+    "terminal_attempt_id": "llm_attempt_3adb4ca95ccf448aa118f2e7dff9b2f5",
+    "completion_text_sha256": "009132218c515e53a5bba7e08ff4d71c043a3dfc77760a07dfa5e01a47e1fd65"
+  },
+  "diagnosis": "实际报名后还差两位，本次没有满桌通知任务。原桌与受管群相连，当前顾客有同渠道好友私聊权限。凑齐事务可以为符合资格的现有牌友排满桌回告。没有本次排队或送达凭据，不能保证以后发出；也不能据此断言没有主动通知能力。原发前审查把这一否定性推断当成了事实。",
+  "offline_contract": "回放原始来话和两种过度陈述。真实 SQLite 报名成功且还缺两位，主 Agent 和独立审查收到更新后的通知事实边界。离线替身校验提示和失败传播，真实模型复验需另跑。"
+}
