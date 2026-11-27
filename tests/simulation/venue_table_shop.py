@@ -15,10 +15,12 @@ from mahjong_agent_runtime.models import GameStatus
 
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_role_journal import ROLE_REPLY_DELAY
-from .venue_table_opening import TABLE_OPENING_OFFER_LIMIT, TABLE_OPENING_OFFER_PREFIX, VenueTableOpening
+from .venue_table_opening import (
+    TABLE_OPENING_CONFIRM_PREFIX, TABLE_OPENING_OFFER_LIMIT, TABLE_OPENING_OFFER_PREFIX, VenueTableOpening,
+    table_opening_confirmation_text,
+)
 
 
-_CONFIRM_PREFIX = "table-opening-confirm|"
 _COMPANION_INQUIRY_PREFIX = "table-companion-inquiry:"
 _HAN_HOURS = {digit: hours for hours, digit in enumerate("零一二三四五六七八九")} | {"两": 2, "半": 0.5}
 _HOURS_VALUE = r"(?:[0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九半])"
@@ -241,12 +243,11 @@ class VenueTableShop:
 
     def _confirmation(self, group, at, active, records):
         """已落相同牌局时才报定时，重跑复用原群消息。"""
-        message_id = f"{_CONFIRM_PREFIX}{active['proposal_id']}"
+        message_id = f"{TABLE_OPENING_CONFIRM_PREFIX}{active['proposal_id']}"
         if any(row.message.message_id == message_id for row in records):
             return None
         start = datetime.fromisoformat(active["start_at"])
-        when = start.strftime("%H:%M" if start.date() == at.date() else "%m月%d日 %H:%M")
-        return self._message(group, message_id, at, f"那就 {when} 开，大家按这个时间到哈。")
+        return self._message(group, message_id, at, table_opening_confirmation_text(start, at=at))
 
     @staticmethod
     def _message(group, message_id, at, text):

@@ -89,6 +89,22 @@ class VenueTableParty:
             raise ValueError("table companion needs its own delivered invitation")
         self._available_seat(self.store.require_game(self.group.game_id), invite, at=at)
 
+    def bound_invitation(self, actor_id: str) -> CompanionInvitation | None:
+        """只有原匿名席绑定和实际同行收件完全相符时才提供身份依据。"""
+        with self.store._lock:
+            row = self.store._connection.execute("""
+                SELECT invitation_id, contact_id, invited_at, accepted_at FROM venue_table_companion_bindings
+                WHERE game_id = ? AND recipient_id = ?
+            """, (self.group.game_id, actor_id)).fetchone()
+        if row is None:
+            return None
+        invite = self.group.invitation_for(actor_id, row["invitation_id"])
+        if (invite is None or invite.recipient_id != actor_id or invite.accepted is not True or not invite.response_at
+                or (invite.inviter_id, invite.invited_at.isoformat(), invite.response_at.isoformat())
+                    != (row["contact_id"], row["invited_at"], row["accepted_at"])):
+            return None
+        return invite
+
     def _available_seat(self, game: Game, invite: CompanionInvitation, *, at: datetime) -> tuple[GameParticipant, CustomerProfile]:
         """入群前与实际业务绑定使用同一套座位资格，绑定时仍以事务内事实为准。"""
         actor_id = invite.recipient_id

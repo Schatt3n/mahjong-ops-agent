@@ -14,8 +14,12 @@ from .venue_channel import AGENT_ID
 from .venue_dialogues import _live_actor_action
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import _written_games
+from .venue_rolling_companions import TABLE_COMPANION_WAKE
 from .venue_rolling_world import PhysicalActorEvent, VenueRollingWorld, _committed_ids, _four_hour_candidate, _venue_time
 from .venue_scenario import ACTUAL_START_DELAY, PLAY_DURATION
+from .venue_table_group import VenueTableGroup
+from .venue_table_opening import TABLE_OPENING_CONFIRM_PREFIX, VenueTableOpening
+from .venue_table_party import VenueTableParty
 
 
 PLAY_ROLE_KINDS = frozenset({"arrival", "departure"})
@@ -89,7 +93,7 @@ class VenueRollingPlayLink:
         return None
 
     def _observe_ready_games(self, at: datetime, events: tuple[RoleEvent, ...], candidates: dict) -> None:
-        """从同局四个具名承诺及四人的实际私聊回执形成不可变到场计划。"""
+        """从同局四个具名承诺及当前开场回执形成不可变到场计划。"""
         if not candidates:
             return
         proofs = self._participation_evidence(events, at, candidates)
@@ -110,7 +114,7 @@ class VenueRollingPlayLink:
             self._has_plan = True
 
     def _participation_evidence(self, events: tuple[RoleEvent, ...], at: datetime, candidates: dict) -> dict:
-        """用角色决定、正式业务写入和消息账本联合证明每个参与者确实收到私聊。"""
+        """从正式私聊回执或当前版本四人共识证明每个参与者收到同一局的约定。"""
         chat = {row["message_id"]: row for row in self.channel.events()}
         proofs = defaultdict(dict)
         for event in events:
@@ -129,9 +133,53 @@ class VenueRollingPlayLink:
                         "role_event_id": event.event_id, "participation_message_id": source["message_id"],
                         "private_receipt_id": receipt["message_id"], "receipt_at": receipt["sent_at"], "route": route,
                     })
+        negotiated = {row.entity_id for row in self.world.store.transitions
+                      if row.reason == "venue_table_opening_confirmed" and row.entity_id in candidates}
+        if negotiated:
+            finished = [event for event in events if event.status == "finished" and event.due_at <= at
+                        and event.actor_id in self.active_actors and self._decision_source(event)]
+            messages = {row.result["message_id"]: row for row in finished if (row.result or {}).get("message_id")}
+            invitations = {(row.actor_id, row.origin_id): row for row in finished if row.kind == TABLE_COMPANION_WAKE}
+            for game_id in negotiated:
+                # 定时来自桌群时，较早的本人私聊不能代替这版开场的送达。
+                proofs[game_id] = self._negotiated_participation(candidates[game_id], at, messages, invitations, chat)
         return proofs
 
-    def _matches_inbound(self, event: RoleEvent, source: dict) -> bool:
+    def _negotiated_participation(self, game, at, messages, invitations, chat) -> dict:
+        """只承接实际投票并收到开场确认的人。同行席额外核对本人卡片接受及绑定。"""
+        group = self.channel.table_group(VenueTableGroup.room_id_for_game(game.game_id))
+        evidence = VenueTableOpening(group).confirmed_attendance(at=at) if group is not None else None
+        if evidence is None:
+            return {}
+        confirmation, ballots = evidence
+        companions = {item.customer_id for item in game.participants if item.source == "venue_table_companion"}
+        proofs = {}
+        for actor_id, ballot in ballots.items():
+            message_id = ballot.message.message_id
+            event = messages.get(message_id)
+            source = chat.get(message_id)
+            if (event is None or event.actor_id != actor_id or event.kind != "table_receipt"
+                    or event.result.get("table_delivery") != game.game_id or event.result.get("runtime_status") != "delivered"
+                    or source is None or not self._matches_inbound(event, source, table_room=group.room_id)):
+                return {}
+            proof = {"role_event_id": event.event_id, "participation_message_id": message_id,
+                     "table_receipt_id": confirmation.message.message_id, "receipt_at": confirmation.message.sent_at.isoformat(),
+                     "table_roster_revision": confirmation.roster_revision, "route": "table_opening"}
+            if actor_id in companions:
+                invite = VenueTableParty(group).bound_invitation(actor_id)
+                accepted = invitations.get((actor_id, invite.invitation_id)) if invite else None
+                action = ((accepted.decision or {}).get("decision") or {}).get("action") if accepted else None
+                if (not accepted or action != {"action": "accept_companion"}
+                        or not accepted.decision.get("visible_cause_verified")
+                        or accepted.details.get("table_room_id") != group.room_id or accepted.caused_by != invite.invitation_id
+                        or accepted.due_at != invite.response_at or accepted.result.get("runtime_status") != "table_companion_bound"):
+                    return {}
+                proof.update(route="table_companion", accepted_invitation_id=invite.invitation_id,
+                             acceptance_role_event_id=accepted.event_id)
+            proofs[actor_id] = proof
+        return proofs
+
+    def _matches_inbound(self, event: RoleEvent, source: dict, *, table_room: str | None = None) -> bool:
         """参与者的实际来话必须与原角色决定、发送时间和对应会话相符。"""
         action = (event.decision["decision"].get("action") or {})
         if (action.get("action") != "send" or not event.decision.get("visible_cause_verified")
@@ -140,6 +188,8 @@ class VenueRollingPlayLink:
                 or source["text"] != action.get("text") or datetime.fromisoformat(source["sent_at"]) != event.due_at):
             return False
         if source["kind"] == "group":
+            if table_room is not None:
+                return source["recipient_id"] == table_room and event.details.get("table_room_id") == table_room
             return (source["recipient_id"] == self.channel.room_id
                     and source["conversation_id"] == self.channel.group_conversation_id)
         return (source["kind"] == "private" and source["recipient_id"] == AGENT_ID
@@ -185,6 +235,11 @@ class VenueRollingPlayLink:
             return
         game_id = plan.details["game_id"]
         at = datetime.fromisoformat(plan.details["start_at"])
+        if any(proof.get("table_receipt_id") for proof in people.values()):
+            group = self.channel.table_group(VenueTableGroup.room_id_for_game(game_id))
+            evidence = VenueTableOpening(group).confirmed_attendance(at=at) if group is not None else None
+            if evidence is None or any(proof.get("table_receipt_id") != evidence[0].message.message_id for proof in people.values()):
+                return
         result = self.world.schedule(game_id, start_at=at, arrivals=proofs)
         if result["status"] == "scheduled":
             self._control(game_id, "start", at)
@@ -223,9 +278,16 @@ class VenueRollingPlayLink:
     def _wake_players(self, plan: RoleEvent, *, kind: str, at: datetime) -> list[RoleEvent]:
         """每位角色的唤醒仅指向自己的已送达消息，局号保留在调度账本。"""
         game_id = plan.details["game_id"]
-        return [self.journal.enqueue(actor_id=actor, kind=kind, origin_id=game_id, due_at=at,
-                    caused_by=proof["private_receipt_id"], details={"game_id": game_id, "case_intent": _ACTOR_INTENTS[kind]})
-                for actor, proof in plan.details["participants"].items()]
+        wakes = []
+        for actor, proof in plan.details["participants"].items():
+            details = {"game_id": game_id, "case_intent": _ACTOR_INTENTS[kind]}
+            receipt = proof.get("table_receipt_id")
+            if receipt:
+                details["table_room_id"] = VenueTableGroup.room_id_for_game(game_id)
+                details["table_roster_revision"] = proof["table_roster_revision"]
+            wakes.append(self.journal.enqueue(actor_id=actor, kind=kind, origin_id=game_id, due_at=at,
+                caused_by=receipt or proof["private_receipt_id"], details=details))
+        return wakes
 
     def _control(self, game_id: str, phase: str, at: datetime, **details) -> RoleEvent:
         """用同局同阶段的稳定键推进共享虚拟时钟，不归计给任何顾客。"""
@@ -240,7 +302,8 @@ class VenueRollingPlayLink:
             participant = plan.details["participants"].get(event.actor_id, {})
             start = datetime.fromisoformat(plan.details["start_at"])
             expected = start - _ARRIVE_BEFORE_START if event.kind == "arrival" else start + PLAY_DURATION
-            if (event.origin_id != plan.details["game_id"] or event.caused_by != participant.get("private_receipt_id")
+            receipt = participant.get("table_receipt_id") or participant.get("private_receipt_id")
+            if (event.origin_id != plan.details["game_id"] or event.caused_by != receipt
                     or event.due_at != expected):
                 return None
         action = _ACTOR_ACTIONS[event.kind]
@@ -259,9 +322,23 @@ class VenueRollingPlayLink:
         if (event.actor_id not in self.active_actors or not row.get("visible_cause_verified")
                 or (decision.get("action") or {}).get("action") != action
                 or (wake.get("event_id"), wake.get("kind"), wake.get("caused_by")) != (event.event_id, event.kind, event.caused_by)
-                or (delivery.get("message_id"), delivery.get("kind"), delivery.get("sender_id"), delivery.get("recipient_id"))
-                    != (event.caused_by, "private", AGENT_ID, event.actor_id) or event.caused_by is None):
+                or delivery.get("message_id") != event.caused_by or delivery.get("sender_id") != AGENT_ID or event.caused_by is None):
             return None
+        table_room = event.details.get("table_room_id")
+        if table_room is None:
+            if (delivery.get("kind"), delivery.get("recipient_id")) != ("private", event.actor_id):
+                return None
+        else:
+            if (table_room != VenueTableGroup.room_id_for_game(event.details["game_id"])
+                    or (delivery.get("kind"), delivery.get("recipient_id")) != ("group", table_room)
+                    or not event.caused_by.startswith(TABLE_OPENING_CONFIRM_PREFIX)):
+                return None
+            group = self.channel.table_group(table_room)
+            receipt = group.received(event.actor_id, event.caused_by) if group is not None else None
+            if (receipt is None or receipt.roster_revision != event.details.get("table_roster_revision")
+                    or receipt.message.sender_id != AGENT_ID or receipt.message.sent_at > event.due_at
+                    or receipt.message.text != delivery.get("text")):
+                return None
         return self._decision_source(event)
 
     def _decision_source(self, event: RoleEvent) -> str | None:
@@ -285,7 +362,9 @@ class VenueRollingPlayLink:
         result = self.world.report()
         if result["status"] == "not_observed":
             if not plans:
-                result["reason"] = "no_schedulable_same_game_with_verified_private_receipts"
+                negotiated = any(row.reason == "venue_table_opening_confirmed" for row in self.world.store.transitions)
+                result["reason"] = ("no_schedulable_same_game_with_verified_table_confirmation" if negotiated
+                                    else "no_schedulable_same_game_with_verified_private_receipts")
             else:
                 result["reason"] = "missing_actual_arrivals" if arrivals < 4 * len(plans) else "no_start_after_verified_arrivals"
         return {**result, "arrival_plans": len(plans),

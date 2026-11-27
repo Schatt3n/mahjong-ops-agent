@@ -10,6 +10,7 @@ from typing import Literal
 
 from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.domains.game_domain import START_KIND_SCHEDULED, duration_hours_from_requirement
+from mahjong_agent_runtime.domains.model_context import has_agreed_game_duration
 from mahjong_agent_runtime.domains.value_utils import smoke_matches
 from mahjong_agent_runtime.models import DEFAULT_TZ, Game, GameStatus, using_clock
 
@@ -243,7 +244,8 @@ def _four_hour_candidate(game: Game) -> bool:
             and game.seats_total == game.seat_summary()["claimed_seats"] == len(_committed_ids(game)) == 4
             and game.planned_start_at is not None and game.planned_end_at == game.planned_start_at + PLAY_DURATION
             and game.requirement.get("start_time_kind") == START_KIND_SCHEDULED
-            and game.requirement.get("duration_kind") == "fixed" and duration_hours_from_requirement(game.requirement) == 4)
+            and game.requirement.get("duration_kind") in (None, "fixed")
+            and has_agreed_game_duration(game.requirement) and duration_hours_from_requirement(game.requirement) == 4)
 
 
 def _actor_evidence(events: Iterable[PhysicalActorEvent], *, game_id: str, action: str, at: datetime) -> dict:

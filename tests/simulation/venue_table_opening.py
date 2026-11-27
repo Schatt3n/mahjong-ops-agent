@@ -18,6 +18,14 @@ from .venue_scenario import VENUE
 
 TABLE_OPENING_OFFER_PREFIX = "table-opening-offer|"
 TABLE_OPENING_OFFER_LIMIT = 3
+TABLE_OPENING_CONFIRM_PREFIX = "table-opening-confirm|"
+
+
+def table_opening_confirmation_text(start: datetime, *, at: datetime) -> str:
+    """从同一局确认开场生成对客文本，日期以店里时区表述。"""
+    start, at = _local(start), _local(at)
+    when = start.strftime("%H:%M" if start.date() == at.date() else "%m月%d日 %H:%M")
+    return f"那就 {when} 开，大家按这个时间到哈。"
 
 
 class VenueTableOpening:
@@ -156,6 +164,47 @@ class VenueTableOpening:
                     "accepted_count": sum(votes), "declined_count": sum(not vote for vote in votes),
                     "committed": bool(proposal["committed"])}
 
+    def confirmed_attendance(self, *, at: datetime) -> tuple[TableGroupReceipt, dict[str, TableGroupReceipt]] | None:
+        """确认当前阵容的四份正式票，以及店家确实向同阵容送达的落库开场。"""
+        with self.store._lock:
+            game = self.store.require_game(self.game_id)
+            proposal = self._latest()
+            if (proposal is None or not proposal["committed"] or not game.planned_start_at
+                    or game.planned_start_at != datetime.fromisoformat(proposal["start_at"])):
+                return None
+            seats = active_game_participant_ids(game)
+            if (len(seats) != 4 or seats != set(json.loads(proposal["seats_json"]))
+                    or json.loads(proposal["seat_revision"])[1] != self._seat_changes()):
+                return None
+            proposal_id = proposal["proposal_id"]
+            rows = self.store._connection.execute("""
+                SELECT actor_id, message_id, accepted, result FROM venue_table_opening_votes
+                WHERE game_id = ? AND proposal_id = ? AND result IN ('waiting', 'declined', 'committed')
+                ORDER BY sent_at, rowid
+            """, (self.game_id, proposal_id)).fetchall()
+        votes = {row["actor_id"]: row for row in rows}
+        if set(votes) != seats or not all(row["accepted"] for row in votes.values()):
+            return None
+        final = rows[-1]
+        if final["result"] != "committed" or not any(
+            row.entity_type == "game_requirement" and row.entity_id == self.game_id
+            and row.reason == "venue_table_opening_confirmed" and row.trace_id == final["message_id"]
+            for row in self.store.transitions
+        ):
+            return None
+        confirmation = self.group.received(final["actor_id"], f"{TABLE_OPENING_CONFIRM_PREFIX}{proposal_id}")
+        revision = self.group.roster_revision(at=at)
+        if (confirmation is None or confirmation.message.sender_id != AGENT_ID or confirmation.message.sent_at > at
+                or confirmation.message.text != table_opening_confirmation_text(game.planned_start_at, at=confirmation.message.sent_at)
+                or confirmation.source_message_id != final["message_id"] or confirmation.roster_revision != revision
+                or set(confirmation.recipient_ids) != seats or self.group.member_ids(at=at) != {AGENT_ID, *seats}):
+            return None
+        ballots = {actor: self.group.received(AGENT_ID, row["message_id"]) for actor, row in votes.items()}
+        if any(receipt is None or receipt.message.sender_id != actor or receipt.roster_revision != revision
+               or receipt.message.sent_at > confirmation.message.sent_at for actor, receipt in ballots.items()):
+            return None
+        return confirmation, ballots
+
     def _apply_vote(self, actor_id: str, proposal_id: str, at: datetime, accepts: bool, trace_id: str) -> str:
         proposal = self._latest()
         if proposal is None or proposal["proposal_id"] != proposal_id:
@@ -222,9 +271,12 @@ class VenueTableOpening:
         """, (self.game_id,)).fetchone()
 
     def _seat_revision(self, game) -> str:
+        return json.dumps([game.updated_at.isoformat(), self._seat_changes()])
+
+    def _seat_changes(self) -> int:
         changes = (row for row in self.store.transitions if row.entity_type == "game_participant"
                    and row.entity_id.startswith(f"{self.game_id}:"))
-        return json.dumps([game.updated_at.isoformat(), sum(1 for _ in changes)])
+        return sum(1 for _ in changes)
 
     @staticmethod
     def _unsettled(game, at: datetime) -> bool:

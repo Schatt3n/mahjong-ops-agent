@@ -1,0 +1,36 @@
+{
+  "baseline": "3c435ad",
+  "real_source_run": "table-opening-sbsd49tv",
+  "real_source_code": "c29000f",
+  "game_id": "game_0bfdc5211469",
+  "original_archive": "runtime_data/venue_simulation/group_companion_real_20261127/table-opening-sbsd49tv",
+  "frozen_real_evidence": {
+    "same_four_named_seats": 4,
+    "planned_start_at": "2026-11-27T18:30:00+08:00",
+    "explicit_duration_hours": 4,
+    "explicit_duration_kind": null,
+    "invitation_id": "table-invite:role-event:2bf2c6948bc11af601d57f8a43dc3feb26c42691b3a7f2b13b503d7acb6d2f98",
+    "confirmed_proposal_id": "table-opening-offer|2026-11-27T18:30:00+08:00|customer:role-event:98de1ff61a93f181b451295b2934373202925a5f94560ceef2e84ee5e3695e76",
+    "real_ballots_received": 4,
+    "confirmation_source_message_id": "customer:role-event:6cbc5bba6b54c685ac93888e9043a238542b2f5149ac94ab7447ef9f97dcf1f6"
+  },
+  "archived_role_decisions_read_only_comparison": {
+    "method": "将原 SQLite 与角色和通道账本复制到临时沙盒，按原虚拟时钟调用 VenueRollingPlayLink.sync。要求真实模型来源，未生成后续顾客动作。",
+    "old_arrival_plans": 0,
+    "old_reason": "no_schedulable_same_game_with_verified_private_receipts",
+    "revised_arrival_plans": 1,
+    "revised_participation_routes": {"table_opening": 3, "table_companion": 1},
+    "revised_proposed_physical_start_at": "2026-11-27T18:33:00+08:00",
+    "observed_actual_arrival_decisions": 0
+  },
+  "controlled_lifecycle": {
+    "test": "tests/simulation/test_venue_rolling_companion_play.py",
+    "arrivals": 4,
+    "departures": 4,
+    "hours_occupied": 4,
+    "occupied_one_minute_before_end": true,
+    "room_released_and_rebookable": true,
+    "same_game_confirmed_after_reopen": true,
+    "ignored": ["没有实际发出的定时确认", "带同一标识的非确认话术", "缺少有效来源的同行接受", "真实角色选择等待", "原有人重新报名后沿用旧版确认"]
+  }
+}
