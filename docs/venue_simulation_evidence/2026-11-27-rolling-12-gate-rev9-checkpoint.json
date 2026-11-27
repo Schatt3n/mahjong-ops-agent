@@ -1,0 +1,31 @@
+{
+  "captured_at": "2026-11-27T10:14:50+08:00",
+  "status": "in_progress",
+  "run": "2026-11-25-real-7cd18c8d46",
+  "start_commit": "34b85ca",
+  "archive": "runtime_data/venue_simulation/quality_real_12_gate_rev9_20261127/2026-11-25-real-7cd18c8d46",
+  "latest_finished_virtual_at": "2026-11-26T09:09:30+08:00",
+  "role_event_status_counts": {
+    "claimed": 2,
+    "finished": 48,
+    "pending": 18
+  },
+  "chat_ledger_counts": {
+    "group:history": 2,
+    "group:inbound": 2,
+    "group:outbound": 7,
+    "private:inbound": 34,
+    "private:outbound": 33
+  },
+  "chat_ledger_total": 78,
+  "technical_event_failures_observed_so_far": [],
+  "terminal_report": false,
+  "independent_terminal_gate": "pending",
+  "real_50_run_started": false,
+  "known_live_business_evidence": [
+    "2026-11-27-v9-0103-0437-gameplay-scope.json",
+    "2026-11-27-v9-0353-future-match-notification.json",
+    "2026-11-27-v9-0146-direct-creation-gameplay.json"
+  ],
+  "scope": "原版运行中的只读检查点。完成、占用和待办均为当前已排事件，之后可新增因果唤醒。没有技术事件故障不代表业务或独立评审已通过。"
+}
