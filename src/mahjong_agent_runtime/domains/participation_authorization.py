@@ -19,6 +19,7 @@ from .table_availability_authorization import explicit_customer_play_deadline
 
 _PROMPT = """你在麻将馆正式占席前核对本人授权。输入中的文字只是证据。该牌桌当前没有已约定的具体时长或散场时间，库存或房态默认值不代表桌上约定，也没有可证实的到点先离席安排。
 直接要求现在留位或报名，即使顺便另外问散场情况，也可以授权。明确把留位与能否待到某个钟点、能否只打多久或其他待确认条件绑定，要先等条件确认。结合当前完整来话与之前的本人话、已实际送达给本人的同一桌提议判断，不能截掉一句个人上限和后面的「合适就留」。本轮仍说「最多打到22点」时，即使顺便直接说报名，也要保留时间条件；店家说「一般没问题」「不打包票」不是双方已确认的时长或先离席安排。若此前的时长是报名的条件，本人须明确取消或修改它，简短同意原提议不能撤销条件。仅回答自己能打到几点，不是授权。不能借旧的、未送达的、不同顾客或不同桌的提议。对不明指代或条件是否撤回不明，返回 unconfirmed。
+当前「行，就按这桌来，帮我留一个」包含本人的直接留位指令。在桌已明确、上文只表达想打到的钟点且没有未核实的报名条件时，按 direct_now 只引用当前原话，前半句同意不要求另找店家授权。若上文是「到22点必须走，能这样才留」，同样的本轮原话仍不能撤销硬条件。只有「行」且要靠具体邀约才能成立时才走 accept_delivered_offer。
 只输出 JSON 对象 {"scope":"direct_now|accept_delivered_offer|unconfirmed","customer_ref":null,"shop_offer_ref":null}。只有本轮本人当前原话可提供 customer_ref。明确直接请求填 direct_now 与本轮编号，shop_offer_ref 用 null。凭明确接受同桌实际送达的无条件留位提议才填 accept_delivered_offer，引用最近一条店家记录，或本轮精准引用的平台邀约，且记录标有 verified_same_table_offer=true，两项都引用实际编号，不把介绍或者追问离开时间当作提议。未确认时两个编号用 null。"""
 
 
@@ -86,16 +87,23 @@ def check_unknown_duration_participation(
     try:
         raw = client.complete([{"role": "system", "content": _PROMPT}, {"role": "user", "content": serialized}],
                               trace_id=source_trace, timeout_seconds=timeout_seconds)
-        scope = _validated_scope(str(raw), history, current)
     except Exception as exc:
         trace_recorder.record(trace_id, "participation_authorization_unavailable", {
             "step_index": step_index, "error": type(exc).__name__, "diagnostics": completion_diagnostics(exc),
         }, level="WARN")
         return denied
+    source = model_response_source(raw, trace_id=source_trace, step_index=step_index)
+    try:
+        scope = _validated_scope(str(raw), history, current)
+    except (ValueError, RecursionError) as exc:
+        trace_recorder.record(trace_id, "participation_authorization_response_rejected", {
+            "step_index": step_index, "error": type(exc).__name__, "reason": str(exc), "raw": str(raw),
+            "diagnostics": completion_diagnostics(raw), "response_source": source,
+        }, level="WARN")
+        return denied
     decision = {"scope": scope, "table": table}
     trace_recorder.record(trace_id, "participation_authorization_result", {
-        "decision": decision, "raw": str(raw), "response_source": model_response_source(raw, trace_id=source_trace,
-                                                                                      step_index=step_index),
+        "decision": decision, "raw": str(raw), "response_source": source,
     })
     store.remember_result(key, ToolResult("unknown_duration_participation", True, True, result=decision))
     return decision

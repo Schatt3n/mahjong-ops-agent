@@ -1,0 +1,107 @@
+{
+  "run": "2026-11-25-real-1d158698ce",
+  "start_commit": "e36bae0",
+  "trace_id": "trace_d1361b86086e13ae25465674",
+  "actual_private_ledger": [
+    {
+      "sequence": 113,
+      "direction": "inbound",
+      "text": "老板 七点半那桌杭麻无烟的 我七点能到 打到十点半 帮我留一个",
+      "trace_id": "trace_05e27c9c254164ca22b49b22",
+      "message_id": "customer:role-event:790c38bac1fb3ea2afa855cdcee6adc1e93a07a0aaf72d9a2a40b936eb63f2ae",
+      "source_message_id": null
+    },
+    {
+      "sequence": 114,
+      "direction": "outbound",
+      "text": "七点半那桌杭麻无烟的找到了，1～3元，现在就你一个，还缺三位。这桌现在还没约定打多久，可能到不了十点半。你要不要先按这桌来？",
+      "trace_id": "trace_05e27c9c254164ca22b49b22",
+      "message_id": "outbound:trace_05e27c9c254164ca22b49b22:1",
+      "source_message_id": "customer:role-event:790c38bac1fb3ea2afa855cdcee6adc1e93a07a0aaf72d9a2a40b936eb63f2ae"
+    },
+    {
+      "sequence": 116,
+      "direction": "inbound",
+      "text": "行 就按这桌来 帮我留一个",
+      "trace_id": "trace_d1361b86086e13ae25465674",
+      "message_id": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90",
+      "source_message_id": null
+    },
+    {
+      "sequence": 118,
+      "direction": "outbound",
+      "text": "这桌现在还没约打多久，可能到不了十点半，你要是能接受这个，我就先给你留着？",
+      "trace_id": "trace_d1361b86086e13ae25465674",
+      "message_id": "outbound:trace_d1361b86086e13ae25465674:1",
+      "source_message_id": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90"
+    }
+  ],
+  "actual_runtime": {
+    "participation_authorization_prompt": {
+      "input": {
+        "agreed_duration_hours": null,
+        "conversation": [
+          {
+            "ref": 1,
+            "speaker": "customer",
+            "text": "老板 七点半那桌杭麻无烟的 我七点能到 打到十点半 帮我留一个"
+          },
+          {
+            "ref": 2,
+            "speaker": "shop",
+            "text": "七点半那桌杭麻无烟的找到了，1～3元，现在就你一个，还缺三位。这桌现在还没约定打多久，可能到不了十点半。你要不要先按这桌来？",
+            "verified_same_table_offer": false
+          },
+          {
+            "current": true,
+            "ref": 3,
+            "speaker": "customer",
+            "text": "行 就按这桌来 帮我留一个"
+          }
+        ],
+        "table": {
+          "game_id": "game_8aef6bf1423b",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "terms": {
+            "game_type": "hangzhou_mahjong",
+            "smoke_preference": "no_smoking",
+            "stake_range": {
+              "max": 3.0,
+              "min": 1.0
+            },
+            "start_time": "19:30",
+            "start_time_kind": "scheduled"
+          }
+        }
+      },
+      "step_index": 101
+    },
+    "participation_authorization_unavailable": {
+      "diagnostics": {},
+      "error": "ValueError",
+      "step_index": 101
+    },
+    "join_game": {
+      "called": false,
+      "allowed": false,
+      "result": {},
+      "error": "留位授权与当前桌况不一致或时长条件未确认。未占席。 按顾客原话说明待确认的条件，或向本人确认是否现在留位。"
+    }
+  },
+  "diagnosis": [
+    "同一桌明确、顾客已先收到时长未定的说明，并在新来话再次主动要求现在留一位。此前「打到十点半」是柔性期望，当轮没有硬离场或符合才留。",
+    "沙盒业务许可已将当前原话核成 participate。独立占席核验报 ValueError，旧日志缺少模型正文和调用标识，无法追定是结构还是引用不符。真实网关挡住了占席，顾客实际又收到同一澄清。",
+    "上轮「现在就你一个」是独立的身份错误，实际唯一座位是发起人。这条归同桌回执专项处理。"
+  ],
+  "targeted_change": [
+    "明确区分本轮本人的直接留位，与只有简短同意时对上轮已核实邀约的依赖。既有硬时限以及牌局、发送人和席位守卫照旧。",
+    "将完整但核验拒绝的模型响应、具体结构或引用错误及可用 HTTP 诊断留在本机 trace。未通过的判断不落库、不进行业务写入。"
+  ],
+  "deterministic_replay": {
+    "scope": "原话、同一局条件、正式 SQLite、受控独立模型回复；上轮座位话术使用中性修订。",
+    "cases": {
+      "direct_now_current_reference": "留同一桌一席",
+      "accept_unverified_previous_offer": "零留位，保留拒绝原响应、错误及诊断"
+    }
+  }
+}

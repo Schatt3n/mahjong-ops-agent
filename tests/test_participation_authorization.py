@@ -11,7 +11,7 @@ from mahjong_agent_runtime import AgentRuntime, InMemoryAgentStore, SQLiteAgentS
 from mahjong_agent_runtime.domains.delivered_game_offer import DELIVERED_GAME_OFFER, _offer_terms
 from mahjong_agent_runtime.domains.participation_authorization import customer_participation_deadline
 from mahjong_agent_runtime.domains.table_availability_authorization import explicit_customer_play_deadline
-from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient
+from mahjong_agent_runtime.llm import AgentLLMConfig, LLMCompletionText, OpenAICompatibleAgentClient
 from mahjong_agent_runtime.models import ConversationRole, ConversationTurn, InviteStatus, QuotedMessageRef, using_clock
 from mahjong_agent_runtime.task_context import TaskContextManager
 
@@ -158,6 +158,63 @@ def test_http_runtime_keeps_separate_write_preflight_independent_of_reply_review
     assert actual is not main and actual is not runtime.creation_authorization_client
     assert actual.config.temperature == 0
     assert actual.config.max_tokens == 1200
+
+
+@pytest.mark.parametrize("scope", ["direct_now", "accept_delivered_offer"])
+def test_v8_direct_booking_after_tentative_reply_keeps_exact_authorization_evidence(tmp_path, scope):
+    """本人当前直接报名可独立核验，未获认可的上轮方案不可替代授权。"""
+    store = SQLiteAgentStore(tmp_path / "v8-participation.sqlite3")
+    sent_at = datetime.fromisoformat("2026-11-26T18:35:00+08:00")
+    prior = UserMessage("guest-thread", "guest", "顾客", "老板 七点半那桌杭麻无烟的 我七点能到 打到十点半 帮我留一个",
+                        message_id="prior-0151", sent_at=sent_at)
+    tentative = "七点半那桌杭麻无烟的找到了，1～3元，现在一位，还缺三位。这桌现在还没约定打多久，可能到不了十点半。你要不要先按这桌来？"
+    table_conditions = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3}, "smoke_preference": "no_smoking",
+                        "planned_start_at": "2026-11-26T19:30:00+08:00"}
+    with using_clock(lambda: sent_at):
+        game, _ = store.create_game(conversation_id="host-thread", organizer_id="host", organizer_name="发起人",
+            requirement={**table_conditions, "max_duration_hours": 2.5},
+            known_players=[{"customer_id": "host", "display_name": "发起人"}], trace_id="seed")
+        lookup = StaticAgentClient([action_json(objective_status="needs_tool", tool_calls=[{
+            "name": "search_current_games", "arguments": {"lookup_scope": "specific_table", "requirement": table_conditions},
+            "reason": "先查顾客所指的原桌",
+        }]), action_json(objective_status="waiting_user", reply_to_user=tentative)])
+        previous = AgentRuntime(llm_client=lookup, store=store).handle_user_message(prior, trace_id="prior")
+        assert any(tool.name == "search_current_games" and tool.called and tool.allowed for tool in previous.tool_results)
+        store.append_assistant_turn("guest-thread", tentative, "shop", metadata={"delivery_status": "delivered"})
+
+    raw = json.dumps({"scope": scope, "customer_ref": 3, "shop_offer_ref": 2 if scope == "accept_delivered_offer" else None})
+
+    class Review:
+        """固定审查结果，仅核验真实网关和响应原件追踪。"""
+
+        def complete(self, messages, **kwargs):
+            history = json.loads(messages[-1]["content"])["conversation"]
+            assert history[0]["text"] == prior.text
+            assert history[1]["text"] == tentative and history[1]["verified_same_table_offer"] is False
+            assert history[2]["current"] is True
+            return LLMCompletionText(raw, {"attempts": [{"http_status": 200, "body_complete": True}]})
+
+    allowed = scope == "direct_now"
+    planner = StaticAgentClient([action_json(objective_status="needs_tool", tool_calls=[{
+        "name": "join_game", "arguments": {"game_id": game.game_id, "customer_id": "guest", "display_name": "顾客"},
+        "reason": "处理本人报名",
+    }]), action_json(objective_status="completed" if allowed else "waiting_user",
+                     reply_to_user="好，给你报上了。" if allowed else "再确认一下你现在要留位吗？")])
+    runtime = AgentRuntime(llm_client=planner, store=store, participation_authorization_client=Review())
+    at = sent_at.replace(minute=37)
+    with using_clock(lambda: at):
+        result = runtime.handle_user_message(UserMessage("guest-thread", "guest", "顾客", "行 就按这桌来 帮我留一个",
+            message_id="current-0151", sent_at=at), trace_id="v8-0151")
+    tool = next(entry for entry in result.tool_results if entry.name == "join_game")
+    assert tool.called is allowed and tool.allowed is allowed, tool.error
+    assert store.require_game(game.game_id).remaining_seats() == (2 if allowed else 3)
+    step = "participation_authorization_result" if allowed else "participation_authorization_response_rejected"
+    event = next(entry.content for entry in runtime.trace_recorder.get_trace("v8-0151") if entry.step == step)
+    assert event["raw"] == raw and event["response_source"]["trace_id"].startswith("v8-0151:participation:")
+    if not allowed:
+        assert event["reason"] == "participation authorization lacks current customer or delivered offer evidence"
+        assert event["diagnostics"]["attempts"][0]["body_complete"] is True
+    store._connection.close()
 
 
 @pytest.mark.parametrize(("mode", "extra_requirement", "allowed", "agreed_end"), [
