@@ -495,7 +495,10 @@ def test_v6_0402_contract_hint_precedes_loop_abort_without_inventing_an_action(s
     assert not any(event.step == "tool_called" for event in trace.events)
 
 
-@pytest.mark.parametrize("case", ["truthful", "wrong_seats", "wrong_bare_seats", "no_http", "unseen_scope", "current_call"])
+@pytest.mark.parametrize("case", [
+    "truthful", "wrong_seats", "wrong_bare_seats", "no_http", "unseen_scope", "current_call",
+    "multiple_same_scope", "multiple_mixed_scopes",
+])
 def test_v6_0402_stale_scope_guidance_uses_only_an_executed_receipt_and_keeps_reply_review(store, case):
     """实际查局后仍须生成合法终态，不能靠旧调用绑定或错误座位话术放行。"""
     at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")
@@ -519,6 +522,9 @@ def test_v6_0402_stale_scope_guidance_uses_only_an_executed_receipt_and_keeps_re
         stop_reason={"can_stop": True, "why": "实际查询已完成", "pending_work": [], "depends_on_tool_results": False}).to_dict()
     stale = terminal | {"reply_to_user": "还在凑，红中桌现在1缺3，底2～3元，人齐就开。",
                         "objective_state": {"fact_assertions": [game_assertion, stake_assertion]}}
+    if case in {"multiple_same_scope", "multiple_mixed_scopes"}:
+        extra_scope_id = "lookup_unknown" if case == "multiple_mixed_scopes" else "lookup_table"
+        stale["objective_state"]["fact_assertions"].append(stake_assertion | {"scope": {"call_id": extra_scope_id}})
     if case == "current_call":
         stale["tool_calls"] = [ToolCall(lookup.name, lookup.arguments, "重查余位", call_id="new_lookup").to_dict()]
     raw_rejected = json.dumps(stale, ensure_ascii=False)
@@ -559,13 +565,13 @@ def test_v6_0402_stale_scope_guidance_uses_only_an_executed_receipt_and_keeps_re
     assert not store.invite_drafts and not store.room_reservations
     errors = [event.content for event in trace.events if event.step == "action_contract_error"]
     assert len(errors) == 1 and any("must reference exactly one" in reason for reason in errors[0]["errors"])
-    hinted = case in {"truthful", "wrong_seats", "wrong_bare_seats"}
+    hinted = case in {"truthful", "wrong_seats", "wrong_bare_seats", "multiple_same_scope"}
     hints = [event.content for event in trace.events if event.step == "agent_action_stale_fact_scope_retry_prompt"]
     guidance = [item["content"] for item in client.messages[2] if item["content"].startswith("【修正终态的旧工具绑定】")]
     if hinted:
         assert hints == [{"step_index": 3, "historical_call_id": lookup.call_id,
                           "rejected_response_source": errors[0]["response_source"]}]
-        assert "只省略那一条" in guidance[0] and "turn_tool_evidence 的成功回执" in guidance[0]
+        assert "只省略带该旧 scope.call_id" in guidance[0] and "turn_tool_evidence 的成功回执" in guidance[0]
     else:
         assert not hints and not guidance
     tool_calls = [event.content["call"]["call_id"] for event in trace.events if event.step == "tool_called"]

@@ -1,0 +1,132 @@
+{
+  "run": "2026-11-25-real-1d158698ce",
+  "start_commit": "e36bae0",
+  "cases": [
+    {
+      "role": "0437",
+      "trace_id": "trace_e7e87929b7d04296be97e9f4",
+      "actual_chat": [
+        {
+          "sequence": 3,
+          "message_id": "customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661",
+          "source_message_id": null,
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板晚上好 371那桌七点半 0.5的还有位吗 我大概19:15到 能留吗",
+          "direction": "inbound"
+        },
+        {
+          "sequence": 5,
+          "message_id": "outbound:trace_e7e87929b7d04296be97e9f4:1",
+          "source_message_id": "customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "你说的七点半 371、0.5 那桌，现在查不到有登记的位子诶，没法给你留。要不我帮你另外留意组一桌？",
+          "direction": "outbound"
+        }
+      ],
+      "lookups": [
+        {
+          "name": "search_current_games",
+          "called": true,
+          "allowed": true,
+          "call_id": "lookup_named_table",
+          "error": null,
+          "match_count": null
+        }
+      ],
+      "scope_contract_rejection": {
+        "errors": [
+          "objective_state.fact_assertions[0].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+          "objective_state.fact_assertions[1].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+          "objective_state.fact_assertions[2].scope.call_id='lookup_named_table' must reference exactly one tool_calls[].call_id in this action; valid IDs: []"
+        ],
+        "response_source": {
+          "call_id": "llm_call_a8b2cfbe70794f9d8b532d50a13d2d0f",
+          "http_response_complete": true,
+          "raw_response_sha256": "1f54dfd0ba01ffb1167aedb41c21f06d9e657aff79b8f0c56ca56d4642ab7426",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 3,
+          "terminal_attempt_id": "llm_attempt_cf74c1c3c4d04c8391df1422aea5e724",
+          "trace_id": "trace_e7e87929b7d04296be97e9f4"
+        },
+        "step": "action_contract_error",
+        "step_index": 3
+      },
+      "rejected_raw_action": "{\"goal\":\"查顾客所说的七点半371那桌是否还有位，并按19:15到店核实能否搭桌\",\"objective_status\":\"completed\",\"reasoning_summary\":\"按顾客线索查原桌（七点半、0.5、371），本轮检索无任何匹配结果；后端已确认同一请求者范围内可用登记局池为空，即该桌目前不存在可用席位。顾客问是否能留位，未获授权留位，且无对应局可占。据实告知没有查到这张桌。\",\"objective_state\":{\"current_phase\":\"answer_user\",\"known_facts\":{\"arrival_at\":\"19:15\",\"planned_start_at\":\"2026-11-25T19:30:00+08:00\",\"seat_format\":\"371\",\"stake\":0.5,\"start_time\":\"19:30\",\"requested_party_seat_count\":1},\"missing_facts\":[],\"blockers\":[],\"fact_assertions\":[{\"field\":\"start_time\",\"value\":\"19:30\",\"role\":\"current\",\"scope\":{\"call_id\":\"lookup_named_table\"},\"source_message_id\":\"customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661\"},{\"field\":\"stake\",\"value\":0.5,\"role\":\"current\",\"scope\":{\"call_id\":\"lookup_named_table\"},\"source_message_id\":\"customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661\"},{\"field\":\"seat_format\",\"value\":\"371\",\"role\":\"current\",\"scope\":{\"call_id\":\"lookup_named_table\"},\"source_message_id\":\"customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661\"},{\"field\":\"requesting_party.seat_count\",\"value\":1,\"role\":\"current\",\"source_message_id\":\"customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661\"},{\"field\":\"arrival_at\",\"value\":\"19:15\",\"role\":\"condition\",\"source_message_id\":\"customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661\"}],\"reply_scope\":{\"requested_information\":[\"这桌还有没有位\",\"19:15到能否赶上\"],\"allowed_response_facts\":[\"按七点半、0.5、371查无对应现成桌\"],\"background_facts_to_withhold\":[\"其他客户身份与私聊内容\",\"内部检索过程\"]},\"request_scope\":{\"kind\":\"specific_game_choice\",\"source_message_ids\":[\"customer:role-event:b3a3fd771e51aa8e5b6e86c02bf97e1c04b2d88b9bf3b2bc4c2dbe9761769661\"],\"explicit_limits\":[]}},\"objective_plan\":[{\"step_id\":\"s1\",\"title\":\"按原桌线索查询该桌桌况与余位\",\"status\":\"done\",\"tool\":\"search_current_games\",\"depends_on\":[],\"decision_rule\":\"已查，无匹配结果\"},{\"step_id\":\"s2\",\"title\":\"据实告知无此可用桌\",\"status\":\"done\",\"depends_on\":[\"s1\"],\"decision_rule\":\"无对应局，无法留位\"}],\"plan_revision_reason\":\"原桌查询返回无可用匹配，直接据实说明，无需再做晚到核实。\",\"reply_to_user\":\"不好意思啊，七点半0.5那桌我没查到有在组的，现在没有能给你留的位诶。要不要我帮你问问有没有人想凑一桌？\",\"tool_calls\":[],\"needs_human\":false,\"stop_reason\":{\"can_stop\":true,\"depends_on_tool_results\":true,\"pending_work\":[],\"why\":\"原桌查询已完成且无可用结果，已据实告知并征询是否需另组一桌。\"}}"
+    },
+    {
+      "role": "0151",
+      "trace_id": "trace_0d96ed7938219180057ba581",
+      "actual_chat": [
+        {
+          "sequence": 12,
+          "message_id": "customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7",
+          "source_message_id": null,
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板 371那桌七点半0.5的还能搭一桌吗 我最早七点五十到",
+          "direction": "inbound"
+        },
+        {
+          "sequence": 14,
+          "message_id": "outbound:trace_0d96ed7938219180057ba581:1",
+          "source_message_id": "customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "没查到七点半0.5、371那桌的登记，现在没法确认它还有没有位，你七点五十到能不能赶上也不好说。要不我帮你看看别的桌，或者帮你组一桌？",
+          "direction": "outbound"
+        }
+      ],
+      "lookups": [
+        {
+          "name": "search_current_games",
+          "called": true,
+          "allowed": true,
+          "call_id": "lookup_table_1930",
+          "error": null,
+          "match_count": null
+        },
+        {
+          "name": "search_current_games",
+          "called": false,
+          "allowed": false,
+          "call_id": "personal_lookup_after_1950",
+          "error": "查局用途与核实的原话不一致。本次应使用 lookup_scope=specific_table，保留原来的问题范围。",
+          "match_count": null
+        },
+        {
+          "name": "search_current_games",
+          "called": true,
+          "allowed": true,
+          "call_id": "lookup_table_1930_v2",
+          "error": null,
+          "match_count": null
+        }
+      ],
+      "scope_contract_rejection": {
+        "errors": [
+          "objective_state.fact_assertions[0].scope.call_id='lookup_table_1930' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+          "objective_state.fact_assertions[1].scope.call_id='lookup_table_1930' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+          "objective_state.fact_assertions[2].scope.call_id='lookup_table_1930' must reference exactly one tool_calls[].call_id in this action; valid IDs: []",
+          "objective_state.fact_assertions[3].scope.call_id='lookup_table_1930' must reference exactly one tool_calls[].call_id in this action; valid IDs: []"
+        ],
+        "response_source": {
+          "call_id": "llm_call_f8f027d3fbbb4628b2bbdb5d6832327b",
+          "http_response_complete": true,
+          "raw_response_sha256": "d21d59c0851fe4089575cebf6cb8f6d9615b4d487fa0021d7635dd62c5f54938",
+          "response_route": [],
+          "route": "primary",
+          "schema_version": 1,
+          "step_index": 2,
+          "terminal_attempt_id": "llm_attempt_a30630ddd5384a4aa2c5db1c4ab4698a",
+          "trace_id": "trace_0d96ed7938219180057ba581"
+        },
+        "step": "action_contract_error",
+        "step_index": 2
+      },
+      "rejected_raw_action": "{\"goal\": \"查询杨佳诚所说的「七点半 0.5、371 那桌」现成局是否存在及余位，并据其最早 19:50 到店说明能否赶上\", \"objective_status\": \"waiting_user\", \"reasoning_summary\": \"已按桌线索（19:30、0.5 档、371）定位查询，未返回可对应桌况；顾客最早 19:50 到，即使该桌存在也已过开场，需据实说明当前查不到这桌，并询问是否要我帮他留意合适的局。\", \"objective_state\": {\"current_phase\": \"answer_user\", \"known_facts\": {\"stake\": 0.5, \"target_seat_format\": \"371\", \"target_start_time\": \"19:30\", \"sender_earliest_arrival\": \"19:50\"}, \"missing_facts\": [], \"blockers\": [], \"active_game_id\": null, \"fact_assertions\": [{\"field\": \"stake\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table_1930\"}, \"source_message_id\": \"customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7\", \"value\": 0.5}, {\"field\": \"start_time\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table_1930\"}, \"source_message_id\": \"customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7\", \"value\": \"19:30\"}, {\"field\": \"known_player_count\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table_1930\"}, \"source_message_id\": \"customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7\", \"value\": 3}, {\"field\": \"needed_seats\", \"role\": \"current\", \"scope\": {\"call_id\": \"lookup_table_1930\"}, \"source_message_id\": \"customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7\", \"value\": 1}, {\"field\": \"sender_earliest_arrival\", \"role\": \"condition\", \"source_message_id\": \"customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7\", \"value\": \"19:50\"}], \"reply_scope\": {\"requested_information\": \"七点半 0.5 的 371 桌是否还能搭\", \"allowed_response_facts\": [\"当前没查到这张七点半 0.5 的桌\"], \"background_facts_to_withhold\": [\"其他客户私聊内容\", \"内部工具与匹配细节\"]}, \"request_scope\": {\"kind\": \"specific_game_choice\", \"source_message_ids\": [\"customer:role-event:8329aac152285e62e2a443d3f0dd526b02771e0020d2f23bb5bd9d60e35409f7\"], \"explicit_limits\": [\"最早七点五十到\"]}}, \"objective_plan\": [{\"step_id\": \"s1\", \"title\": \"按 19:30、0.5 档、缺一位定位该桌\", \"status\": \"done\", \"tool\": \"search_current_games\", \"depends_on\": [], \"decision_rule\": \"未返回对应桌况\"}, {\"step_id\": \"s2\", \"title\": \"据实说明未查到并询问是否帮忙留意\", \"status\": \"in_progress\", \"decision_rule\": \"以 waiting_user 等顾客决定\"}], \"plan_revision_reason\": \"原桌查询已返回空结果，转为据实回答并询问是否继续帮忙。\", \"reply_to_user\": \"老板，七点半0.5那桌我现在没查到诶，是不是已经凑满了或者散了？要不我帮你留意着合适的局？\", \"tool_calls\": [], \"needs_human\": false, \"stop_reason\": {\"can_stop\": true, \"depends_on_tool_results\": true, \"pending_work\": [], \"why\": \"原桌查询无结果，已据实告知并征询是否帮忙留意，等待顾客决定。\", \"waiting_decision\": \"是否需要帮忙留意合适的局\"}}"
+    }
+  ],
+  "finding": "两份终态完整回执的多个可选断言都指向同一次已执行查局，终态工具数组为空。0151 随后重查一次；此阶段均已实际给顾客回复。",
+  "revision": "既有提示支持同一次已查工具的多个可选断言，仍须逐项验证本步合同。已执行回执必须唯一、同轮、成功；真实回复要重新生成、核实并审查。不同调用、错误回执或来源无完整 HTTP 的控制继续沿原合同。",
+  "verification": "离线使用真实运行时查局和出站审查。原复验仍按已启动版本保留。"
+}

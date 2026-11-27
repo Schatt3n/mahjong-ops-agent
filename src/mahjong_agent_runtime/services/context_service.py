@@ -58,8 +58,8 @@ _ACTION_ENVELOPE_RETRY = (
 )
 _STALE_FACT_SCOPE_RETRY = (
     "【修正终态的旧工具绑定】上一次动作没有本步调用，却在 objective_state.fact_assertions 中引用本轮已执行的旧 call_id。"
-    "重新生成完整终态动作，若已有真实回执可回答，使用 tool_calls=[]。只省略那一条带旧 scope.call_id 的可选断言，"
-    "保留其他有原话来源的条件，不给这条断言改绑一个工具或牌桌。不要为了保留旧引用重跑已执行的调用。"
+    "重新生成完整终态动作，若已有真实回执可回答，使用 tool_calls=[]。只省略带该旧 scope.call_id 的可选断言，"
+    "保留其他有原话来源的条件，不给这些断言改绑另一个工具或牌桌。不要为了保留旧引用重跑已执行的调用。"
     "从 turn_tool_evidence 的成功回执核对实际状态、档位、余位等再给顾客回复，不照抄上次被拒正文。"
     "缺少真实依据时按原规则核实，不能把回复草稿、计划或当前动作拒绝当成业务结果。"
 )
@@ -75,14 +75,16 @@ def _completed_contract_source(item: ToolResult, *, trace_id: str, rejected_step
     return None
 
 
-def _stale_scope_of_single_terminal_assertion(
+def _stale_scope_of_terminal_assertions(
     item: ToolResult, source: dict[str, Any], turn_tool_evidence: list[ToolResult],
 ) -> str | None:
-    """识别只回复却挂着已执行调用的单一旧断言，仅对有真实回执的一轮给重写提示。"""
+    """识别终态断言误绑唯一已执行调用，仅对有真实回执的一轮给重写提示。"""
     errors = item.result.get("errors") or []
-    if (not isinstance(errors, list) or len(errors) != 1 or not isinstance(errors[0], str)
-            or not errors[0].startswith("objective_state.fact_assertions[")
-            or not errors[0].endswith("; valid IDs: []")):
+    if (not isinstance(errors, list) or not errors or any(
+        not isinstance(error, str) or not error.startswith("objective_state.fact_assertions[")
+        or "].scope.call_id=" not in error or not error.endswith("; valid IDs: []")
+        for error in errors
+    )):
         return None
     raw = item.result.get("raw_response")
     if (not isinstance(raw, str)
@@ -97,8 +99,11 @@ def _stale_scope_of_single_terminal_assertion(
             or not isinstance(payload.get("reply_to_user"), str) or not payload["reply_to_user"].strip()
             or validate_fact_scope_contract(payload) != errors):
         return None
-    call_id, = [assertion["scope"]["call_id"] for assertion in payload["objective_state"]["fact_assertions"]
-                if "call_id" in assertion.get("scope", {})]
+    call_ids = {assertion["scope"]["call_id"] for assertion in payload["objective_state"]["fact_assertions"]
+                if "call_id" in assertion.get("scope", {})}
+    if len(call_ids) != 1:
+        return None
+    call_id, = call_ids
     matching = [receipt for receipt in turn_tool_evidence if receipt.call_id == call_id]
     if len(matching) == 1 and matching[0].called and matching[0].allowed and not matching[0].error:
         return call_id
@@ -156,7 +161,7 @@ class ContextLifecycleManager:
             source = _completed_contract_source(item, trace_id=trace_id, rejected_step=step_index - 1)
             if not source:
                 continue
-            if stale_call_id := _stale_scope_of_single_terminal_assertion(item, source, turn_tool_evidence):
+            if stale_call_id := _stale_scope_of_terminal_assertions(item, source, turn_tool_evidence):
                 built.messages.insert(len(built.messages) - 1, {"role": "system", "content": _STALE_FACT_SCOPE_RETRY})
                 self.trace_recorder.record(trace_id, "agent_action_stale_fact_scope_retry_prompt", {
                     "step_index": step_index, "rejected_response_source": source, "historical_call_id": stale_call_id,
