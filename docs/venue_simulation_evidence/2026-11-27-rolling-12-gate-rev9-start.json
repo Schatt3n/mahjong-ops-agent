@@ -1,0 +1,44 @@
+{
+  "run": "2026-11-25-real-7cd18c8d46",
+  "archive_group": "quality_real_12_gate_rev9_20261127",
+  "start_commit": "34b85ca",
+  "options": {
+    "mode": "real",
+    "seed": 42,
+    "scenario_date": "2026-11-25",
+    "background_events": 0,
+    "model_source": "opencode-go",
+    "customer_model_source": "opencode-go",
+    "active_users": 12,
+    "workers": 2,
+    "dialogue_turns": 2,
+    "judge_users": 12,
+    "planner_low": false,
+    "clarify_consent": false,
+    "guard_writes": true,
+    "role_source": "history",
+    "rolling_board": true,
+    "rolling_history": true,
+    "rolling_play": true,
+    "rolling_peers": true,
+    "show_verified_write_scope": true,
+    "align_write_reviews": true,
+    "reply_review_no_reasoning": true,
+    "rolling_table_groups": true,
+    "rolling_bounded_flexible_opening": true
+  },
+  "runtime_limits": {
+    "max_steps": 8,
+    "max_model_calls_per_turn": 12,
+    "max_tokens_per_call": 64000,
+    "llm_timeout_seconds": 120.0
+  },
+  "base_reasoning_on_wire": "none",
+  "files_sha256": {
+    "rolling_start.json": "7af7d2f83dae23c1c236d8b71edfd1627f5488c524da84a6d4d64a7ff247f7c1",
+    "sandbox_bounded_opening_planner_prompt.md": "60e06e147aeee45518bbe4af9b8fe25a282b7098ab89fbef4cf178d5dde1a41d",
+    "sandbox_preflight_planner_prompt.md": "15f063292dd6b416e4d1f89834e16a19250162bd550020ee81b664d36d08f521",
+    "sandbox_preflight_reply_review_prompt.md": "c224108573df6a03f2d6d77f1a80bee1fa778faa9551a0ab7f3ef762b520dcd4"
+  },
+  "acceptance": "独立读取真实 12 人两日账本，按同一八项门槛和 12 份独立判断验收。"
+}
