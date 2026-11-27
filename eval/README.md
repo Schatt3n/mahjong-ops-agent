@@ -64,18 +64,7 @@ PYTHONPATH=src .venv/bin/python scripts/run_real_owner_chat_live_eval.py --stric
 
 手测新场景时，记录脱敏输入、前置状态、实际表现与期望结果。例如“客户只问现在几个人”要同时核对回复人数及占座数未变。后端不变量接入确定性测试；模型选工具或理解多轮语义的场景进入 golden 并接入真实回放。若发现失败，再在 badcase 中关联原始证据及修复后的可执行用例。只录入数据、尚未接入回放的场景应继续标记为待覆盖。
 
-### 四小时需求与五小时备选
-
-确定性回归验证同一开场时刻没有四小时匹配时，五小时局仍可通过单独查询核实，并核对局况、预约和外发草稿。定向真模型回放把截图中的老板提议作为历史，按原顺序处理客户问同桌和表示稍等，检查时长、席位及其他业务状态，使用独立语义判定。五小时夹具的开场及可公开名单用于测试，实际局况见 [时间线](golden/real_owner_chat_timeline_20261127.json)。
-
-```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_current_game_duration_constraints.py
-PYTHONPATH=src .venv/bin/python scripts/run_owner_duration_fallback_probe.py
-```
-
-定向回放使用本机模型配置，在 `runtime_data/owner_duration_fallback/` 为每次执行保留 SQLite、原始 trace 和语义报告。自动发现备选、触发征询和授权私聊送达仍待接入端到端回放。运营取舍见 [复查与备选征询](../docs/duration_fallback_follow_up_20261127.md)。
-
-日常提交、合入、推送和发布按受影响层选择验证。仅新增或改动单个评测用例时，检查它的源资产、本例及相邻反例。改动共享执行逻辑、模型输入或安全边界时，按依赖关系扩大相关检查。影响面仍不清楚时，列出待验范围，由维护者决定是否启动完整门禁。
+日常提交、合入、推送和发布按受影响层选择验证。新增独立转写、时间线及专用回放时，校验源资产，执行相关回归和相邻反例，涉及模型判断时定向回放。改动共享执行逻辑、模型输入或安全边界时，按依赖关系扩大相关检查。完整门禁由维护者明确选择。
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full
@@ -237,6 +226,17 @@ PYTHONPATH=src python scripts/run_real_group_chat_flow_eval.py --live --strict \
 ```
 
 报告逐 case 保存 `expected`、`actual`、差异、模型调用次数、模型耗时、主 Agent 工具调用和 trace 步骤。`cq` 规范化为“杭麻/财敲”，“川麻换三”规范化为“川麻/换三张”；`568/368/132` 等三位码在场馆确认规则前仅保存在 `rule_code`，不得推断成底注、封顶或番数。
+
+### 四小时需求与五小时备选
+
+确定性回归验证同一开场时刻没有四小时匹配时，五小时局仍可通过单独查询核实，并核对局况、预约和外发草稿。定向真模型回放把截图中的老板提议作为历史，按原顺序处理客户问同桌和表示稍等，检查时长、席位及其他业务状态，使用独立语义判定。五小时夹具的开场及可公开名单用于测试，实际局况见 [时间线](golden/real_owner_chat_timeline_20261127.json)。
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_current_game_duration_constraints.py
+PYTHONPATH=src .venv/bin/python scripts/run_owner_duration_fallback_probe.py
+```
+
+定向回放使用本机模型配置，在 `runtime_data/owner_duration_fallback/` 为每次执行保留 SQLite、原始 trace 和语义报告。自动发现备选、触发征询和授权私聊送达仍待接入端到端回放。运营取舍见 [复查与备选征询](../docs/duration_fallback_follow_up_20261127.md)。
 
 ### 脱敏群聊时间线回放
 

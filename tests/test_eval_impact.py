@@ -55,6 +55,30 @@ def test_dataset_suggestions_use_current_source_specific_scopes(impact):
     assert commands["独立判定"] == {f"{impact.SELECT} reply_scope_calibration"}
 
 
+def test_owner_timeline_uses_asset_validation_without_running_unrelated_model_cases(impact):
+    timeline = "eval/golden/real_owner_chat_timeline_20260705_20260718.json"
+    transcript = "eval/golden/real_owner_chat_transcript_20260705_20260718.md"
+    files, commands = impact.assess_eval_impact([timeline, transcript])
+    assert files["定向离线"] == {timeline}
+    assert commands["定向离线"] == {f"{impact.SELECT} owner_dataset_validation"}
+    assert files["文档校验"] == {transcript}
+    assert commands["文档校验"] == {"git diff --check", "git diff --cached --check"}
+    assert not files["主 Agent 真模型"] and not commands["需人工核对"]
+
+
+@pytest.mark.parametrize("path", [
+    "eval/golden/real_owner_chat_timeline_20261127.json",
+    "scripts/run_owner_duration_fallback_probe.py",
+])
+def test_duration_fallback_uses_its_own_replay_and_adjacent_offline_cases(impact, path):
+    files, commands = impact.assess_eval_impact([path])
+    assert files["主 Agent 真模型"] == {path}
+    assert commands["主 Agent 真模型"] == {f"{impact.PYTHON} scripts/run_owner_duration_fallback_probe.py"}
+    assert f"{impact.PYTEST} tests/test_current_game_duration_constraints.py" in commands["定向离线"]
+    assert not commands["需人工核对"]
+    assert not any("--full" in command for group in commands.values() for command in group)
+
+
 def test_reviewer_prompt_can_be_verified_without_rerunning_main_agent(impact):
     """仅对客审查合同改动时，给出审查专项与离线边界，而不启动主模型。"""
     prompt = impact.RUNTIME + "prompts/agent_runtime_reply_self_review.md"
@@ -68,11 +92,12 @@ def test_docs_tests_and_shared_risk_do_not_request_live_runs(impact):
     test = "tests/test_eval_impact.py"
     unknown = impact.RUNTIME + "prompts/unknown.md"
     store = impact.RUNTIME + "stores/sqlite/schema.py"
-    paths = ["README.md", test, unknown, store, ".github/workflows/live-eval.yml"]
+    unknown_asset = "eval/golden/real_owner_chat_timeline_archive/undiscovered.json"
+    paths = ["README.md", test, unknown, store, unknown_asset, ".github/workflows/live-eval.yml"]
     files, commands = impact.assess_eval_impact(paths)
     assert files["文档校验"] == {"README.md"}
     assert commands["文档校验"] == {"git diff --check", "git diff --cached --check"}
-    assert files["需人工核对"] == {store, unknown, ".github/workflows/live-eval.yml"}
+    assert files["需人工核对"] == {store, unknown, unknown_asset, ".github/workflows/live-eval.yml"}
     assert any(test in shlex.split(command) for command in commands["定向离线"])
     assert f"{impact.SELECT} concurrency_deterministic" in commands["定向离线"]
     assert not commands["独立判定"] and not commands["主 Agent 真模型"]
@@ -123,7 +148,7 @@ def test_print_impact_is_advisory_and_leaves_reports_untouched(impact, monkeypat
     output = capsys.readouterr().out
     assert "abc" in output and "独立判定" in output
     assert "--scope reply_semantic_calibration" in output
-    assert "配置" in output and "显式 --full" in output
+    assert "配置" in output and "选择完整门禁时" in output and "--full" in output
     assert set(tmp_path.rglob("*")) == before
     assert report_path.read_text() == "previous evidence"
 

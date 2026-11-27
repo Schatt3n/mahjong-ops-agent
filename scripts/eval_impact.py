@@ -12,9 +12,10 @@ import subprocess
 
 
 RUNTIME = "src/mahjong_agent_runtime/"
-SELECT = "PYTHONPATH=src .venv/bin/python scripts/run_evals.py --scope"
-OFFLINE = "PYTHONPATH=src .venv/bin/python scripts/run_evals.py"
-PYTEST = "PYTHONPATH=src .venv/bin/python -m pytest -q"
+PYTHON = "PYTHONPATH=src .venv/bin/python"
+OFFLINE = f"{PYTHON} scripts/run_evals.py"
+SELECT = f"{OFFLINE} --scope"
+PYTEST = f"{PYTHON} -m pytest -q"
 LAYERS = ("文档校验", "定向离线", "主 Agent 真模型", "对客审查", "独立判定", "需人工核对")
 
 
@@ -26,6 +27,7 @@ class ImpactRule:
     layer: str
     tests: tuple[str, ...] = ()
     scopes: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
 
     def matches(self, path: str) -> bool:
         """按仓库相对路径匹配，允许同一变化影响多层。"""
@@ -75,6 +77,11 @@ RULES = (
          "eval/golden/real_owner_chat*.jsonl"),
         "主 Agent 真模型", ("tests/test_context_transport_projection.py", "tests/test_real_owner_chat_golden_validator.py"),
         ("real_owner_all_scenarios_with_reply_semantics", "inquiry_grounding_six_cases"),
+    ),
+    ImpactRule(
+        ("eval/golden/real_owner_chat_timeline_20261127.json", "scripts/run_owner_duration_fallback_probe.py"),
+        "主 Agent 真模型", ("tests/test_current_game_duration_constraints.py",),
+        commands=(f"{PYTHON} scripts/run_owner_duration_fallback_probe.py",),
     ),
     ImpactRule(
         (RUNTIME + "summary.py", RUNTIME + "summary_evaluation.py",
@@ -180,9 +187,15 @@ def assess_eval_impact(
                     files["定向离线"].add(path)
                     tests.update(rule.tests)
                 commands[rule.layer].update(f"{SELECT} {scope}" for scope in rule.scopes)
+                commands[rule.layer].update(rule.commands)
 
         entry = PurePosixPath(path)
-        scope = DATASET_SCOPES.get(entry.stem) if entry.parent == PurePosixPath("eval/golden") and entry.suffix == ".jsonl" else None
+        is_golden_asset = entry.parent == PurePosixPath("eval/golden")
+        if is_golden_asset and fnmatchcase(entry.name, "real_owner_chat_timeline_*.json"):
+            known = True
+            files["定向离线"].add(path)
+            commands["定向离线"].add(f"{SELECT} owner_dataset_validation")
+        scope = DATASET_SCOPES.get(entry.stem) if is_golden_asset and entry.suffix == ".jsonl" else None
         if scope:
             known = True
             files["主 Agent 真模型"].add(path)
@@ -201,6 +214,7 @@ def assess_eval_impact(
             tests.add(path)
         is_documentation = (
             path.startswith("docs/") or path == "eval/README.md"
+            or (is_golden_asset and fnmatchcase(entry.name, "real_owner_chat_transcript_*.md"))
             or (entry.parent == PurePosixPath(".") and entry.suffix == ".md")
         )
         if not known and is_documentation:
@@ -240,4 +254,4 @@ def print_eval_impact(root: Path, base: str) -> None:
     if files["需人工核对"]:
         print("\n共有实现、配置、已移除或未映射文件需人工确认下游范围。配置或发布变更按仓库验收要求执行。")
     print("\n这是基于文件的验证建议。运行时模型配置、环境和证据归属需另行核对。")
-    print("完整通过仍以同一候选版本的显式 --full 为准。")
+    print("选择完整门禁时，通过证据以同一候选版本执行 --full 的结果为准。")
