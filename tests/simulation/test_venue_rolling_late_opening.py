@@ -34,6 +34,8 @@ class _ReplayActor(MockActor):
         message_id = delivery.get("message_id", "")
         actor_id = context.persona.sender_id
         if message_id.startswith("table-opening-inquiry:") and actor_id == "venue-sender-0015":
+            intent = event["details"]["case_intent"]
+            assert "本桌已报名" in intent and "回这个小群" in intent and "可以私聊" in intent
             text = _PEER_TIME
         elif delivery.get("text") == _PEER_TIME and actor_id == "venue-sender-0013":
             text = _ASK_FOR_PROPOSAL
