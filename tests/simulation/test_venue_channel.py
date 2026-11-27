@@ -4,11 +4,12 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from mahjong_agent_runtime import InMemoryAgentStore
+from mahjong_agent_runtime import AgentRuntime, InMemoryAgentStore, StaticAgentClient
 from mahjong_agent_runtime.domains.full_table_notice import FULL_TABLE_NOTICE_TASK_TYPE
 from mahjong_agent_runtime.group_chat import BOARD_TASK_TYPE, BoardEngine, GroupMessage
 from mahjong_agent_runtime.group_chat.full_table_notice import _declares_guaranteed_start
@@ -20,7 +21,7 @@ from mahjong_agent_runtime.tracing import JsonlTraceRecorder
 from .group_transport import SimulationMessenger
 from .sim_adapter import build_runtime
 from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope, SandboxChannel
-from .venue_fixture import VenueFixtureAgent, _reply
+from .venue_fixture import VenueFixtureAgent, _call, _reply
 from .venue_timeout_recovery import verified_runtime_timeout_recoveries
 from .venue_write_guard import VenueWriteGuard
 
@@ -412,6 +413,57 @@ def test_group_classifier_timeout_retries_once_with_original_group_receipt(monke
         source, archived = channel.events()
         assert verified_runtime_timeout_recoveries(traces, [source]) == []
         assert verified_runtime_timeout_recoveries(traces, [source, {**archived, "recipient_id": "b"}]) == []
+
+
+@pytest.mark.parametrize("attempt", [0, 1])
+def test_v8_0353_group_query_with_unknown_optional_arrival_reaches_read_path(tmp_path, attempt):
+    """两份原模型正文各走正式群入口，出对客查询回执且不登记新目标或席位。"""
+    evidence = Path(__file__).resolve().parents[2] / "docs/venue_simulation_evidence/2026-11-27-v8-0353-group-null-arrival.json"
+    frozen = json.loads(evidence.read_text(encoding="utf-8"))
+    prior, quote, original = frozen["ledger"]
+    raw = frozen["classifier_attempts"][attempt]["raw_json"]
+    reply = "暂时没看到七点半一块底的川麻桌，烟况还不能确认，先留不了位。"
+    main = StaticAgentClient([raw,
+        _call("search_current_games", {"lookup_scope": "specific_table", "requirement": {
+            "game_type": "sichuan_mahjong", "stake": 1, "planned_start_at": "2026-11-25T19:30:00+08:00",
+            "start_time_kind": "scheduled",
+        }}),
+        _reply(reply),
+    ])
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    trace = JsonlTraceRecorder(tmp_path / "group-route.log")
+    runtime = AgentRuntime(llm_client=main, store=store, trace_recorder=trace)
+    room_id = original["recipient_id"]
+    channel = SandboxChannel(runtime, room_id=room_id, archive_path=tmp_path / "chat.sqlite3",
+        identities={row["sender_id"]: f"群友{row['sequence']}" for row in (prior, quote, original)})
+
+    def envelope(row):
+        """用原归档群消息重造入口信封。"""
+        return MessageEnvelope(row["message_id"], row["sender_id"], row["text"],
+            datetime.fromisoformat(row["sent_at"]), "group", room_id, quoted_message_id=row["quoted_message_id"])
+
+    for row in (prior, quote):
+        channel.deliver_group_history(envelope(row))
+    result = channel.send(envelope(original))
+    assert result["trace_id"] == frozen["trace_id"]
+    assert result["group_processing"]["routing"]["action"] == "agent_loop"
+    delivered, = result["archive_outputs"]
+    assert delivered["kind"] == "group" and delivered["recipient_id"] == room_id
+    assert delivered["source_message_id"] == original["message_id"] and delivered["text"] == reply
+    search, = result["tool_results"]
+    assert search["name"] == "search_current_games" and search["called"] and search["result"]["matches"] == []
+    classification = store.get_group_topic_message(f"im:{room_id}", room_id, original["sender_id"], original["message_id"])
+    normalized = classification["classification"]
+    assert normalized["intent"] == "query" and normalized["goal_relation"] == normalized["topic_action"] == "none"
+    assert normalized["task_context_id"] is None and normalized["topic_id"] is None
+    assert normalized["constraints"]["planned_start_at"] == "2026-11-25T19:30:00+08:00"
+    assert "latest_arrival_at" not in normalized["constraints"]
+    assert not store.games and not store.invite_drafts and not store.room_reservations
+    assert store.recent_turns(channel.private_conversation_id(original["sender_id"]), 1) == []
+    history = trace.get_trace(result["trace_id"])
+    routed, = [entry.content for entry in history if entry.step == "group_semantic_routing_response"]
+    assert routed["content"] == raw and len(main.calls) == 3
+    store._connection.close()
 
 
 def test_owner_friendship_is_persisted_independently_from_group_membership(tmp_path):

@@ -60,6 +60,36 @@ def test_language_inputs_are_sent_whole_to_semantic_model(text, intent):
     assert result['audit']['model_calls'] == 1
 
 
+def test_optional_null_date_times_are_omitted_and_keep_actual_constraints_and_raw_audit():
+    """空时点不增加个人约束，保留有效绝对时间和原模型输出。"""
+    planned = '2026-11-05T19:30:00+08:00'
+    raw = decision(topic_action='none', goal_relation='none', public_summary={'time_window': {'start': '19:30', 'end': None}},
+                   constraints={'planned_start_at': planned, 'latest_arrival_at': None, 'latest_wait_at': None, 'end_at': None})
+    result = SemanticTopicClassifier(RecordingLLM(raw)).classify(
+        message=message('七点半那桌还有位吗？我得晚点到。'), candidates=[], trace_id='optional-clock')
+    assert result['constraints'] == {'planned_start_at': planned}
+    assert result['public_summary'] == raw['public_summary']
+    assert result['goal_relation'] == result['topic_action'] == 'none'
+    assert result['audit']['model_calls'] == 1 and result['audit']['contract_recovery_count'] == 0
+    assert result['audit']['attempts'][0]['output'] == json.dumps(raw, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("constraints,error", [
+    ({'latest_arrival_at': '2026-11-05T20:00:00'}, 'constraint_datetime_requires_timezone'),
+    ({'latest_arrival_at': False}, 'constraint_datetime_requires_timezone'),
+    ({'party_size': None}, 'invalid_party_size'),
+    ({'latest_arrival_at': None, 'extra_clock': None}, 'constraint_fields_mismatch'),
+    ({'source_message_id': None}, 'constraint_source_message_mismatch'),
+])
+def test_other_invalid_constraints_are_not_masked_by_optional_null_date_time_handling(constraints, error):
+    """非空时间仍须带时区，来源、人数与未知字段仍按原合同校验。"""
+    raw = decision(topic_action='none', goal_relation='none', constraints=constraints)
+    with pytest.raises(SemanticTopicContractError) as failed:
+        SemanticTopicClassifier(RecordingLLM(raw), max_contract_retries=0).classify(
+            message=message('七点半那桌还有位吗？我得晚点到。'), candidates=[], trace_id='invalid-clock')
+    assert failed.value.audit['attempts'][0]['error'] == error
+
+
 def test_bare_seat_code_prompt_distinguishes_table_size_from_stake():
     output = decision('self_recruitment', goal_relation='none', public_summary={},
                       constraints={'party_size': 1, 'start_when_full': True})

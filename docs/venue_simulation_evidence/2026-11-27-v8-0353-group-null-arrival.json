@@ -1,0 +1,92 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "source_code_commit": "e36bae0",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev8_20261127/2026-11-25-real-1d158698ce",
+  "customer_case": "0353",
+  "trace_id": "trace_8867cb6a1f5eb8c84fbe829f",
+  "ledger": [
+    {
+      "sequence": 1,
+      "kind": "group",
+      "direction": "history",
+      "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+      "source_message_id": null,
+      "trace_id": "trace_2b65650d11311d1ac872f69f",
+      "sent_at": "2026-11-25T10:20:11+00:00",
+      "sender_id": "venue-sender-0081",
+      "recipient_id": "venue-group",
+      "quoted_message_id": null,
+      "text": "371 七点半 0.5"
+    },
+    {
+      "sequence": 2,
+      "kind": "group",
+      "direction": "history",
+      "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+      "source_message_id": null,
+      "trace_id": "trace_2cdc5bf29f41866bb2ca25b9",
+      "sent_at": "2026-11-25T10:58:00+00:00",
+      "sender_id": "venue-sender-0078",
+      "recipient_id": "venue-group",
+      "quoted_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+      "text": "有烟还是无烟"
+    },
+    {
+      "sequence": 24,
+      "kind": "group",
+      "direction": "inbound",
+      "message_id": "customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281",
+      "source_message_id": null,
+      "trace_id": "trace_8867cb6a1f5eb8c84fbe829f",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "sender_id": "venue-sender-0353",
+      "recipient_id": "venue-group",
+      "quoted_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+      "text": "这桌烟况我也还不清楚 一块底的四川麻将七点半还有位吗 我这边得晚点到 能不能先帮我留一个"
+    }
+  ],
+  "actual_failed_receipt": {
+    "status": "failed",
+    "response": {
+      "error_type": "SemanticTopicContractError"
+    },
+    "source_bound_deliveries": 0,
+    "business_tool_calls": 0
+  },
+  "classifier_attempts": [
+    {
+      "attempt": 1,
+      "http_status": 200,
+      "body_complete": true,
+      "call_id": "llm_call_c61380fabdba4f89b821f66453aceacc",
+      "elapsed_ms": 3243.593,
+      "raw_json_sha256": "092d617fac033fe77a41a177abe43030721f4b2db83f0a4c1b9821a7a9356f45",
+      "raw_json": "{\"intent\":\"query\",\"topic_action\":\"none\",\"topic_id\":null,\"goal_relation\":\"none\",\"task_context_id\":null,\"public_summary\":{\"game_type\":\"sichuan_mahjong\",\"stakes\":[\"1\"],\"time_window\":{\"start\":\"19:30\",\"end\":null},\"smoking\":\"any\"},\"constraints\":{\"planned_start_at\":\"2026-11-25T19:30:00+08:00\",\"latest_arrival_at\":null,\"party_size\":1},\"source_message_id\":\"customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281\",\"confidence\":0.82,\"reasoning\":\"明确询问本店一块底四川麻将七点半是否还有位并请求先留一个空位，属于向店方查询现成局与登记空位，不是委托寻找或加入确认；本人晚到需保留一个座位。\"}",
+      "contract_error": "constraint_datetime_requires_timezone"
+    },
+    {
+      "attempt": 2,
+      "http_status": 200,
+      "body_complete": true,
+      "call_id": "llm_call_1986c778684d49a28cd4fc056684b90b",
+      "elapsed_ms": 5166.315,
+      "raw_json_sha256": "a680bfca55e1b3e2aad285b767de3a0a78726a7789372c6505cb21706e64ce63",
+      "raw_json": "{\n  \"intent\": \"query\",\n  \"topic_action\": \"none\",\n  \"topic_id\": null,\n  \"goal_relation\": \"none\",\n  \"task_context_id\": null,\n  \"public_summary\": {\n    \"game_type\": \"sichuan_mahjong\",\n    \"stakes\": [\"1\"],\n    \"time_window\": {\"start\": \"19:30\", \"end\": null}\n  },\n  \"constraints\": {\n    \"planned_start_at\": \"2026-11-25T19:30:00+08:00\",\n    \"latest_arrival_at\": null\n  },\n  \"source_message_id\": \"customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281\",\n  \"confidence\": 0.72,\n  \"reasoning\": \"群友明确询问本店现成局是否还有空位（七点半、1块四川麻将），并请求先留一个座位，属于向店方查询；无引用候选话题可匹配，按新话题查询处理。烟况未明，未提取。\"\n}",
+      "contract_error": "constraint_datetime_requires_timezone"
+    }
+  ],
+  "terminal_error": "semantic_topic_contract_retries_exhausted",
+  "analysis": [
+    "顾客在群里引用的是另一位群友的烟况问题。原话同时问的是一块底川麻七点半桌，并说自己会晚点到。没有给一个明确的最晚到店时间，引用也不是已确认排席的官方看板。",
+    "两次真实 OpenCode 响应都是完整 HTTP 200。两个对象都判为 query，goal_relation=none，且 planned_start_at 有 +08:00。latest_arrival_at:null 只是没提供可用时点。",
+    "解析器把这个可选空时点送进时区校验，首次和同输入合同修复均被拒。本次进件已归档，分类未完成，商家实际没有回复，也没有查局或者登记席位。",
+    "去掉已知可选时间字段里的 JSON null，等同省略。保留非空值的原时区校验、其他字段校验、原始审计正文、原意图和话题关系。实际执行仍须经过原路由和工具边界。"
+  ],
+  "offline_verification": {
+    "integration_test": "tests/simulation/test_venue_channel.py::test_v8_0353_group_query_with_unknown_optional_arrival_reaches_read_path",
+    "note": "两份原封不动的分类原文各经 SQLite 与正式群管道处理。用静态模型回执控制合法查询和对客文本，证明传输与存储；真模型整轮复验待进行。",
+    "live_replay": "pending",
+    "baseline_parser": "666cb3f 对两份真实原文均复现 constraint_datetime_requires_timezone。修订后按同样输入仅省略 latest_arrival_at 的空值。",
+    "targeted_tests_passed": 567
+  }
+}

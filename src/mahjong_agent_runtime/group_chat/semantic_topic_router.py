@@ -24,8 +24,9 @@ INTENTS = TOPIC_INTENTS
 TOPIC_ACTIONS = frozenset({'existing', 'new', 'none', 'uncertain'})
 GOAL_RELATIONS = frozenset({'continue', 'new', 'none', 'uncertain'})
 PUBLIC_FIELDS = frozenset({'game_type', 'stakes', 'date', 'time_window', 'smoking', 'ruleset'})
-_CONSTRAINT_FIELDS = PUBLIC_FIELDS | frozenset({
-    'planned_start_at', 'latest_arrival_at', 'latest_wait_at', 'end_at', 'party_size', 'source_message_id',
+_CONSTRAINT_DATETIME_FIELDS = frozenset({'planned_start_at', 'latest_arrival_at', 'latest_wait_at', 'end_at'})
+_CONSTRAINT_FIELDS = PUBLIC_FIELDS | _CONSTRAINT_DATETIME_FIELDS | frozenset({
+    'party_size', 'source_message_id',
     'preferred_gender', 'required_gender', 'start_when_full',
 })
 _SELF_RECRUITMENT_SHARED_FIELDS = ('game_type', 'ruleset', 'stakes', 'smoking')
@@ -97,7 +98,7 @@ def semantic_topic_contract() -> dict[str, Any]:
         'public_summary': {'game_type':'canonical.requested_game机器标识（如hangzhou_mahjong）或省略', 'stakes':['数字字符串'],
             'date':'YYYY-MM-DD', 'time_window':{'start':'HH:MM|null','end':'HH:MM|null'},
             'smoking':'no_smoking|smoking|any', 'ruleset':'明示细玩法canonical.ruleset；勿填game_type'},
-        'constraints': 'public_summary同类型字段及planned_start_at/latest_arrival_at/latest_wait_at/end_at(带时区ISO日期时间)、party_size(1..4整数)、source_message_id、preferred_gender/required_gender(男|女)和start_when_full(true)仅self_recruitment可用；只提取本条原话',
+        'constraints': '同public_summary及planned_start_at/latest_arrival_at/latest_wait_at/end_at(带时区ISO或null)、party_size(1..4整数)、source_message_id；仅self_recruitment可用preferred_gender/required_gender(男|女)、start_when_full(true)；仅本条原话',
         'source_message_id': '必须等于message.message_id', 'confidence': '0..1数字',
         'reasoning': '不超过300字的简短分类依据；不是给客户的回复',
     }
@@ -427,6 +428,10 @@ class SemanticTopicClassifier:
         constraints = result['constraints']
         if not isinstance(constraints,dict) or set(constraints)-_CONSTRAINT_FIELDS:
             reject('constraint_fields_mismatch')
+        # 未提供的可选时点不产生约束，仍严格核对任何实际给出的时间及其他字段。
+        constraints = {key: value for key, value in constraints.items()
+                       if key not in _CONSTRAINT_DATETIME_FIELDS or value is not None}
+        result['constraints'] = constraints
         public_constraints = validate_public_fields(
             {key:value for key,value in constraints.items() if key in PUBLIC_FIELDS}, 'constraints')
         if {'preferred_gender','required_gender'} <= constraints.keys() and constraints['preferred_gender'] != constraints['required_gender']:
@@ -462,7 +467,7 @@ class SemanticTopicClassifier:
                 reject('invalid_self_recruitment_preferred_gender')
             if key=='start_when_full' and (result['intent']!='self_recruitment' or value is not True):
                 reject('invalid_self_recruitment_start_when_full')
-            if key in {'planned_start_at','latest_arrival_at','latest_wait_at','end_at'}:
+            if key in _CONSTRAINT_DATETIME_FIELDS:
                 parsed = datetime.fromisoformat(value) if isinstance(value,str) else None
                 if parsed is None or parsed.tzinfo is None:
                     reject('constraint_datetime_requires_timezone')
