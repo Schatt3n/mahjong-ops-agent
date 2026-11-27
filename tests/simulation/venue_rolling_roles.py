@@ -811,7 +811,7 @@ class VenueRollingRoles:
     def _archived_role_row(self, event: RoleEvent) -> dict:
         """从真正确认的调度上限记录末条私聊的观察边界，供恢复和补判使用。"""
         row = {**event.decision, **event.result}
-        if (row.get("runtime_status") != "waiting_user" or row.get("channel") != "private"
+        if (row.get("runtime_status") not in {"waiting_user", "completed"} or row.get("channel") != "private"
                 or not row.get("reply_message_id") or row.get("scheduled_wakes") != []):
             return row
         if event.details.get("depth", 0) + 1 >= self.dialogue_turns:

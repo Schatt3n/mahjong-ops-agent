@@ -61,15 +61,22 @@ def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRolling
     return scenario, client
 
 
-@pytest.mark.parametrize(("depth", "at", "status", "wakes", "expected"), [
-    (1, "2026-11-25T11:07:00+08:00", "waiting_user", [], "dialogue_turn_limit"),
-    (0, "2026-11-25T23:59:00+08:00", "waiting_user", [], "observation_day_limit"),
-    (0, "2026-11-25T11:07:00+08:00", "waiting_user", [], None),
-    (1, "2026-11-25T11:07:00+08:00", "waiting_user", ["wake"], None),
-    (1, "2026-11-25T11:07:00+08:00", "needs_help", [], None),
+@pytest.mark.parametrize(("depth", "at", "status", "wakes", "reply", "expected"), [
+    (1, "2026-11-25T11:07:00+08:00", "waiting_user", [], "shop-last", "dialogue_turn_limit"),
+    (0, "2026-11-25T23:59:00+08:00", "waiting_user", [], "shop-last", "observation_day_limit"),
+    (0, "2026-11-25T11:07:00+08:00", "waiting_user", [], "shop-last", None),
+    (1, "2026-11-25T11:07:00+08:00", "waiting_user", ["wake"], "shop-last", None),
+    (1, "2026-11-25T19:37:00+08:00", "completed", [], "shop-last", "dialogue_turn_limit"),
+    (0, "2026-11-25T23:59:00+08:00", "completed", [], "shop-last", "observation_day_limit"),
+    (0, "2026-11-25T11:07:00+08:00", "completed", [], "shop-last", None),
+    (1, "2026-11-25T11:07:00+08:00", "completed", ["wake"], "shop-last", None),
+    (1, "2026-11-25T11:07:00+08:00", "completed", None, "shop-last", None),
+    (1, "2026-11-25T11:07:00+08:00", "completed", [], None, None),
+    (1, "2026-11-25T11:07:00+08:00", "needs_help", [], "shop-last", None),
+    (1, "2026-11-25T11:07:00+08:00", "failed", [], "shop-last", None),
 ])
-def test_archived_private_followup_observation_requires_actual_scheduler_limit(tmp_path, depth, at, status, wakes, expected):
-    """从完成事件恢复上限依据。单有 waiting_user、失败或已唤醒，都不足以标为截断。"""
+def test_archived_private_followup_observation_requires_actual_scheduler_limit(tmp_path, depth, at, status, wakes, reply, expected):
+    """从真实成功回复的调度结果恢复上限依据，失败、有唤醒或无回执不记截断。"""
     people = generate_personas(42)[:1]
     scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
     with scenario.journal.run_owner():
@@ -77,7 +84,7 @@ def test_archived_private_followup_observation_requires_actual_scheduler_limit(t
                                  due_at=datetime.fromisoformat(at), details={"depth": depth})
         event, = scenario.journal.claim_wave(1)
         event = scenario.journal.save_decision(event, {"decision": {"status": "valid"}})
-        scenario.journal.finish(event, {"runtime_status": status, "reply_message_id": "shop-last",
+        scenario.journal.finish(event, {"runtime_status": status, "reply_message_id": reply,
                                        "channel": "private", "scheduled_wakes": wakes})
     reopened, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
     event, = reopened.journal.events()

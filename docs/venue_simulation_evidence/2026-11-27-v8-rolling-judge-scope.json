@@ -1,0 +1,532 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "report_sha256": "1fa1a953bc463a900f819f7f56e53c3bde515faf14fb2cbbe86317f2b4f28513",
+  "original_run_status": "failed",
+  "original_independent_judge": {
+    "status": "valid",
+    "verdict": "fail"
+  },
+  "original_gate_observation": "6/8。实际调度和原判定均保留，此文件只记录送达、事实与判辞中的差异。",
+  "observation_replay": {
+    "reply": "outbound:trace_88bfa78ebd42bc9f7080ca8a:1",
+    "new_archive_tag": "dialogue_turn_limit",
+    "rollback_check": "用原角色 SQLite 只读重算，v12 投影有观察上限，v11 投影的 E28 与原报告字段完全一致，原报告 SHA-256 保持相同。"
+  },
+  "cases": [
+    {
+      "role": "0102",
+      "original_case_status": "valid",
+      "original_verdict": "fail",
+      "projection_version": 12,
+      "response_source": {
+        "trace_id": "judge:venue-sender-0102",
+        "call_id": "llm_call_15478a8b27834dd18307e34448b22f36",
+        "terminal_attempt_id": "llm_attempt_032cbba55b144b739d448a2e9d51d603",
+        "raw_response_sha256": "d29273922863e62d7074e53ff477adaa52b7a84b49e662ce45ee6d85ae36d777"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "fail",
+          "reason": "顾客首日先问「老板，今晚底注1的档位还有合适的桌吗」合理；但在同一时段内又追问「七点半那桌烟况知道了吗」并重问一块底有没有别的现成桌，而 E04 的来话并未确认所谓“七点半那桌”是哪一张，属于在未建立该桌所指的情况下把群里的弱线索当自己的桌去问，指代含混。次日 E14 直接说「今晚七点半那桌一块底的杭麻还有位吗，我七点能到，最多打三个钟」，把时长说成自身情况并可接受自然报名，但首日的拼桌对象与桌况未得到店家可核实的回应后仍继续以“那桌”口吻追问，对收件人不够好懂。E17 为实际等待动作，不能抵消上述含糊来话造成的问题。",
+          "references": [
+            "E04",
+            "E08",
+            "E14",
+            "E17"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_alias": "E01",
+          "evidence_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+          "kind": "group_history",
+          "sent_at": "2026-11-25T10:20:11+00:00",
+          "text": "371 七点半 0.5"
+        },
+        {
+          "evidence_alias": "E02",
+          "evidence_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+          "kind": "group_history",
+          "sent_at": "2026-11-25T10:58:00+00:00",
+          "text": "有烟还是无烟"
+        },
+        {
+          "evidence_alias": "E08",
+          "evidence_id": "customer:role-event:f2cbe8b31c23edebe21f0dc7f2cede130871a5f541cb0c3a90c4daf8eae20b53",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板，七点半那桌烟况知道了吗，我这边烟倒无所谓，主要是想问一块底的还有没有别的现成桌"
+        },
+        {
+          "evidence_alias": "E09",
+          "evidence_id": "outbound:trace_92d8322c99eebbc1891c220f:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "七点半那桌我这边认不出具体是哪桌，烟况没法跟你确认诶。一块底的现成桌现在也确实没有别的，要不我帮你组一桌？",
+          "answers": "customer:role-event:f2cbe8b31c23edebe21f0dc7f2cede130871a5f541cb0c3a90c4daf8eae20b53"
+        },
+        {
+          "evidence_alias": "E12",
+          "evidence_id": "outbound:board:board_snapshot_3f76e8b70e7cb5554b4eefa667dd131e",
+          "kind": "group_delivery",
+          "sent_at": "2026-11-26T03:07:30+00:00",
+          "text": "当前缺人局：\n1、2026-11-26 19:30 杭麻 1～3元 无烟 173"
+        },
+        {
+          "evidence_alias": "E14",
+          "evidence_id": "customer:role-event:94571a980a22416c46647b91296a9369e33d9f81dd73d1ef2c15acdc8d9661b9",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T03:09:30+00:00",
+          "text": "老板，今晚七点半那桌一块底的杭麻还有位吗，我七点能到，最多打三个钟"
+        },
+        {
+          "evidence_alias": "E16",
+          "evidence_id": "trace_0be7dd2a06ceb60f3ea58cc9",
+          "kind": "agent_execution",
+          "responds_to": "customer:role-event:94571a980a22416c46647b91296a9369e33d9f81dd73d1ef2c15acdc8d9661b9",
+          "runtime_status": "waiting_user",
+          "tools": [
+            {
+              "name": "search_current_games",
+              "execution": "ok",
+              "options": [
+                {
+                  "game_id": "game_8aef6bf1423b",
+                  "status": "forming",
+                  "planned_start_at": "2026-11-26T19:30:00+08:00",
+                  "terms": {
+                    "game_type": "hangzhou_mahjong",
+                    "start_time": "19:30",
+                    "planned_start_at": "2026-11-26T19:30:00+08:00",
+                    "max_duration_hours": 2.5,
+                    "smoke_preference": "no_smoking",
+                    "start_time_kind": "scheduled",
+                    "stake_range": {
+                      "min": 1.0,
+                      "max": 3.0
+                    }
+                  },
+                  "remaining_seats": 3
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "assessment": "E08 紧接 E01/E02 的当晚烟况话头，私聊也确实少说可辨认的 371/0.5，店家表示不确定有依据。E14 来自第二天的新正式看板 E12，档位 1 在 1–3 内且 E16 查到唯一桌，不能据第一天的含糊指代判第二天。"
+    },
+    {
+      "role": "0038",
+      "original_case_status": "valid",
+      "original_verdict": "fail",
+      "projection_version": 12,
+      "response_source": {
+        "trace_id": "judge:venue-sender-0038",
+        "call_id": "llm_call_db473ca88c524ba5a163ba931da0d33c",
+        "terminal_attempt_id": "llm_attempt_020044d580374787a1c7953a1c655e61",
+        "raw_response_sha256": "81a6c5b982d2a791d00b221ab944b6a256de8489f3d25995e720878da4b01359"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "fail",
+          "reason": "顾客来话整体自然，但 11-25 的 E12 在店家 E13 只能按「人齐开、散场时间定不下」处理时，之前 E08 已说「有烟没烟都行」并等位，转身又报名组桌，条件重复且未回应店家关于开场时间的追问，造成条件反复。11-26 E26 先问原桌空位，和 E21 的下午组局互不区分，同一顾客在同一天既组下午桌又认领晚上桌未说明取舍，询问范围与先前委托混杂。其余各条有实际询问或推进理由。",
+          "references": [
+            "E04",
+            "E08",
+            "E12",
+            "E17",
+            "E21",
+            "E26"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_alias": "E08",
+          "evidence_id": "customer:role-event:57625a244c70e0ec081b333707bbac72399e473880179f9c6e4442ef88768b93",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "老板 之前说的杭麻1块组桌有人凑上没 我七点半能到 有烟没烟都行 有位喊我一声"
+        },
+        {
+          "evidence_alias": "E09",
+          "evidence_id": "outbound:trace_488f8c12def0d347339915f9:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "text": "七点半以后暂时没有能搭的杭麻1块桌诶，要不我帮你组一桌？",
+          "answers": "customer:role-event:57625a244c70e0ec081b333707bbac72399e473880179f9c6e4442ef88768b93"
+        },
+        {
+          "evidence_alias": "E12",
+          "evidence_id": "customer:role-event:6a06b68bbde9d8a10af6e6e787e0c8acabe560e1b3e231bbfab3624c4c63325e",
+          "kind": "customer_message",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "老板 那就帮我组一桌吧 杭麻1块 有烟没烟都行 我八点能到 打到十一点前"
+        },
+        {
+          "evidence_alias": "E13",
+          "evidence_id": "outbound:trace_9cf45d81cf66cf5f2c9e2cb3:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "text": "八点以后现在没有能搭的杭麻1块桌。人齐开这桌定不下十一点散场，你看先按几点开合适？八点或八点过一点都行的话，我就按这个时间给你组。",
+          "answers": "customer:role-event:6a06b68bbde9d8a10af6e6e787e0c8acabe560e1b3e231bbfab3624c4c63325e",
+          "followup_observation_ended": "dialogue_turn_limit"
+        },
+        {
+          "evidence_alias": "E21",
+          "evidence_id": "customer:role-event:c766ac8a2390a8bcdad079e4faabc137b8abb536d79d2252d271d40d3c94b678",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T01:37:00+00:00",
+          "text": "老板 那就帮我组一桌吧 杭麻1块 有烟没烟都行 我下午能到 打到四点前"
+        },
+        {
+          "evidence_alias": "E22",
+          "evidence_id": "outbound:trace_5295fa21fef851c9899f654c:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T01:37:00+00:00",
+          "text": "好的，杭麻1块给你记下了。这桌下午几点开合适？你定个钟头，我好帮你凑人。",
+          "answers": "customer:role-event:c766ac8a2390a8bcdad079e4faabc137b8abb536d79d2252d271d40d3c94b678",
+          "followup_observation_ended": "dialogue_turn_limit"
+        },
+        {
+          "evidence_alias": "E26",
+          "evidence_id": "customer:role-event:49ecc6468c13c6c52692aeb95242adb056d25901f61f988d3252a9307fddf9ab",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T03:09:30+00:00",
+          "text": "老板 看板上晚上七点半那桌杭麻1到3块的无烟 我1块底能打 现在还有位吗"
+        }
+      ],
+      "assessment": "E12 是接受 E09 的新组桌提议，从 19:30 改到 20:00 到店并新增 23:00 前离开。E13 的开场追问晚于 E12，调度也没有安排紧随其后的角色来话。第二天 E21 是下午委托，E26 是看板晚上桌的空位查询，尚未报名。"
+    },
+    {
+      "role": "0402",
+      "original_case_status": "valid",
+      "original_verdict": "fail",
+      "projection_version": 12,
+      "response_source": {
+        "trace_id": "judge:venue-sender-0402",
+        "call_id": "llm_call_286141ea5afa4dce9f6f8ec6a05a9791",
+        "terminal_attempt_id": "llm_attempt_db7a9092afd74e01afb91f44d12871e4",
+        "raw_response_sha256": "3d6a5c6e4339ecbd938df33339b0eb30541609fab71bce8c436302f04dddf198"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "fail",
+          "reason": "顾客在 E27 已把看板原信息说清（今晚七点半杭麻1-3底无烟、八点一刻到、最晚十点），本身可自洽；但 E28 店家已明确告知桌子 open 后不保证有位置、桌上是否愿等无法保证，属于无适配桌且未确认留位。顾客在 E28 之后没有做出任何接受、拒绝或收尾动作，对话停留在未决状态，未像真人一样处理自己的目标（无报名、无请店家组局、也无婉拒），故本项不能通过。",
+          "references": [
+            "E27",
+            "E28"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_alias": "E23",
+          "evidence_id": "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:35:00+00:00",
+          "text": "老板，杭麻1-3底那桌还在凑人呢？我八点一刻能到，最晚只能打到十点。晚到过去还赶得上吗？"
+        },
+        {
+          "evidence_alias": "E24",
+          "evidence_id": "outbound:trace_b4fbdd9562e7b8952fdc6965:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:35:00+00:00",
+          "text": "你说的那桌我这边没查到具体桌况，暂时辨不出是哪桌。你方便说下是几点开、谁约的那桌吗？我帮你核实还在不在凑、八点一刻到赶不赶得上。",
+          "answers": "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54"
+        },
+        {
+          "evidence_alias": "E27",
+          "evidence_id": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T11:37:00+00:00",
+          "text": "老板，就是看板上今晚七点半那桌杭麻，一底到三底的，无烟。我八点一刻到，最晚打到十点，帮我核实下还赶得上吗？"
+        },
+        {
+          "evidence_alias": "E28",
+          "evidence_id": "outbound:trace_88bfa78ebd42bc9f7080ca8a:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T11:37:00+00:00",
+          "text": "今晚七点半那桌杭麻、1-3块、无烟的还在凑人，现在桌上就一位，还差三位。你八点一刻到的话是开场之后了，到时候还有没有位置、桌上愿不愿意等，我这边没法保证。",
+          "answers": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a"
+        },
+        {
+          "evidence_alias": "E29",
+          "evidence_id": "trace_88bfa78ebd42bc9f7080ca8a",
+          "kind": "agent_execution",
+          "responds_to": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+          "runtime_status": "completed",
+          "tools": [
+            {
+              "name": "search_current_games",
+              "execution": "ok",
+              "options": [
+                {
+                  "game_id": "game_8aef6bf1423b",
+                  "status": "forming",
+                  "planned_start_at": "2026-11-26T19:30:00+08:00",
+                  "terms": {
+                    "game_type": "hangzhou_mahjong",
+                    "start_time": "19:30",
+                    "planned_start_at": "2026-11-26T19:30:00+08:00",
+                    "max_duration_hours": 2.5,
+                    "smoke_preference": "no_smoking",
+                    "start_time_kind": "scheduled",
+                    "stake_range": {
+                      "min": 1.0,
+                      "max": 3.0
+                    }
+                  },
+                  "remaining_seats": 3
+                },
+                {
+                  "game_id": "game_f28f170b8e4a",
+                  "status": "forming",
+                  "planned_start_at": "2026-11-27T19:30:00+08:00",
+                  "terms": {
+                    "game_type": "hangzhou_mahjong",
+                    "start_time": "19:30",
+                    "planned_start_at": "2026-11-27T19:30:00+08:00",
+                    "smoke_preference": "no_smoking",
+                    "start_time_kind": "scheduled",
+                    "stake_range": {
+                      "min": 2.0,
+                      "max": 3.0
+                    }
+                  },
+                  "remaining_seats": 3
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "assessment": "E27 已补店家刚问的开场并把到店、最晚离场都说清。E28 只是告知风险，无后续问题。已送达且店家状态 completed，下一次角色唤醒超过轮次上限。不能按顾客没有报名、婉拒或收尾判失败。",
+      "private_reply_observation_source": {
+        "event_id": "role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+        "reply_message_id": "outbound:trace_88bfa78ebd42bc9f7080ca8a:1",
+        "depth": 1,
+        "max_dialogue_turns": 2,
+        "status": "completed",
+        "scheduled_wakes": []
+      }
+    },
+    {
+      "role": "0151",
+      "original_case_status": "valid",
+      "original_verdict": "inconclusive",
+      "projection_version": 12,
+      "response_source": {
+        "trace_id": "judge:venue-sender-0151",
+        "call_id": "llm_call_6da2b747988643b6b3c81b37af368cf9",
+        "terminal_attempt_id": "llm_attempt_5e1039d2b928407096767f337e7ea89f",
+        "raw_response_sha256": "9db183dc8edbb6fcb5fd148fd8e9b80944a94a4a4d0f767bf0da24bfdeda6315"
+      },
+      "original_findings": [
+        {
+          "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+          "verdict": "inconclusive",
+          "reason": "顾客每条来话都有实际推进理由：E04 首次按看板问371那桌，E09 在店家说没查到时明确委托组局并报玩法/档位/到场/上限，E14 次日看到新看板后问当晚杭麻无烟桌，E19 为留位补充到场与时长，E23 接受店家关于时长未定的说明后同意按此桌留位。E07 是群话题下的合理等待（非本人事务），没有无理由重问或复读清单。但该顾客项要求的 pass 需引用每条实际顾客消息与结束时的 wait/leave 等动作（若发生）；E23 后店家 E24 再次询问是否接受，顾客未再回复且无 wait/leave 动作记录，无法确认收尾，判 inconclusive。",
+          "references": [
+            "E04",
+            "E07",
+            "E09",
+            "E14",
+            "E19",
+            "E23"
+          ]
+        },
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "inconclusive",
+          "reason": "店家在处理中基本承接了对话：E05 如实告知没查到并给替代方案，E10 说明无法保证等到七点四十并追问开场时间，E15 报出次日那桌缺三位，E20 报出1～3元并明确指出这桌未约定时长可能到不了十点半，E24 再次就不确定的时长条件请顾客确认。但 E24 之后没有该轮进一步的实际执行或最终留位回执，无法判定时长条件是否被最终妥善处理并落位，故为 inconclusive。",
+          "references": [
+            "E05",
+            "E10",
+            "E15",
+            "E20",
+            "E24"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_alias": "E19",
+          "evidence_id": "customer:role-event:790c38bac1fb3ea2afa855cdcee6adc1e93a07a0aaf72d9a2a40b936eb63f2ae",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "老板 七点半那桌杭麻无烟的 我七点能到 打到十点半 帮我留一个"
+        },
+        {
+          "evidence_alias": "E20",
+          "evidence_id": "outbound:trace_05e27c9c254164ca22b49b22:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T10:35:00+00:00",
+          "text": "七点半那桌杭麻无烟的找到了，1～3元，现在就你一个，还缺三位。这桌现在还没约定打多久，可能到不了十点半。你要不要先按这桌来？",
+          "answers": "customer:role-event:790c38bac1fb3ea2afa855cdcee6adc1e93a07a0aaf72d9a2a40b936eb63f2ae"
+        },
+        {
+          "evidence_alias": "E23",
+          "evidence_id": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T10:37:00+00:00",
+          "text": "行 就按这桌来 帮我留一个"
+        },
+        {
+          "evidence_alias": "E24",
+          "evidence_id": "outbound:trace_d1361b86086e13ae25465674:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T10:37:00+00:00",
+          "text": "这桌现在还没约打多久，可能到不了十点半，你要是能接受这个，我就先给你留着？",
+          "answers": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90",
+          "followup_observation_ended": "dialogue_turn_limit"
+        },
+        {
+          "evidence_alias": "E25",
+          "evidence_id": "trace_d1361b86086e13ae25465674",
+          "kind": "agent_execution",
+          "responds_to": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90",
+          "runtime_status": "waiting_user",
+          "tools": []
+        }
+      ],
+      "assessment": "E24 已带旧版明确的轮次上限，角色和店家判辞都仍要求上限之外的回复或席位结果。另有实际事实错：E20 把店主 0437 的唯一一席说成 0151 本人席；E23 后的 join 被拒。观察上限与这两件已经发生的事须分开。"
+    },
+    {
+      "role": "0353",
+      "original_case_status": "valid",
+      "original_verdict": "fail",
+      "projection_version": 12,
+      "response_source": {
+        "trace_id": "judge:venue-sender-0353",
+        "call_id": "llm_call_9f9ede29ce0c47d6933d1a3b886f6c6f",
+        "terminal_attempt_id": "llm_attempt_9f354c908d4743b0a46d62bf7aafdc87",
+        "raw_response_sha256": "e856f135b6f20fd06fe7afc5a2896e6f8609c4864f2532b31a51032586b66e3b"
+      },
+      "original_findings": [
+        {
+          "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+          "verdict": "fail",
+          "reason": "E17 回复「19点半那桌杭麻现在一个人，还缺三位，1～3块无烟的」，把顾客问的杭麻桌烟况当成已确认无烟报出，无执行证据支持；E22 对川麻0.5无烟桌也只说缺人与开场，未核对时长是否满足顾客。E26 回复「人齐我这边没法主动喊你」与顾客「人齐了喊我一声」（E25）冲突，属无依据承诺/回避。",
+          "references": [
+            "E05",
+            "E12",
+            "E17",
+            "E22",
+            "E26"
+          ]
+        },
+        {
+          "check": "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据",
+          "verdict": "fail",
+          "reason": "E25「好 那我报一个 七点半到 川麻0.5无烟这桌 人齐了喊我一声」为无条件报名，E27 显示 recorded_status=confirmed 已确认席位，但 E26「好，给你占上了……人齐我这边没法主动喊你」未回应顾客「人齐了喊我一声」的请求，确认回复与请求不符，交付内容欠缺。",
+          "references": [
+            "E25",
+            "E26",
+            "E27"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_alias": "E16",
+          "evidence_id": "customer:role-event:b4ba1b378fed0c146852f0adc87ca8c8254db9bad78b0ccff5ea261170ea54a2",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T03:09:30+00:00",
+          "text": "老板好，今晚那桌杭麻19点半的 我打四川麻将 一块底的 还有位吗"
+        },
+        {
+          "evidence_alias": "E17",
+          "evidence_id": "outbound:trace_9e9a18cf0e232c522daf3dd4:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T03:09:30+00:00",
+          "text": "19点半那桌杭麻现在一个人，还缺三位，1～3块无烟的。",
+          "answers": "customer:role-event:b4ba1b378fed0c146852f0adc87ca8c8254db9bad78b0ccff5ea261170ea54a2"
+        },
+        {
+          "evidence_alias": "E18",
+          "evidence_id": "trace_9e9a18cf0e232c522daf3dd4",
+          "kind": "agent_execution",
+          "responds_to": "customer:role-event:b4ba1b378fed0c146852f0adc87ca8c8254db9bad78b0ccff5ea261170ea54a2",
+          "runtime_status": "completed",
+          "tools": [
+            {
+              "name": "search_current_games",
+              "execution": "ok",
+              "options": [
+                {
+                  "game_id": "game_8aef6bf1423b",
+                  "status": "forming",
+                  "planned_start_at": "2026-11-26T19:30:00+08:00",
+                  "terms": {
+                    "game_type": "hangzhou_mahjong",
+                    "start_time": "19:30",
+                    "planned_start_at": "2026-11-26T19:30:00+08:00",
+                    "max_duration_hours": 2.5,
+                    "smoke_preference": "no_smoking",
+                    "start_time_kind": "scheduled",
+                    "stake_range": {
+                      "min": 1.0,
+                      "max": 3.0
+                    }
+                  },
+                  "remaining_seats": 3
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "evidence_alias": "E21",
+          "evidence_id": "customer:role-event:d55a3428b17afc16a1ceffc6dfae5d93c834be1ee58de0e7248aa7a8c9286e11",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T09:05:00+00:00",
+          "text": "老板好 看板那桌川麻0.5无烟的还有位吗 我七点半到 一块底的"
+        },
+        {
+          "evidence_alias": "E22",
+          "evidence_id": "outbound:trace_7a0b8008214c34ddd74af0e8:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T09:05:00+00:00",
+          "text": "有的，就那桌川麻0.5无烟，19:30开，现在一个人，你来就还差俩。不过人齐才开，到点还缺人的话得再商量。来吗？",
+          "answers": "customer:role-event:d55a3428b17afc16a1ceffc6dfae5d93c834be1ee58de0e7248aa7a8c9286e11"
+        },
+        {
+          "evidence_alias": "E25",
+          "evidence_id": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+          "kind": "customer_message",
+          "sent_at": "2026-11-26T09:07:00+00:00",
+          "text": "好 那我报一个 七点半到 川麻0.5无烟这桌 人齐了喊我一声"
+        },
+        {
+          "evidence_alias": "E26",
+          "evidence_id": "outbound:trace_bcc40b26fe1c15c6dc17852f:1",
+          "kind": "agent_reply",
+          "sent_at": "2026-11-26T09:07:00+00:00",
+          "text": "好，给你占上了，现在两个，还差两个。人齐我这边没法主动喊你，你要不临近了再问我一声？",
+          "answers": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9"
+        },
+        {
+          "evidence_alias": "E27",
+          "evidence_id": "trace_bcc40b26fe1c15c6dc17852f",
+          "kind": "agent_execution",
+          "responds_to": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+          "runtime_status": "completed",
+          "tools": [
+            {
+              "name": "join_game",
+              "execution": "ok",
+              "recorded_status": "confirmed",
+              "game_id": "game_aea7b51ef7c4"
+            }
+          ]
+        }
+      ],
+      "assessment": "E18 真实回执明确杭麻桌无烟，支持 E17。E21 没问时长。E25 是无条件报名且 E27 已成功占席，请人齐通知可以作为店家服务事实审查，不能作为时长判项的失败依据。E26 无证据断言没法主动通知仍是店家问题。"
+    }
+  ]
+}
