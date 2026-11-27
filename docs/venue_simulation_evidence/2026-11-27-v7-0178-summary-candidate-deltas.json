@@ -1,0 +1,661 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_code_commit": "a87e461",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev7_20261127/2026-11-25-real-f43d9234b8",
+  "customer_case": "0178",
+  "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+  "ledger": [
+    {
+      "sequence": 68,
+      "kind": "private",
+      "direction": "inbound",
+      "message_id": "customer:role-event:92cd64147cd588348a1850d41de56d56c156e2476308963e92d6a07c1a9d728d",
+      "source_message_id": null,
+      "trace_id": "trace_67179d55164baab4df47ac9f",
+      "sent_at": "2026-11-26T03:35:00+00:00",
+      "text": "老板 昨晚还问过我打啥玩法 后来没信儿了 今天中午或下午有一块底无烟的局吗 我十二点十分左右能到 有的话算我一个"
+    },
+    {
+      "sequence": 69,
+      "kind": "private",
+      "direction": "outbound",
+      "message_id": "outbound:trace_67179d55164baab4df47ac9f:1",
+      "source_message_id": "customer:role-event:92cd64147cd588348a1850d41de56d56c156e2476308963e92d6a07c1a9d728d",
+      "trace_id": "trace_67179d55164baab4df47ac9f",
+      "sent_at": "2026-11-26T03:35:00+00:00",
+      "text": "十二点十分往后到下午，现在没有能搭的一块底无烟局诶，要不我帮你组一桌？"
+    },
+    {
+      "sequence": 70,
+      "kind": "private",
+      "direction": "inbound",
+      "message_id": "customer:role-event:6b6b920a41c5a68d6eeefc73bfeb29bb0de438c60e64ec980f585a630d9785e6",
+      "source_message_id": null,
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "sent_at": "2026-11-26T03:37:00+00:00",
+      "text": "行 帮我组一桌吧 一块底无烟 四川麻将 我十二点十分左右能到"
+    },
+    {
+      "sequence": 71,
+      "kind": "private",
+      "direction": "outbound",
+      "message_id": "outbound:trace_9d2be3ad70d60c7a2334a401:1",
+      "source_message_id": "customer:role-event:6b6b920a41c5a68d6eeefc73bfeb29bb0de438c60e64ec980f585a630d9785e6",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "sent_at": "2026-11-26T03:37:00+00:00",
+      "text": "稍等一下"
+    }
+  ],
+  "budgets": {
+    "preemptive_trigger_tokens": 54400,
+    "main_hard_limit_tokens": 64000,
+    "summary_prompt_hard_limit_tokens": 6000
+  },
+  "summary_requests": [
+    {
+      "trigger": "context_budget",
+      "step_index": 5,
+      "system_sha256": "b19ff094f089ab15a8c69a0f83e7ba6128fc514781af50d55395aa3c07dea9a4",
+      "user_json_sha256": "d8f4d97af50750022c3dfa7a19058fbac820f65f9bbb8d67ada991884e157800",
+      "summary_request_estimated_tokens": 4231,
+      "included_turn_count": 8,
+      "omitted_turn_count": 1,
+      "existing_checkpoint": null,
+      "transport": {
+        "called": true,
+        "call_id": "llm_call_5eebd8602b22416fa76fa2672eca8ac1",
+        "elapsed_ms": 30118.019,
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_4eed7e7f3c2842769d15126c23d8b3db",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 14.999891249346547,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_8ec98c410770444f8a43c1e411a3eb99",
+            "http_status": 200,
+            "body_complete": false,
+            "timeout_seconds": 13.911819166038185,
+            "error_type": "TimeoutError"
+          }
+        ]
+      },
+      "row_change": "初次超过 54,400 的软阈值。正文含上一轮来话与答复、当前委托、此前两次拒绝建局和当前两次发前审查。",
+      "recent_row_content_sha256s": [
+        "050830dbe00c1dbab2a12e9d30710720be1dcecb243dc2c025b6dd2eea797392",
+        "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293",
+        "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a",
+        "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2"
+      ]
+    },
+    {
+      "trigger": "context_budget",
+      "step_index": 6,
+      "system_sha256": "b19ff094f089ab15a8c69a0f83e7ba6128fc514781af50d55395aa3c07dea9a4",
+      "user_json_sha256": "6c903c00a5c775c679b2b05311a66b59fee53bf161a71b0738b9fa62c226f48d",
+      "summary_request_estimated_tokens": 4625,
+      "included_turn_count": 9,
+      "omitted_turn_count": 1,
+      "existing_checkpoint": null,
+      "added_vs_previous_body": {
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3": 1
+      },
+      "removed_vs_previous_body": {},
+      "transport": {
+        "called": true,
+        "call_id": "llm_call_f70dfbf4b220461495c81745c813686e",
+        "elapsed_ms": 30551.169,
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_b98d61fc74264319917097f37447ba83",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 14.999857813003473,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_15bf6e1a5e1947738684ce7a7713a44d",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 13.935337333008647,
+            "error_type": "TimeoutError"
+          }
+        ]
+      },
+      "row_change": "沿用第 5 步的全部八行，增加第三次完全相同的拒绝建局回执。整份请求仍是不同正文。",
+      "recent_row_content_sha256s": [
+        "050830dbe00c1dbab2a12e9d30710720be1dcecb243dc2c025b6dd2eea797392",
+        "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293",
+        "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a",
+        "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3"
+      ]
+    },
+    {
+      "trigger": "context_budget",
+      "step_index": 7,
+      "system_sha256": "b19ff094f089ab15a8c69a0f83e7ba6128fc514781af50d55395aa3c07dea9a4",
+      "user_json_sha256": "26712c64590dd06ea0072e05b46511ba4dfbde2ce086e02df93275c36182955a",
+      "summary_request_estimated_tokens": 9474,
+      "included_turn_count": 1,
+      "omitted_turn_count": 10,
+      "existing_checkpoint": null,
+      "added_vs_previous_body": {
+        "acbe2d3219c08f399ab97e446b1eb2e7ceab24cde0b3fcde9c176fb812b6459a": 1
+      },
+      "removed_vs_previous_body": {
+        "050830dbe00c1dbab2a12e9d30710720be1dcecb243dc2c025b6dd2eea797392": 1,
+        "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293": 1,
+        "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a": 1,
+        "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11": 1,
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3": 3,
+        "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db": 1,
+        "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2": 1
+      },
+      "transport": {
+        "called": false,
+        "reason": "summary prompt token estimate exceeded",
+        "max_summary_input_tokens": 6000
+      },
+      "row_change": "较大的真实查局回执执行成功且为空。摘要预算选择仅保留该回执，占 9,474 个估算 token，6,000 上限前阻止请求。上一份的九行不在这份摘要候选内。",
+      "recent_row_content_sha256s": [
+        "acbe2d3219c08f399ab97e446b1eb2e7ceab24cde0b3fcde9c176fb812b6459a"
+      ]
+    },
+    {
+      "trigger": "context_budget",
+      "step_index": 8,
+      "system_sha256": "b19ff094f089ab15a8c69a0f83e7ba6128fc514781af50d55395aa3c07dea9a4",
+      "user_json_sha256": "70f6f63a4bcd74f4b2d00f8ff2b359f660709251db425a5daaef270367b8d71b",
+      "summary_request_estimated_tokens": 5033,
+      "included_turn_count": 9,
+      "omitted_turn_count": 3,
+      "existing_checkpoint": null,
+      "added_vs_previous_body": {
+        "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293": 1,
+        "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a": 1,
+        "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11": 1,
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3": 3,
+        "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db": 1,
+        "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2": 1,
+        "54a6b6e44addcb694193204b749a57e0086bdaef3b2d10d42b5cf67eb0a8879e": 1
+      },
+      "removed_vs_previous_body": {
+        "acbe2d3219c08f399ab97e446b1eb2e7ceab24cde0b3fcde9c176fb812b6459a": 1
+      },
+      "transport": {
+        "called": true,
+        "call_id": "llm_call_967c05ba5c3f40e4ae71d7939a763d7e",
+        "elapsed_ms": 30587.117,
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_f83f19b782e3428e99f183c9999423f4",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 14.999866437516175,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_b6c1df07428143e7ab98472d863b982b",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 13.882915333961137,
+            "error_type": "TimeoutError"
+          }
+        ]
+      },
+      "row_change": "新的建局一致性拒绝引入「不能落实最早开场」事实。按预算恢复其中八行可保留的前文和本人原话，挤掉较早的来话与超大的查局回执；主模型仍由本轮正式工具证据另行取得了查局结果。",
+      "recent_row_content_sha256s": [
+        "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293",
+        "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a",
+        "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "54a6b6e44addcb694193204b749a57e0086bdaef3b2d10d42b5cf67eb0a8879e"
+      ]
+    },
+    {
+      "trigger": "after_turn",
+      "step_index": null,
+      "system_sha256": "b19ff094f089ab15a8c69a0f83e7ba6128fc514781af50d55395aa3c07dea9a4",
+      "user_json_sha256": "e8c526017d8907ddfb17cb62e244826c572c5a2aeeab9d9e8084c2b3091d452d",
+      "summary_request_estimated_tokens": 5323,
+      "included_turn_count": 10,
+      "omitted_turn_count": 4,
+      "existing_checkpoint": null,
+      "added_vs_previous_body": {
+        "2bc8f48e43bb72ce179f4116c8532f267a12446a40d90ba81f0268871f2d22f8": 1,
+        "7ac9cbdd39e7788b79d9df4eade5b6ce1167d0f5579526b6e138d56f773a8b0a": 1
+      },
+      "removed_vs_previous_body": {
+        "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293": 1
+      },
+      "transport": {
+        "called": true,
+        "call_id": "llm_call_c70fc2cfba364b3587745dea3bc2316a",
+        "elapsed_ms": 31145.643,
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_ee80ee82529f47168700acf55fc9f361",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 14.999840292031877,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_e64039691e7e4a38af6040d419b8c5de",
+            "http_status": null,
+            "body_complete": false,
+            "timeout_seconds": 13.888902209000662,
+            "error_type": "TimeoutError"
+          }
+        ]
+      },
+      "row_change": "轮末摘要和前置压缩目的有别。相对于第 8 步摘要候选，剔除较早发前审查，纳入最后一次建局拒绝和终态回复，正文仍不同。",
+      "recent_row_content_sha256s": [
+        "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a",
+        "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2",
+        "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3",
+        "54a6b6e44addcb694193204b749a57e0086bdaef3b2d10d42b5cf67eb0a8879e",
+        "2bc8f48e43bb72ce179f4116c8532f267a12446a40d90ba81f0268871f2d22f8",
+        "7ac9cbdd39e7788b79d9df4eade5b6ce1167d0f5579526b6e138d56f773a8b0a"
+      ]
+    }
+  ],
+  "main_calls": [
+    {
+      "step_index": 1,
+      "estimated_tokens": 52565,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 12654.099
+    },
+    {
+      "step_index": 2,
+      "estimated_tokens": 53859,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 17992.928
+    },
+    {
+      "step_index": 3,
+      "estimated_tokens": 54306,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 12363.385
+    },
+    {
+      "step_index": 4,
+      "estimated_tokens": 54119,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 15251.264
+    },
+    {
+      "step_index": 5,
+      "estimated_tokens": 54750,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 18995.702
+    },
+    {
+      "step_index": 6,
+      "estimated_tokens": 54978,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 18586.047
+    },
+    {
+      "step_index": 7,
+      "estimated_tokens": 56114,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 38100.565
+    },
+    {
+      "step_index": 8,
+      "estimated_tokens": 56508,
+      "budget_allowed": true,
+      "budget_reason": "budget_reserved",
+      "http_status": 200,
+      "body_complete": true,
+      "elapsed_ms": 30321.465
+    }
+  ],
+  "table_availability_unavailable": [
+    {
+      "step_index": 1,
+      "call_id": "llm_call_4a64ac9aeb3d4514a6eb25bdf5f33cb8",
+      "elapsed_ms": 20494.797,
+      "attempts": [
+        {
+          "attempt_id": "llm_attempt_fd14645c22984c649c001177be6a77ab",
+          "http_status": 200,
+          "body_complete": false,
+          "timeout_seconds": 9.999911875114776,
+          "error_type": "TimeoutError"
+        },
+        {
+          "attempt_id": "llm_attempt_23f288198ed74829973c9af5bb6fbe9e",
+          "http_status": 200,
+          "body_complete": false,
+          "timeout_seconds": 9.346351749962196,
+          "error_type": "TimeoutError"
+        }
+      ]
+    },
+    {
+      "step_index": 3,
+      "call_id": "llm_call_98af718162bf473bb5e614808277a170",
+      "elapsed_ms": 9837.212,
+      "attempts": [
+        {
+          "attempt_id": "llm_attempt_cabd27f275194302a752a5024286b1b4",
+          "http_status": 200,
+          "body_complete": true,
+          "timeout_seconds": 9.999840916483663,
+          "error_type": "LLMResponseFormatError"
+        }
+      ]
+    },
+    {
+      "step_index": 5,
+      "call_id": "llm_call_9265d55740b149579f8bfc030afc6659",
+      "elapsed_ms": 9629.923,
+      "attempts": [
+        {
+          "attempt_id": "llm_attempt_319fcd2433944493b27b67498a2ef6f5",
+          "http_status": 200,
+          "body_complete": true,
+          "timeout_seconds": 9.999911437975243,
+          "error_type": "LLMResponseFormatError"
+        }
+      ]
+    },
+    {
+      "step_index": 6,
+      "call_id": "llm_call_978b41d8829b4f8a990aac0b1aabece4",
+      "elapsed_ms": 20603.523,
+      "attempts": [
+        {
+          "attempt_id": "llm_attempt_831bcf1f48a24099b58b7002abc13132",
+          "http_status": 200,
+          "body_complete": false,
+          "timeout_seconds": 9.999918333487585,
+          "error_type": "TimeoutError"
+        },
+        {
+          "attempt_id": "llm_attempt_ccf73ce0b47043579b9625f6c54b6497",
+          "http_status": null,
+          "body_complete": false,
+          "timeout_seconds": 9.035542084020562,
+          "error_type": "TimeoutError"
+        }
+      ]
+    },
+    {
+      "step_index": 7,
+      "call_id": "llm_call_d912ea93ff9d4415b972fef1f3a1dd02",
+      "elapsed_ms": 20620.301,
+      "attempts": [
+        {
+          "attempt_id": "llm_attempt_0cc10c87671c41a8ada0f5aabd890109",
+          "http_status": 200,
+          "body_complete": false,
+          "timeout_seconds": 9.999913104460575,
+          "error_type": "TimeoutError"
+        },
+        {
+          "attempt_id": "llm_attempt_05b180a0839143429c281c8b3c136feb",
+          "http_status": null,
+          "body_complete": false,
+          "timeout_seconds": 9.284220041008666,
+          "error_type": "TimeoutError"
+        }
+      ]
+    },
+    {
+      "step_index": 8,
+      "call_id": "llm_call_d1b04395d6a84bcf8aaa2469417c1d3c",
+      "elapsed_ms": 20566.689,
+      "attempts": [
+        {
+          "attempt_id": "llm_attempt_57a60474b07240d7bab75684a7ff1a8c",
+          "http_status": 200,
+          "body_complete": false,
+          "timeout_seconds": 9.999909771373495,
+          "error_type": "TimeoutError"
+        },
+        {
+          "attempt_id": "llm_attempt_e291d2f7dcf54f18a98aa5160db45f47",
+          "http_status": null,
+          "body_complete": false,
+          "timeout_seconds": 9.098200583946891,
+          "error_type": "TimeoutError"
+        }
+      ]
+    }
+  ],
+  "actual_business_tool_results": [
+    {
+      "name": "create_game",
+      "call_id": "call_create_game",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+    },
+    {
+      "name": "create_game",
+      "call_id": "call_create_game",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+    },
+    {
+      "name": "create_game",
+      "call_id": "call_create_game",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+    },
+    {
+      "name": "search_current_games",
+      "call_id": "call_search_games_sichuan",
+      "called": true,
+      "allowed": true,
+      "error": null,
+      "requirement": {
+        "base_stake": 1.0,
+        "game_type": "sichuan_mahjong",
+        "requesting_party": {
+          "seat_count": 1
+        },
+        "smoke_preference": "no_smoking",
+        "stake": "1",
+        "stake_label": "1",
+        "start_time_range": {
+          "end_at": "2026-11-26T18:00:00+08:00",
+          "start_at": "2026-11-26T12:10:00+08:00"
+        }
+      },
+      "matches": []
+    },
+    {
+      "name": "create_game",
+      "call_id": "call_create_game",
+      "called": false,
+      "allowed": false,
+      "error": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; flexible game can start before the searched opening window starting at 2026-11-26T12:10:00+08:00; it has no enforceable earliest start"
+    },
+    {
+      "name": "create_game",
+      "call_id": "call_create_game_fixed",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+    }
+  ],
+  "timing_totals_ms": {
+    "preemptive_summary_transport": 91256.305,
+    "after_turn_summary_transport": 31145.643,
+    "all_summary_transport": 122401.948,
+    "main_transport": 164265.455,
+    "availability_unavailable_transport": 101752.445
+  },
+  "terminal": {
+    "status": "needs_help",
+    "reason": "max_steps_exceeded",
+    "delivered_message_id": "outbound:trace_9d2be3ad70d60c7a2334a401:1",
+    "next_step_index": 9,
+    "saved_summary_checkpoint_count": 0
+  },
+  "analysis": [
+    "同一轮的摘要模型系统提示相同，五份用户 JSON 的 SHA256 全部不同。第二份只增加重复拒绝行，后续还出现了真实空查局和不同原因的建局拒绝。按完整输入去重在此轮不会跳过任何摘要。",
+    "四份前置摘要候选对应的主提示均超过 54,400 软阈值。实际发出的是第 5、6、8 步三次请求，第 7 步仅在日志记录超出摘要硬预算的候选。这四步主模型的普通压缩输入均低于 64,000 硬上限，最终确实发出了八次主请求。",
+    "轮末摘要另发生一次传输超时；终态记录随后完成，沙盒实际送达同源等待提示。日志时间戳是同一虚拟营业时间，延迟以 HTTP 诊断记录的耗时累加，不能用这些时间戳相减当作真实墙钟，也不能把各调用之和当成总墙钟。",
+    "摘要超时增加等待，但主模型已经逐步执行到上限。所得空查局真实，招募未落库。缺可行开场、当前时间核验失败及可能提前的人齐开分别由工具拒绝，不宜把终态全归因于摘要。",
+    "本案保留证据。若以后比较软阈值下的有限摘要尝试，应分别量化节省延时、不同新事实获摘要的机会、过硬预算的保底保护及已落库摘要能否读取。不能因连续失败或表面相似就跳过后续新增事实。"
+  ],
+  "summary_rows_by_content_sha256": {
+    "050830dbe00c1dbab2a12e9d30710720be1dcecb243dc2c025b6dd2eea797392": {
+      "role": "user",
+      "trace_id": "trace_67179d55164baab4df47ac9f"
+    },
+    "f640fee17f9f8dd6d797c1ebfe0dc8cfe03a217525cf2de3c792ae59aed04293": {
+      "role": "tool",
+      "trace_id": "trace_67179d55164baab4df47ac9f",
+      "receipts": [
+        {
+          "name": "customer_visible_content_review",
+          "called": true,
+          "allowed": true,
+          "error": null,
+          "approved": true
+        }
+      ]
+    },
+    "1dec0b3f7ea167b7df2be7b4c7387c5ba42d965754115e546586178e2bf72e7a": {
+      "role": "assistant",
+      "trace_id": "trace_67179d55164baab4df47ac9f"
+    },
+    "a805f8ae4ce6cd69f1303b1a6f59d48040a696866d2319d445df23ef56f86f11": {
+      "role": "user",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401"
+    },
+    "78674a45412bf863be87bf347e7abab2cb3f394383abc1cabdbe3654ee1715f3": {
+      "role": "tool",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "receipts": [
+        {
+          "name": "create_game",
+          "called": false,
+          "allowed": false,
+          "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+        }
+      ]
+    },
+    "05dc99175d53ed6f90e84dedbdac457e1c9eb357794b9f65ce241038677341db": {
+      "role": "tool",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "receipts": [
+        {
+          "name": "customer_visible_content_review",
+          "called": true,
+          "allowed": true,
+          "error": null,
+          "approved": false
+        }
+      ]
+    },
+    "2b266d7484f3fe4adeb7c44dd20423ca6678ac5211f66505ce9842e71d4013e2": {
+      "role": "tool",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "receipts": [
+        {
+          "name": "customer_visible_content_review",
+          "called": true,
+          "allowed": true,
+          "error": null,
+          "approved": false
+        }
+      ]
+    },
+    "acbe2d3219c08f399ab97e446b1eb2e7ceab24cde0b3fcde9c176fb812b6459a": {
+      "role": "tool",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "receipts": [
+        {
+          "name": "search_current_games",
+          "called": true,
+          "allowed": true,
+          "error": null,
+          "returned_matches": 0
+        }
+      ]
+    },
+    "54a6b6e44addcb694193204b749a57e0086bdaef3b2d10d42b5cf67eb0a8879e": {
+      "role": "tool",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "receipts": [
+        {
+          "name": "create_game",
+          "called": false,
+          "allowed": false,
+          "error": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; flexible game can start before the searched opening window starting at 2026-11-26T12:10:00+08:00; it has no enforceable earliest start"
+        }
+      ]
+    },
+    "2bc8f48e43bb72ce179f4116c8532f267a12446a40d90ba81f0268871f2d22f8": {
+      "role": "tool",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401",
+      "receipts": [
+        {
+          "name": "create_game",
+          "called": false,
+          "allowed": false,
+          "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。"
+        }
+      ]
+    },
+    "7ac9cbdd39e7788b79d9df4eade5b6ce1167d0f5579526b6e138d56f773a8b0a": {
+      "role": "assistant",
+      "trace_id": "trace_9d2be3ad70d60c7a2334a401"
+    }
+  },
+  "offline_check": {
+    "existing_summary_tests": "tests/test_context_summary.py",
+    "passed": 17,
+    "new_runtime_behavior": "none"
+  }
+}
