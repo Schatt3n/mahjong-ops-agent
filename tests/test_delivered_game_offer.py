@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from mahjong_agent_runtime import AgentRuntime, InMemoryAgentStore, SQLiteAgentStore, StaticAgentClient, UserMessage
+from mahjong_agent_runtime.domains.context_builders.builder import read_main_agent_system_contract
 from mahjong_agent_runtime.domains.delivered_game_offer import DELIVERED_GAME_OFFER, delivered_offer_matches_game
 from mahjong_agent_runtime.models import using_clock
 
@@ -172,6 +174,83 @@ def test_delayed_reply_rechecks_the_discussed_table_without_treating_it_as_an_of
     assert store.require_game(game_id).remaining_seats() == 3
     if isinstance(store, SQLiteAgentStore):
         store._connection.close()
+
+
+@pytest.mark.parametrize("reviewed_reference", [True, False])
+def test_v8_0402_delivered_range_reference_recovers_original_table_after_idle(tmp_path, reviewed_reference):
+    """复放原始短档位来话和任务轮转，结构化引用只用于回查已有桌。"""
+    evidence = Path(__file__).resolve().parents[1] / "docs/venue_simulation_evidence"
+    case = json.loads((evidence / "2026-11-27-v8-0402-ambiguous-stake-reference.json").read_text(encoding="utf-8"))
+    first, offer, current = case["related_conversation"][:3]
+    first_at, current_at = _at("11:09").replace(second=30), _at("19:35")
+    terms = case["earlier_review"]["candidate"]["terms"]
+    query_arguments = case["earlier_lookup"]["submitted"]
+    store = SQLiteAgentStore(tmp_path / "ambiguous-stake.sqlite3")
+
+    def search(arguments):
+        return action_json(objective_status="needs_tool", tool_calls=[{
+            "name": "search_current_games", "arguments": arguments, "reason": "查所指桌的实际状态",
+        }])
+
+    with using_clock(lambda: first_at):
+        original, _ = store.create_game(conversation_id="original-host", organizer_id="host", organizer_name="桌主",
+            requirement={**terms, "start_time": "19:30"}, known_players=[], trace_id="original-seed")
+        store.create_game(conversation_id="next-host", organizer_id="next", organizer_name="次日桌主",
+            requirement={**terms, "stake_range": {"min": 2, "max": 3}, "planned_start_at": "2026-11-27T19:30:00+08:00"},
+            known_players=[], trace_id="next-day-seed")
+        raw_review = json.loads(_review(offer["text"], reference_id=original.game_id if reviewed_reference else None))
+        if reviewed_reference:
+            raw_review["item_reviews"][0]["reviewed_game_offer_id"] = None
+        runtime, _, reviewer = _runtime(store, [search(query_arguments),
+            action_json(objective_status="waiting_user", reply_to_user=offer["text"])], [json.dumps(raw_review)])
+        initial = UserMessage("guest-private", "guest", "客户", first["text"], first["message_id"], first_at)
+        opening_lookup = runtime.handle_user_message(initial, trace_id="first")
+        assert opening_lookup.final_reply == offer["text"]
+        assert store.claim_assistant_reply_delivery("guest-private", trace_id="first")
+        assert store.mark_assistant_reply_delivered("guest-private", trace_id="first")
+    prior_delivered = next(turn for turn in store.recent_turns("guest-private", 10)
+                           if turn.metadata.get("delivery_status") == "delivered")
+    prior_review = json.loads(reviewer.calls[0]["messages"][1]["content"])
+    assert prior_review["review_items"][0]["game_offer_candidate"]["terms"]["stake_range"] == {"min": 1, "max": 3}
+    fields = prior_review["review_contract"]["field_types"]
+    assert "必须明确返回" in fields["item_reviews[].reviewed_game_offer_id"]
+    assert "两字段都填 null" in fields["item_reviews[].reviewed_game_reference_id"]
+    if reviewed_reference:
+        assert prior_delivered.metadata[DELIVERED_GAME_OFFER]["game_reference_only"] is True
+        next_query = query_arguments
+        answer = "七点半那桌还在凑人，差三位。你八点一刻到、最晚十点走，能不能搭还得跟桌上确认。"
+    else:
+        assert DELIVERED_GAME_OFFER not in prior_delivered.metadata
+        next_query = case["actual_failed_lookup_turn"][0]["submitted"]
+        answer = "你说的是一到三块底的杭麻吗？"
+    before = {key: game.to_dict() for key, game in store.games.items()}
+    tasks = set(store.scheduled_tasks)
+    with using_clock(lambda: current_at):
+        runtime, model, _ = _runtime(store, [search(next_query),
+            action_json(objective_status="completed" if reviewed_reference else "waiting_user", reply_to_user=answer)],
+            [_review(answer)])
+        result = runtime.handle_user_message(_message(current["text"], current["message_id"], "19:35"), trace_id="current")
+    messages = model.calls[0]["messages"]
+    context = json.loads(messages[1]["content"])
+    assert store.current_task_context("guest-private", "guest").reset_reason == "idle_task_timeout"
+    assert context["recovered_task_contexts"] == [] and first["text"] not in json.dumps(context, ensure_ascii=False)
+    strategy = read_main_agent_system_contract(messages[0])["planning_contract"]["game_query_strategy_contract"]
+    assert "不能把未核实的封顶当作查找条件" in strategy["named_table_lookup"]
+    if reviewed_reference:
+        reference = context[DELIVERED_GAME_OFFER]
+        assert reference["game_id"] == original.game_id and reference["game_reference_only"] is True
+        assert reference["terms"]["stake_range"] == {"min": 1, "max": 3}
+        assert "cap_score" not in reference["terms"]
+        assert not delivered_offer_matches_game(reference | {"recipient_id": "guest"}, game=original, recipient_id="guest")
+    else:
+        assert DELIVERED_GAME_OFFER not in context
+    query, review = result.tool_results
+    assert query.called and query.allowed and review.allowed
+    assert [row["game"]["game_id"] for row in query.result["matches"]] == ([original.game_id] if reviewed_reference else [])
+    assert result.final_reply == answer
+    assert {key: game.to_dict() for key, game in store.games.items()} == before
+    assert set(store.scheduled_tasks) == tasks and not store.invite_drafts and not store.outbound_message_drafts
+    store._connection.close()
 
 
 @pytest.mark.parametrize("condition", [

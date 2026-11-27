@@ -1,0 +1,308 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "trace_id": "trace_b4fbdd9562e7b8952fdc6965",
+  "customer_role": "0402",
+  "related_conversation": [
+    {
+      "sequence": 90,
+      "message_id": "customer:role-event:fb54fbbf6be8028e8f2e3fe1861081994f5dfad5def99052b1810c63d702b010",
+      "direction": "inbound",
+      "text": "老板，今晚七点半那桌杭麻一底到三底的，还有位吗？我七点半能到。",
+      "sent_at": "2026-11-26T03:09:30+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "trace_id": "trace_5de5c80a832a65236dd42435"
+    },
+    {
+      "sequence": 93,
+      "message_id": "outbound:trace_5de5c80a832a65236dd42435:1",
+      "direction": "outbound",
+      "text": "有，七点半那桌杭麻1-3底、无烟，现在还差三个人。你七点半到正好赶开场，不过得凑齐人才开，这会儿还没齐，不保证到点就一定有你的位。要给你留个位吗？",
+      "sent_at": "2026-11-26T03:09:30+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:fb54fbbf6be8028e8f2e3fe1861081994f5dfad5def99052b1810c63d702b010",
+      "trace_id": "trace_5de5c80a832a65236dd42435"
+    },
+    {
+      "sequence": 131,
+      "message_id": "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54",
+      "direction": "inbound",
+      "text": "老板，杭麻1-3底那桌还在凑人呢？我八点一刻能到，最晚只能打到十点。晚到过去还赶得上吗？",
+      "sent_at": "2026-11-26T11:35:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "trace_id": "trace_b4fbdd9562e7b8952fdc6965"
+    },
+    {
+      "sequence": 132,
+      "message_id": "outbound:trace_b4fbdd9562e7b8952fdc6965:1",
+      "direction": "outbound",
+      "text": "你说的那桌我这边没查到具体桌况，暂时辨不出是哪桌。你方便说下是几点开、谁约的那桌吗？我帮你核实还在不在凑、八点一刻到赶不赶得上。",
+      "sent_at": "2026-11-26T11:35:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54",
+      "trace_id": "trace_b4fbdd9562e7b8952fdc6965"
+    },
+    {
+      "sequence": 134,
+      "message_id": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+      "direction": "inbound",
+      "text": "老板，就是看板上今晚七点半那桌杭麻，一底到三底的，无烟。我八点一刻到，最晚打到十点，帮我核实下还赶得上吗？",
+      "sent_at": "2026-11-26T11:37:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "trace_id": "trace_88bfa78ebd42bc9f7080ca8a"
+    },
+    {
+      "sequence": 135,
+      "message_id": "outbound:trace_88bfa78ebd42bc9f7080ca8a:1",
+      "direction": "outbound",
+      "text": "今晚七点半那桌杭麻、1-3块、无烟的还在凑人，现在桌上就一位，还差三位。你八点一刻到的话是开场之后了，到时候还有没有位置、桌上愿不愿意等，我这边没法保证。",
+      "sent_at": "2026-11-26T11:37:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+      "trace_id": "trace_88bfa78ebd42bc9f7080ca8a"
+    }
+  ],
+  "earlier_lookup": {
+    "step_index": 1,
+    "submitted": {
+      "lookup_scope": "specific_table",
+      "requirement": {
+        "game_type": "hangzhou_mahjong",
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "stake_range": {
+          "max": 3,
+          "min": 1
+        },
+        "start_time": "19:30"
+      }
+    },
+    "called": true,
+    "allowed": true,
+    "requirement": {
+      "game_type": "hangzhou_mahjong",
+      "planned_start_at": "2026-11-26T19:30:00+08:00",
+      "stake_label": "1～3元",
+      "stake_range": {
+        "max": 3.0,
+        "min": 1.0
+      },
+      "start_time": "19:30"
+    },
+    "matches": [
+      {
+        "game_id": "game_8aef6bf1423b",
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "remaining_seats": 3,
+        "stake_range": {
+          "max": 3.0,
+          "min": 1.0
+        }
+      }
+    ]
+  },
+  "earlier_review": {
+    "candidate": {
+      "game_id": "game_8aef6bf1423b",
+      "terms": {
+        "game_type": "hangzhou_mahjong",
+        "max_duration_hours": 2.5,
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "smoke_preference": "no_smoking",
+        "stake_label": "1～3元",
+        "stake_range": {
+          "max": 3.0,
+          "min": 1.0
+        },
+        "start_time_kind": "scheduled"
+      }
+    },
+    "approved": true,
+    "reasoning_summary": "桌况、缺口和开场方式均有同一局的实时成功查询与席位证据支持；未声称已留位或已承诺等候，征询留位属合法服务提议。",
+    "reviewed_game_offer_id": null,
+    "reviewed_game_reference_id": null,
+    "structured_reference_fields_present": [],
+    "delivered_turn_metadata": {
+      "conversation_version": 4,
+      "delivery_status": "delivered",
+      "run_id": "run_bff8101649e4",
+      "task_context_id": "task_context_08a39d3ebeec"
+    }
+  },
+  "later_context": {
+    "task_reset_reason": "idle_task_timeout",
+    "omitted_before_task_context": 23,
+    "recent_turns_included": 1,
+    "explicit_candidates": {
+      "base_stake": 1.0,
+      "cap_score": 3.0,
+      "game_type": "hangzhou_mahjong",
+      "planned_start_at": "2026-11-26T20:15:00+08:00",
+      "stake": "1",
+      "stake_label": "1-3",
+      "start_time": "20:15",
+      "start_time_kind": "scheduled"
+    },
+    "recovered_task_count": 0,
+    "delivered_reference_in_context": null
+  },
+  "verified_time_scope": {
+    "decision": {
+      "accepted_stake_range": null,
+      "agreed_duration_hours": null,
+      "clock_role": "arrival_estimate",
+      "clock_roles": [
+        {
+          "clock_ref": 1,
+          "role": "arrival_estimate"
+        },
+        {
+          "clock_ref": 2,
+          "role": "departure_deadline"
+        }
+      ],
+      "current_ref": 1,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "specific_table",
+      "max_duration_hours": null,
+      "opening_customer_ref": null,
+      "opening_dayparts": null,
+      "opening_window": null,
+      "personal_clocks_not_opening": [
+        "2026-11-26T20:15:00+08:00",
+        "2026-11-26T22:00:00+08:00"
+      ],
+      "supporting_customer_refs": [
+        1
+      ]
+    },
+    "response_source": {
+      "call_id": "llm_call_3fa6579a690a4008b7108d0e15028747",
+      "http_response_complete": true,
+      "raw_response_sha256": "c385dfbe5f26da544bb0327c6ebcff79ffe55ab456f8cfb2e213991ed093832c",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_8c906a23c9ec4051851a292677370342",
+      "trace_id": "trace_b4fbdd9562e7b8952fdc6965:table-availability:1"
+    }
+  },
+  "actual_failed_lookup_turn": [
+    {
+      "step_index": 1,
+      "submitted": {
+        "lookup_scope": "specific_table",
+        "requirement": {
+          "cap_score": 3,
+          "game_type": "hangzhou_mahjong",
+          "stake": 1
+        }
+      },
+      "called": true,
+      "allowed": true,
+      "requirement": {
+        "base_stake": 1.0,
+        "cap_score": 3.0,
+        "game_type": "hangzhou_mahjong",
+        "level": "1-3",
+        "stake": "1",
+        "stake_label": "1-3"
+      },
+      "matches": []
+    },
+    {
+      "called": false,
+      "allowed": false,
+      "validation_error": {
+        "code": "verified_table_availability_conflict",
+        "message": "查局用途与核实的原话不一致。本次应使用 lookup_scope=specific_table，保留原来的问题范围。"
+      }
+    },
+    {
+      "step_index": 3,
+      "submitted": {
+        "lookup_scope": "specific_table",
+        "requirement": {
+          "cap_score": 3,
+          "game_type": "hangzhou_mahjong",
+          "stake": 1
+        }
+      },
+      "called": true,
+      "allowed": true,
+      "requirement": {
+        "base_stake": 1.0,
+        "cap_score": 3.0,
+        "game_type": "hangzhou_mahjong",
+        "level": "1-3",
+        "stake": "1",
+        "stake_label": "1-3"
+      },
+      "matches": []
+    }
+  ],
+  "after_customer_repeated_table_details": [
+    {
+      "step_index": 1,
+      "submitted": {
+        "lookup_scope": "specific_table",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "smoke_preference": "no_smoking",
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time": "19:30",
+          "start_time_kind": "scheduled"
+        }
+      },
+      "called": true,
+      "allowed": true,
+      "requirement": {
+        "game_type": "hangzhou_mahjong",
+        "smoke_preference": "no_smoking",
+        "stake_label": "1～3元",
+        "stake_range": {
+          "max": 3.0,
+          "min": 1.0
+        },
+        "start_time": "19:30",
+        "start_time_kind": "scheduled"
+      },
+      "matches": [
+        {
+          "game_id": "game_8aef6bf1423b",
+          "planned_start_at": "2026-11-26T19:30:00+08:00",
+          "remaining_seats": 3,
+          "stake_range": {
+            "max": 3.0,
+            "min": 1.0
+          }
+        },
+        {
+          "game_id": "game_f28f170b8e4a",
+          "planned_start_at": "2026-11-27T19:30:00+08:00",
+          "remaining_seats": 3,
+          "stake_range": {
+            "max": 3.0,
+            "min": 2.0
+          }
+        }
+      ]
+    }
+  ],
+  "diagnosis": "11:09 的实际查询唯一命中 1～3 底原桌。已送达回复沿用「1-3底」，审查认可同桌与提议，却缺少核验引用和提议两个结构化字段。19:35 空闲任务轮转按设计收起前文，未恢复该桌。词面候选给出了底注 1、封顶 3，店家两次实际按此查询均返回空。19:37 顾客重述「一底到三底」和原开场后，实际查回原桌及同钟点的次日桌。日期精确筛选与此处档位归因是两个独立修复点。",
+  "observed_outcome": "没有代问、报名或更改原桌。店家先追问开场和谁约，顾客实际重复回答。下一轮告知原桌仍在凑、余三席以及晚到未知。顾客最晚十点的表达不能被抹掉，也不能充当整桌已约定时长。",
+  "repair": {
+    "scope": "已有唯一查局候选且原样放行的审查，要求明确返回两个可空字段。条件待核实可使用原桌引用；纯批准、静默遗漏或指代不明不建立引用。原桌简称只能从真实同桌条款还原，暂未核实的封顶可先从定位查询移除。",
+    "offline_test": "tests/test_delivered_game_offer.py::test_v8_0402_delivered_range_reference_recovers_original_table_after_idle",
+    "offline_controls": "使用原始来话和正式 SQLite 收据。审查模型固定回包分别给出同桌只读引用和省略两字段的普通批准。前者在任务轮转后只查回原桌，后者保留待核实，所有桌况和席位不变。",
+    "offline_cases_passed": 2,
+    "related_tests_passed": 480,
+    "real_replay": "pending"
+  }
+}

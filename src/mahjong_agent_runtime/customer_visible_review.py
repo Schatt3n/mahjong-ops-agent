@@ -1053,13 +1053,15 @@ def build_reply_self_review_payload(
                 "item_reviews[].suggested_safe_text": "string; same as original text when approved=true, safe rewrite when approved=false",
                 **({
                     "item_reviews[].reviewed_game_offer_id": (
-                        "仅当正文原样放行并明确让本收件人选择是否参加这唯一的一桌时，填写 game_offer_candidate.game_id。"
-                        "仍须确认是否赶得上或桌上可否等候时，改用 reviewed_game_reference_id。"
+                        "本项有 game_offer_candidate 且原样放行时，必须明确返回此字段与 reviewed_game_reference_id。"
+                        "正文明确让本收件人选择是否参加这唯一的一桌时，填写 game_offer_candidate.game_id，另一字段填 null。"
+                        "若能否到场、等候或参与条件仍待核实，按同桌引用判定，是否适用不能只写在 reasoning_summary。"
                     ),
                     "item_reviews[].reviewed_game_reference_id": (
                         "正文原样放行，且正文与当前来话明确讨论查询证实的一桌，但只是介绍、拒绝或条件待核对时，"
-                        "填写 game_offer_candidate.game_id。已入席回执、其他桌或指代不唯一时留空。"
-                        "两种字段最多填一种；有候选时须判断是否适用，均不适用可留空或填 null。"
+                        "填写 game_offer_candidate.game_id，reviewed_game_offer_id 填 null。"
+                        "已入席回执、其他桌、指代不唯一或无法确认与正文一致时，两字段都填 null。"
+                        "仅查到一桌不能代替正文同桌证据。"
                     ),
                 } if has_game_offer_candidate else {}),
                 "item_reviews[].external_action_attributions": "optional JSON array conforming to external_action_attribution_contract.json_schema; actor is the fixed literal current_customer, not a customer ID; each *_span is a JSON array of two integers, never an interval string",
