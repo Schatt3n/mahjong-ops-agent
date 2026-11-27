@@ -742,7 +742,7 @@ def test_rolling_judge_has_queued_late_arrival_evidence_without_private_contact(
     """V8 的真实已排队征询可供评审引用，但联系人与联系结果只能用实际凭据。"""
     turn = _turn(1)
     request = {"game_id": "original", "status": "queued", "arrival_at": "2026-11-26T19:45:00+08:00",
-               "planned_start_at": "2026-11-26T19:30:00+08:00"}
+               "planned_start_at": "2026-11-26T19:30:00+08:00", "arrival_is_estimate": True}
     turn["tool_results"] = [{"name": "request_late_arrival", "called": True, "allowed": True,
         "result": {"contact_started": False, "late_arrival_request": {**request, "owner_id": "do-not-share"}}}]
     records = [_chat("u1", text="七点半那桌我会迟一点，能先留吗？"),

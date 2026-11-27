@@ -77,6 +77,7 @@ _ROLLING_EVIDENCE_CALIBRATION = (
     "对店家独立核对实际重复追问、漏答或无依据承诺，观察边界不抵销已经发生的内容。"
     "request_late_arrival 的 late_arrival_request.status=queued 表示已登记等待联系；contact_started=false 表示尚未向牌友发问。"
     "如实告诉顾客还待确认并保留原空位是合理进展；不能将排队算为发出通知、收到牌友同意或者已经留位。"
+    "转述给牌友的到店钟点必须来自本人已送达原话或本人确认。仅说晚一点时不能编出具体分钟；arrival_is_estimate=true 时要保留估计。"
     "execution_failed_without_substantive_reply=true 表示该轮有技术故障且只发等待或未送达。即使其他轮有答复，不能把这条来话算作已妥善承接。"
     "只据已观察到的顾客动作评顾客项。对说明清楚的具体澄清或人工确认继续按通常语义检查。"
     "断言无烟、已有一席等时，查看同轮唯一原桌的 game/terms/seat_summary。查得无烟的证据不能对其他桌或个人条件外推。"
@@ -203,6 +204,8 @@ def _executions(turn: Row, *, projection_version: int) -> list[dict[str, Any]]:
             pending = result.get("late_arrival_request")
             if isinstance(pending, Mapping):
                 returned["late_arrival_request"] = _pick(pending, ("game_id", "status", "arrival_at", "planned_start_at"))
+                if type(pending.get("arrival_is_estimate")) is bool:
+                    returned["late_arrival_request"]["arrival_is_estimate"] = pending["arrival_is_estimate"]
             if type(result.get("contact_started")) is bool:
                 returned["contact_started"] = result["contact_started"]
         for label in ("matches", "alternatives", "nearby_options"):
