@@ -1,0 +1,361 @@
+{
+  "run": "table-opening-os_csif2",
+  "case": "invitee_unavailable",
+  "code_commit": "7463491",
+  "model": "deepseek-v4.1-flash",
+  "status": "passed",
+  "checks": {
+    "captain_has_one_anonymous_seat_and_one_known_companion": true,
+    "peer_terms_actually_delivered_to_both": true,
+    "peer_history_private_to_captain_and_friend": true,
+    "fixture_calendars_match_case": true,
+    "real_model_actions": true,
+    "companion_saw_peer_terms": true,
+    "exact_private_invitation_source": true,
+    "bystander_cannot_see_table_chat": true,
+    "valid_refusal_or_silence": true
+  },
+  "settlement": null,
+  "table_groups": {
+    "opened": 1,
+    "durable_group_messages": 3,
+    "role_receipts": 7,
+    "shop_receipts": 2,
+    "companion_outcomes": {
+      "table_companion_invited": 1
+    }
+  },
+  "observed_companion_action": {
+    "action": "wait"
+  },
+  "prior_peer_message_ids": [
+    "companion-probe-peer-1",
+    "companion-probe-peer-2"
+  ],
+  "confirmed_player_seats": [
+    {
+      "customer_id": "venue-sender-0013",
+      "display_name": "丁小宇",
+      "status": "joined",
+      "source": "requester",
+      "seat_count": 2,
+      "party_id": "party_venue-sender-0013",
+      "known_member_ids": [
+        "venue-sender-0013"
+      ],
+      "anonymous_seat_count": 1,
+      "joined_at": "2026-12-17T17:29:00+08:00",
+      "registered_by_customer_id": "venue-sender-0013"
+    },
+    {
+      "customer_id": "venue-sender-0015",
+      "display_name": "陆亦宁",
+      "status": "confirmed",
+      "source": "candidate_reply",
+      "seat_count": 1,
+      "party_id": null,
+      "known_member_ids": [],
+      "anonymous_seat_count": 0,
+      "joined_at": "2026-12-17T17:29:00+08:00",
+      "registered_by_customer_id": "venue-sender-0015"
+    },
+    {
+      "customer_id": "venue-sender-0018",
+      "display_name": "邵景行",
+      "status": "confirmed",
+      "source": "candidate_reply",
+      "seat_count": 1,
+      "party_id": null,
+      "known_member_ids": [],
+      "anonymous_seat_count": 0,
+      "joined_at": "2026-12-17T17:29:00+08:00",
+      "registered_by_customer_id": "venue-sender-0018"
+    }
+  ],
+  "game_planned_start_at": null,
+  "invitation_receipts": [
+    {
+      "game_id": "game_4f45b9cee221",
+      "invitation_id": "table-invite:role-event:a34549d8fa03514380340df6d67e5b3ab81d534e0056c83e7cc093df01ca80d0",
+      "inviter_id": "venue-sender-0013",
+      "recipient_id": "venue-sender-0001",
+      "invited_at": "2026-12-17T09:32:00.000000+00:00",
+      "response_at": null,
+      "accepted": null
+    }
+  ],
+  "table_group_dialogue": [
+    {
+      "seq": 1,
+      "game_id": "game_4f45b9cee221",
+      "message_id": "table-companion-inquiry:game_4f45b9cee221",
+      "sender_id": "simulation-agent",
+      "text": "带朋友来的，麻烦把还没进群的同行拉进来哈。",
+      "sent_at": "2026-12-17T09:30:00.000000+00:00",
+      "quoted_message_id": null,
+      "recipients_json": "[\"venue-sender-0013\", \"venue-sender-0015\", \"venue-sender-0018\"]",
+      "source_message_id": null,
+      "roster_revision": null
+    },
+    {
+      "seq": 2,
+      "game_id": "game_4f45b9cee221",
+      "message_id": "customer:role-event:4cf460534deb233adfe8b308a66c128d5ef5514f0e26f2efadb896107e28939f",
+      "sender_id": "venue-sender-0015",
+      "text": "晚上好，我18点30分能到，能搭一桌吗？就1块2块的档位就行。",
+      "sent_at": "2026-12-17T09:32:00.000000+00:00",
+      "quoted_message_id": null,
+      "recipients_json": "[\"simulation-agent\", \"venue-sender-0013\", \"venue-sender-0018\"]",
+      "source_message_id": null,
+      "roster_revision": null
+    },
+    {
+      "seq": 3,
+      "game_id": "game_4f45b9cee221",
+      "message_id": "customer:role-event:7ca47794251a80f3cb0707ea481064a842271f35d68c3e9651922fbe429f5908",
+      "sender_id": "venue-sender-0013",
+      "text": "我也在附近，18点30分能到。1块2块档的杭麻有位的话，给我留一个。",
+      "sent_at": "2026-12-17T09:34:00.000000+00:00",
+      "quoted_message_id": null,
+      "recipients_json": "[\"simulation-agent\", \"venue-sender-0015\", \"venue-sender-0018\"]",
+      "source_message_id": null,
+      "roster_revision": null
+    }
+  ],
+  "model_actions": [
+    {
+      "event_id": "role-event:a34549d8fa03514380340df6d67e5b3ab81d534e0056c83e7cc093df01ca80d0",
+      "actor_id": "venue-sender-0013",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:32:00.000000+00:00",
+      "caused_by": "table-companion-inquiry:game_4f45b9cee221",
+      "action": {
+        "action": "invite_companion"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"invite_companion\"}",
+      "response_source": {
+        "call_id": "llm_call_6c0dfce0d20647ada9f46e116b296e11",
+        "http_response_complete": true,
+        "raw_response_sha256": "dc573e4d6b3968c6778ee6860871ce0e2e72bf381cbb48028cf34556f160311d",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_2a9cddb35d2a455daae749f9609c1c22",
+        "trace_id": "role:role-event:a34549d8fa03514380340df6d67e5b3ab81d534e0056c83e7cc093df01ca80d0"
+      },
+      "error": null,
+      "runtime_status": "table_companion_invited",
+      "companion_invitation": {
+        "accepted": null,
+        "invitation_id": "table-invite:role-event:a34549d8fa03514380340df6d67e5b3ab81d534e0056c83e7cc093df01ca80d0",
+        "invited_at": "2026-12-17T09:32:00+00:00",
+        "inviter_id": "venue-sender-0013",
+        "recipient_id": "venue-sender-0001",
+        "response_at": null
+      }
+    },
+    {
+      "event_id": "role-event:4cf460534deb233adfe8b308a66c128d5ef5514f0e26f2efadb896107e28939f",
+      "actor_id": "venue-sender-0015",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:32:00.000000+00:00",
+      "caused_by": "table-companion-inquiry:game_4f45b9cee221",
+      "action": {
+        "action": "send",
+        "kind": "group",
+        "recipient_id": "table:game_4f45b9cee221",
+        "text": "晚上好，我18点30分能到，能搭一桌吗？就1块2块的档位就行。"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"send\",\"text\":\"晚上好，我18点30分能到，能搭一桌吗？就1块2块的档位就行。\",\"kind\":\"group\",\"recipient_id\":\"table:game_4f45b9cee221\"}",
+      "response_source": {
+        "call_id": "llm_call_0032fe9027a843a1ad161467b00cce8b",
+        "http_response_complete": true,
+        "raw_response_sha256": "a59db95dd2799216a555aa2adf546530be03913f9d27bd76eeccd14c5df9da90",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_d2c4a8f37f1142f0963ad4469d9d39a8",
+        "trace_id": "role:role-event:4cf460534deb233adfe8b308a66c128d5ef5514f0e26f2efadb896107e28939f"
+      },
+      "error": null,
+      "runtime_status": "delivered",
+      "message_id": "customer:role-event:4cf460534deb233adfe8b308a66c128d5ef5514f0e26f2efadb896107e28939f"
+    },
+    {
+      "event_id": "role-event:4887c6d1f743a8e7382bda55c9158eb3db9e9420185486179faa7320acfce076",
+      "actor_id": "venue-sender-0018",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:32:00.000000+00:00",
+      "caused_by": "table-companion-inquiry:game_4f45b9cee221",
+      "action": {
+        "action": "send",
+        "kind": "private",
+        "recipient_id": "simulation-agent",
+        "text": "老板，晚上还有位吗？我吃过饭过来，六点半左右到，就打一块的。"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"send\",\"text\":\"老板，晚上还有位吗？我吃过饭过来，六点半左右到，就打一块的。\",\"kind\":\"private\",\"recipient_id\":\"simulation-agent\"}",
+      "response_source": {
+        "call_id": "llm_call_a9d5f54f66ed4b958c6e53d7d1429480",
+        "http_response_complete": true,
+        "raw_response_sha256": "06f2150c780d0341bc0c76ea7faa794273deba971b06174336890964a572bcc7",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_79db70bca1be4f3dbedb6ba8ea918628",
+        "trace_id": "role:role-event:4887c6d1f743a8e7382bda55c9158eb3db9e9420185486179faa7320acfce076"
+      },
+      "error": null,
+      "runtime_status": "waiting_user",
+      "message_id": "customer:role-event:4887c6d1f743a8e7382bda55c9158eb3db9e9420185486179faa7320acfce076"
+    },
+    {
+      "event_id": "role-event:e188aec6d632b08127e878b42e291c4c3dece1fc6b24b8265f7a277b989435af",
+      "actor_id": "venue-sender-0001",
+      "kind": "table_companion_invitation",
+      "due_at": "2026-12-17T09:34:00.000000+00:00",
+      "caused_by": "table-invite:role-event:a34549d8fa03514380340df6d67e5b3ab81d534e0056c83e7cc093df01ca80d0",
+      "action": {
+        "action": "wait"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"wait\"}",
+      "response_source": {
+        "call_id": "llm_call_d48c2278a0944bd8bda7557ab476c1c8",
+        "http_response_complete": true,
+        "raw_response_sha256": "ef7f089e418dccd3a3edda199ef3a15f250f8ba3fc4e4e97ba8446cfdbe678c2",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_e91a6addfb344561b7f04966524d57ce",
+        "trace_id": "role:role-event:e188aec6d632b08127e878b42e291c4c3dece1fc6b24b8265f7a277b989435af"
+      },
+      "error": null,
+      "runtime_status": "wait"
+    },
+    {
+      "event_id": "role-event:7ca47794251a80f3cb0707ea481064a842271f35d68c3e9651922fbe429f5908",
+      "actor_id": "venue-sender-0013",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:34:00.000000+00:00",
+      "caused_by": "customer:role-event:4cf460534deb233adfe8b308a66c128d5ef5514f0e26f2efadb896107e28939f",
+      "action": {
+        "action": "send",
+        "kind": "group",
+        "recipient_id": "table:game_4f45b9cee221",
+        "text": "我也在附近，18点30分能到。1块2块档的杭麻有位的话，给我留一个。"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"send\",\"text\":\"我也在附近，18点30分能到。1块2块档的杭麻有位的话，给我留一个。\",\"kind\":\"group\",\"recipient_id\":\"table:game_4f45b9cee221\"}",
+      "response_source": {
+        "call_id": "llm_call_b98cd1a2458e4d83817daa220101f23f",
+        "http_response_complete": true,
+        "raw_response_sha256": "085f6b84452ce3c01ec2ddbb395aa6bbc0cd4bed1d32be8d0c037d8d67cbb74d",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_e5651997ddb8456ca9d7e1e43f6de5ab",
+        "trace_id": "role:role-event:7ca47794251a80f3cb0707ea481064a842271f35d68c3e9651922fbe429f5908"
+      },
+      "error": null,
+      "runtime_status": "delivered",
+      "message_id": "customer:role-event:7ca47794251a80f3cb0707ea481064a842271f35d68c3e9651922fbe429f5908"
+    },
+    {
+      "event_id": "role-event:eb5b9feb1f8b2c92ee2534571420a4ddb6a0a3898292d3cd4582581dc622f5f7",
+      "actor_id": "venue-sender-0018",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:34:00.000000+00:00",
+      "caused_by": "customer:role-event:4cf460534deb233adfe8b308a66c128d5ef5514f0e26f2efadb896107e28939f",
+      "action": {
+        "action": "send",
+        "kind": "private",
+        "recipient_id": "simulation-agent",
+        "text": "老板，我刚问六点半那桌一块底，你说没有，能帮我组一桌不？"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"send\",\"text\":\"老板，我刚问六点半那桌一块底，你说没有，能帮我组一桌不？\",\"kind\":\"private\",\"recipient_id\":\"simulation-agent\"}",
+      "response_source": {
+        "call_id": "llm_call_6234bd4ba4d24f9181e46d2753f51565",
+        "http_response_complete": true,
+        "raw_response_sha256": "4981f021abdfaec9130b6eaa5ce2eda839d2564b18f45b3852a179efa7a88570",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_0abfe69502124829af70f009cff1b5ff",
+        "trace_id": "role:role-event:eb5b9feb1f8b2c92ee2534571420a4ddb6a0a3898292d3cd4582581dc622f5f7"
+      },
+      "error": null,
+      "runtime_status": "waiting_user",
+      "message_id": "customer:role-event:eb5b9feb1f8b2c92ee2534571420a4ddb6a0a3898292d3cd4582581dc622f5f7"
+    },
+    {
+      "event_id": "role-event:85f606b5bbf6f34608070632279c2b149d7018436a01c089c04f098d72512b87",
+      "actor_id": "venue-sender-0015",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:36:00.000000+00:00",
+      "caused_by": "customer:role-event:7ca47794251a80f3cb0707ea481064a842271f35d68c3e9651922fbe429f5908",
+      "action": {
+        "action": "wait"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"wait\"}",
+      "response_source": {
+        "call_id": "llm_call_5e603506c50c4026aeabac5be87589ac",
+        "http_response_complete": true,
+        "raw_response_sha256": "ef7f089e418dccd3a3edda199ef3a15f250f8ba3fc4e4e97ba8446cfdbe678c2",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_f7a9fa5966fe4d3481bce50bef402a8f",
+        "trace_id": "role:role-event:85f606b5bbf6f34608070632279c2b149d7018436a01c089c04f098d72512b87"
+      },
+      "error": null,
+      "runtime_status": "wait"
+    },
+    {
+      "event_id": "role-event:cd3a9b044e686545808a8d2d78ac379a2ccb430686eb5408c5389bb907700619",
+      "actor_id": "venue-sender-0018",
+      "kind": "table_receipt",
+      "due_at": "2026-12-17T09:36:00.000000+00:00",
+      "caused_by": "customer:role-event:7ca47794251a80f3cb0707ea481064a842271f35d68c3e9651922fbe429f5908",
+      "action": {
+        "action": "send",
+        "kind": "private",
+        "recipient_id": "simulation-agent",
+        "text": "老板，六点半那桌一块底杭麻就按我先前说的组吧？我看群里也有人六点半能到。"
+      },
+      "status": "valid",
+      "raw": "{\"action\":\"send\",\"text\":\"老板，六点半那桌一块底杭麻就按我先前说的组吧？我看群里也有人六点半能到。\",\"kind\":\"private\",\"recipient_id\":\"simulation-agent\"}",
+      "response_source": {
+        "call_id": "llm_call_8e21b70c2b8746459c1364d0e46b4632",
+        "http_response_complete": true,
+        "raw_response_sha256": "8d3d390c3d0bd5b5b9514adfafd77881c1a00944b6d2cb8a3fe03ad4c4af0c0f",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_92b34a7be6eb4413918ae216262329f9",
+        "trace_id": "role:role-event:cd3a9b044e686545808a8d2d78ac379a2ccb430686eb5408c5389bb907700619"
+      },
+      "error": null,
+      "runtime_status": "waiting_user",
+      "message_id": "customer:role-event:cd3a9b044e686545808a8d2d78ac379a2ccb430686eb5408c5389bb907700619"
+    }
+  ],
+  "archive_sha256": {
+    "report.json": "80525492a3888089dd9da25ffba9fd6b2f2793889d780c9a4bbfe16adc930c83",
+    "events.jsonl": "736684bd3b6f8c8efd5b69389ae0b9f13071d4769b9c891f0165d6a7546bfd27",
+    "chat.sqlite3": "31863c0af0f69912cfea5ed3f5e64839b28ca08637495718ab8c5b1bb67724a2",
+    "role_events.sqlite3": "c055fbc5e244082b6a1a6f654d1cc1aa4dc893f8b3b331308f569e2fdea7032e"
+  }
+}
