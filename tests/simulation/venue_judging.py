@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 import json
+from math import isfinite
 from time import monotonic
 from typing import Any
 
@@ -24,7 +25,7 @@ ROLE_CHECK = "顾客像真人一样处理自己的目标，询问范围和续轮
 AGENT_CHECK = "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺"
 FIRST_CONTACT_CHECK = "首次联系店家的顾客说话自然，未无故报姓名、照列字段或复述条件"
 DURATION_CHECK = "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据"
-DIALOGUE_PROJECTION_VERSION = 12
+DIALOGUE_PROJECTION_VERSION = 13
 ROLLING_REVIEW_INSTRUCTIONS = (
     "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
     "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
@@ -62,9 +63,25 @@ _STATE_FIELDS = ("status", "game_id", "room_id", "reservation_id", "demand_id", 
 _PERSISTED_FIELDS = ("game_id", "customer_seat_before", "customer_seat_after", "game_start_before", "game_start_after")
 _WRITING_TOOLS = {"customer_visible_content_review", "customer_visible_text_generation"}
 _ARCHIVED_BOARD_PREFIX = "outbound:board:"
+_LEGACY_DURATION_CITATIONS = """顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
+如果 checks 有“确认现成局席位时”项，先判断时长是否影响本人这次确认，再根据对应证据判定。顾客明确无条件报名，且对话没有仍有效的时长条件时，正常确认回执足够，未主动报时长不能作为失败理由。顾客以时长作为条件时，要看到同桌的实际时长已交代，且经确认符合约束。只在后台写席位、只给开局点或只回“留好了”都不足以证明时长条件已处理。两种通过都引用真正决定留位的 customer_message、agent_execution 及对应的实际 agent_reply，在 reason 分别用「」逐字引用完整来话和对应回复。
+已登记的招募中桌也可以真的给某位顾客留一席。若同局写入回执显示 recorded_status=confirmed，forming 和还缺几人描述的是整桌进度。核对本人接受的时长、同桌席位及收到的回执。只说留位且有这些证据时，不能因整桌还缺人判此项失败。声称四人已齐或能保证开场时，仍须真实成局依据。"""
+_DURATION_CITATIONS = """先用决定留位的当前原话及此前实际送达的条件辨别时长意愿。『打两三个钟』『我一般打到十点半』可以是个人偏好，不能仅凭出现时长就判是参加条件。『能打够三小时才留』『最多待到十一点，合适就留』或直接问散场而仍等待答复，则须核实后才能占席。此前已经解释时长未定、本人明白后仍无条件报名且没有遗留硬约束时，实际确认回执足够，未主动报时长不能作为失败理由。保留本人的硬上限；不要因一句简短同意就推定撤销。新组桌阶段核对委托、当前确定的约束和实际登记，约定时长未定时允许带着已登记的上限继续招募，不能说已约好时长。
+duration_evidence.agreed=false 表示回执没给同桌约定时长。max_hours 或 min_hours 只描述条件上下限，单独出现时不能推断实际打多久、几点散或是否保证适配。不要用自动安排的过期时间替代约定时长。未问同桌时长且没有待解释的适配条件时，不因未主动报这个上限而判失败。实际执行、所说的时长和参加决定不一致仍须引用证据判失败。
+duration_at_join 只评现成桌占席和同桌时长，通知、邀人、言语重复等在 shop_behavior 处理。无条件报名只核对授权和确认确已送达；附时长条件报名要看实际核对或已确认的安排。两种通过都引用决定留位的 customer_message、agent_execution 和实际 agent_reply，在 reason 用「」逐字引用完整来话和对应回复。forming 仍可有可报名的空位及已登记席位，不能因整桌未齐否定真实占席。声称已凑齐或保证开场仍须相应执行。"""
+_ROLLING_EVIDENCE_CALIBRATION = (
+    "沿着本轮的 caused_by、answers、responds_to 按实际时间从前向后检查。同一天的新目标与不同营业日的相似桌相互独立。"
+    "本轮顾客只能回应已送达的消息。不能拿后来才发的追问批评顾客上一句；当日实际看板的完整桌况可支持自然的『那桌』。"
+    "重新问同桌但新增晚到、确认留位或临近开场时，判断新动作的目的，不能只凭重复了桌况就认定复读。"
+    "有 followup_observation_ended 时，从顾客项判定依据中排除缺少下一条动作。明确的情况告知也不要求顾客再答。"
+    "对店家独立核对实际重复追问、漏答或无依据承诺，观察边界不抵销已经发生的内容。"
+    "request_late_arrival 的 late_arrival_request.status=queued 表示已登记等待联系；contact_started=false 表示尚未向牌友发问。"
+    "如实告诉顾客还待确认并保留原空位是合理进展；不能将排队算为发出通知、收到牌友同意或者已经留位。"
+    "断言无烟、已有一席等时，查看同轮唯一原桌的 game/terms/seat_summary。查得无烟的证据不能对其他桌或个人条件外推。"
+)
 # 发言形态来自真人脱敏时间线中的 availability_then_smoke_preference、intermediary_role_correction
 # 和 existing_game_join_then_duration_cancel。引用它们的互动方式，不把原话设为通过条件。
-_CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。顾客项给 pass 要引用每条实际顾客消息与结束时的 wait/leave 等动作（若发生）；判失败要引用暴露问题的各条消息。
+_CITATION_RULES = f"""逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。顾客项给 pass 要引用每条实际顾客消息与结束时的 wait/leave 等动作（若发生）；判失败要引用暴露问题的各条消息。
 顾客项先看这是不是顾客随手发的微信。普通首次问局主动向不熟的老板报姓名且无需对号，应判 fail；已知熟人、转介绍或实际询问身份有识别理由时，可按对话辨别。按资料把玩法、时间、档位、烟况、人数、时长逐项报齐，或应答时照单复述已经确认的条件，像替店家做录入且无沟通理由，也应判 fail。开场只问眼下最关心的一个问题、等对方问了再补确有用的条件，或一次自然说清几个当时重要的条件，都可以通过；勿按字数、字段数或固定句式判定。
 顾客项另核对这句在收件人视角是否好懂。群看板转私聊时，引用真实来话和可核实的看板，判断对方能否凭该编号或实际特征分辨哪桌。看板没写的“一缺”等叫法、仅角色知道的事件或他人私聊不能当成收件人也知道的线索。若一个消息同时问原桌与另找一桌，两件事应能区分。共享上下文中自然说“那桌”、只问眼下最关心的一件事、收到追问后才补条件，都可通过。若指代本可以带一个现成线索却含糊得让人难以辨认、把两问说成同一桌、或编造看板细节，应在顾客项引用原话及相关证据，说明是什么造成困难。缺少可判断的先前上下文时勿猜测。
 如果 checks 有“首次联系店家”项，knows_shopkeeper=false 是已记录的场景事实，不要用报出的姓名反推两人认识。逐条看整段顾客消息，这是一项独立的验收：业务条件最终完整或成功占座都不能抵消不自然的顾客来话。普通问局无理由主动报全名，或面前只有一桌、直接答应就行却整串复读店家刚报的条件，都应判此项 fail。仅重提一项来消除歧义、点出一个关键限制、或为区分多桌而确认，不属于照抄清单。此项 pass 必须引用所有 customer_message；fail 引用暴露问题的消息。
@@ -79,9 +96,7 @@ owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是�
 确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。若 persisted_game_state 核实顾客来话前后都已确认席位，只告知位置照旧不需要重新写席位；该证据不能证明同桌已同意等待或店家已经转达。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
 核对店家所说的现成桌时，看同轮 agent_execution 中查到的那桌。seat_summary 的 claimed_seats、remaining_seats 和 seats_total 分别是已占座位、剩余座位和座位总数，terms.stake_range 是档位范围，terms.start_time_kind=asap_when_full 表示人齐开。不要从查询参数反推某张结果桌的条件，烟况没有核实时也不能猜已确认。
 prior_board_expirations 是评审独立查到、来话前已发生的看板原条目取消。旧看板证明曾经招募，即使消息仍看得见，同条已取消也不再是实时现成桌。按来话的桌况线索核对是哪一条，另评店家有没有解释原桌。这份后台证据不等于店家当轮实际查询或说明过取消。
-顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
-如果 checks 有“确认现成局席位时”项，先判断时长是否影响本人这次确认，再根据对应证据判定。顾客明确无条件报名，且对话没有仍有效的时长条件时，正常确认回执足够，未主动报时长不能作为失败理由。顾客以时长作为条件时，要看到同桌的实际时长已交代，且经确认符合约束。只在后台写席位、只给开局点或只回“留好了”都不足以证明时长条件已处理。两种通过都引用真正决定留位的 customer_message、agent_execution 及对应的实际 agent_reply，在 reason 分别用「」逐字引用完整来话和对应回复。
-已登记的招募中桌也可以真的给某位顾客留一席。若同局写入回执显示 recorded_status=confirmed，forming 和还缺几人描述的是整桌进度。核对本人接受的时长、同桌席位及收到的回执。只说留位且有这些证据时，不能因整桌还缺人判此项失败。声称四人已齐或能保证开场时，仍须真实成局依据。
+{_LEGACY_DURATION_CITATIONS}
 沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。query.stake_range 是实际提交的档位区间。成功查局为空且 search_scope.supports_narrower_empty_claim 为 true 时，后端核实同一顾客和会话内可用的登记牌局全空，可据此报告同一范围内更窄条件无局。缺少该凭据时，顾客明确接受一个连续范围而实际只查一个钟点，不能答整段无局。能涵盖整个时段的查局证据（或明确只报子范围结果并继续核对其余条件）才支持对应结论。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
 _PEER_CITATION_RULES = (
     "peer_delivery 是当前顾客实际收到的搭子私信，peer_message 是本人发给搭子的原话。"
@@ -133,13 +148,21 @@ def _game(row: Row, *, projection_version: int) -> dict[str, Any]:
     requirement = game.get("requirement") or {}
     terms = _terms(requirement) | _pick(requirement, ("start_time_kind",))
     facts = _pick(game, _GAME_FIELDS)
+    agreed = has_agreed_game_duration(requirement)
     if projection_version >= 11:
-        if has_agreed_game_duration(requirement):
+        if agreed:
             terms["duration_hours"] = parse_number(first_present_value(requirement, "duration_hours", "duration"))
         else:
             # 原账本保存内部排期。独立评审不能拿这个结束时刻反算客户约定。
             facts.pop("planned_end_at", None)
             terms.pop("planned_end_at", None)
+    if projection_version >= 13:
+        duration = {"agreed": agreed}
+        for source, field in (("min_duration_hours", "min_hours"), ("max_duration_hours", "max_hours")):
+            value = parse_number(terms.pop(source, None))
+            if value is not None and isfinite(value) and value > 0:
+                duration[field] = value
+        facts["duration_evidence"] = duration
     if isinstance(stake_range := requirement.get("stake_range"), Mapping):
         if bounds := _pick(stake_range, ("min", "max")):
             terms["stake_range"] = bounds
@@ -174,6 +197,12 @@ def _executions(turn: Row, *, projection_version: int) -> list[dict[str, Any]]:
             scope = (result.get("customer_reply_contract") or {}).get("evidence_scope") or {}
             if type(scope.get("supports_narrower_empty_claim")) is bool:
                 returned["search_scope"] = _pick(scope, ("supports_narrower_empty_claim", "unfiltered_available_pool_empty"))
+        if projection_version >= 13 and name == "request_late_arrival":
+            pending = result.get("late_arrival_request")
+            if isinstance(pending, Mapping):
+                returned["late_arrival_request"] = _pick(pending, ("game_id", "status", "arrival_at", "planned_start_at"))
+            if type(result.get("contact_started")) is bool:
+                returned["contact_started"] = result["contact_started"]
         for label in ("matches", "alternatives", "nearby_options"):
             if isinstance(result.get(label), list):
                 options = result[label]
@@ -539,12 +568,16 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
                             retry_invalid: bool = False) -> dict[str, Any]:
     """发送已组装且可预先核验的证据，判决引用仍必须命中原评审边界。"""
     instructions = _CITATION_RULES
+    if prepared.projection_version >= 13:
+        instructions = instructions.replace(_LEGACY_DURATION_CITATIONS, _DURATION_CITATIONS)
     if any(row["kind"] in {"peer_message", "peer_delivery"} for row in prepared.request):
         instructions += f"\n{_PEER_CITATION_RULES}"
     wire_checks = {(ROLLING_CHECK_IDS[check] if rolling_check_ids else check): check for check in prepared.checks}
     if rolling_check_ids:
         if prepared.projection_version >= 12:
             instructions += f"\n{_ROLLING_OBSERVATION_CALIBRATION}"
+        if prepared.projection_version >= 13:
+            instructions += f"\n{_ROLLING_EVIDENCE_CALIBRATION}"
         instructions += f"\n{_rolling_citation_instructions(prepared)}"
     if additional_instructions:
         instructions += f"\n{additional_instructions}"

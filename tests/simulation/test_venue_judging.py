@@ -319,9 +319,11 @@ def test_rolling_duration_subjects_link_confirmed_join_to_prior_delivered_terms(
      "好，位置给你留好了。", "pass", "本人无条件报名。"),
     ("请问这桌打到几点？", "这桌打多久还没定。", "好，先给我留个位，我到时再问你打多久。",
      "好，位置给你留好了。", "pass", "本人明确将时长询问留到以后。"),
+        ("这桌能搭一桌吗？", "这桌打多久还没定，你要来吗？", "那桌我来，七点半到，打两三个钟吧，帮我留一个。",
+         "好，位置给你留好了。", "pass", "本人接受时长未定并直接报名，给出的是个人偏好。"),
     ("请问这桌打到几点？", "这桌打多久还没定。", "我最多打三小时，合适才能留。",
      "这桌打四小时，位置给你留好了。", "fail", "店家把默认四小时说成约定，条件也与三小时上限冲突。"),
-], ids=("unconditional", "deferred", "hard-limit"))
+    ], ids=("unconditional", "deferred", "own-preference", "hard-limit"))
 def test_rolling_duration_distinguishes_a_condition_from_a_normal_confirmation(
     before, previous, inbound, confirmation, decision, explanation,
 ):
@@ -391,7 +393,9 @@ def test_short_aliases_keep_seat_mutation_and_semantic_rejection_auditable():
     assert (result["status"], result["verdict"]) == ("valid", "fail")
     assert result["findings"][1]["evidence_ids"] == ("u1", "a1", "agent-trace-1")
     execution = result["evidence"][-1]["tools"]
-    assert execution[-1]["result"] == {"recorded_status": "confirmed", "game": {"game_id": "g1", "remaining_seats": 0}}
+    assert execution[-1]["result"] == {"recorded_status": "confirmed", "game": {
+        "game_id": "g1", "remaining_seats": 0, "duration_evidence": {"agreed": False},
+    }}
     assert all(tool["name"] != "reserve_room" for tool in execution)
     assert "区分席位确认、空房查询和房间预订" in client.messages[0]["content"]
 
@@ -461,7 +465,7 @@ def test_duration_judgment_keeps_private_preferences_table_truth_and_delivered_r
     records = [
         _chat("u1", text="老板，我叫张某某。今晚想打杭麻，一块底，无烟，一个人，有合适的吗？"),
         _chat("a1", reply_to="u1", text="七点杭麻，一块无烟，三缺一。"),
-        _chat("u2", text="合适，我来，打三个钟头左右。"),
+        _chat("u2", text="这桌能打三个钟头我才来。"),
         _chat("a2", reply_to="u2", text="好，已经留好位置了。"),
     ]
     client = _JudgeClient(role_evidence=("E02",), agent_evidence=("E03", "E06", "E07", "E08"),
@@ -627,7 +631,7 @@ def test_judge_receives_creation_duration_limit_without_inventing_fixed_duration
     review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn],
                     records=[_chat("u1"), _chat("a1", reply_to="u1")])
     execution = json.loads(client.messages[-1]["content"])["evidence"][-1]
-    assert execution["tools"][-1]["result"]["game"]["terms"] == {"max_duration_hours": 3}
+    assert execution["tools"][-1]["result"]["game"]["duration_evidence"] == {"agreed": False, "max_hours": 3}
 
 
 def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
@@ -673,8 +677,8 @@ def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
          "seat_summary": {"claimed_seats": 1, "remaining_seats": 3, "seats_total": 4},
          "terms": {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3},
                    "start_time_kind": "asap_when_full"},
-         "match_kind": "exact"},
-        {"game_id": "g2", "remaining_seats": 2},
+         "match_kind": "exact", "duration_evidence": {"agreed": False}},
+        {"game_id": "g2", "remaining_seats": 2, "duration_evidence": {"agreed": False}},
     ]
     assert result["evidence"][-1]["tools"][0]["result"] == lookup
     wrong_scope = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E01", "E04", "E05"))
@@ -726,8 +730,36 @@ def test_review_hides_internal_end_when_same_table_duration_is_unknown(agreed):
     assert previous.request[-1]["tools"][0]["result"]["matches"]["options"][0]["planned_end_at"] == end
     if agreed:
         assert latest["planned_end_at"] == end and latest["terms"]["duration_hours"] == 4
+        assert latest["duration_evidence"] == {"agreed": True}
     else:
-        assert "planned_end_at" not in latest and latest["terms"] == {"max_duration_hours": 3}
+        assert "planned_end_at" not in latest and "terms" not in latest
+        assert latest["duration_evidence"] == {"agreed": False, "max_hours": 3}
+        legacy = prepare_dialogue_review(**arguments, projection_version=12).request[-1]["tools"][0]["result"]
+        assert legacy["matches"]["options"][0]["terms"] == {"max_duration_hours": 3}
+
+
+def test_rolling_judge_has_queued_late_arrival_evidence_without_private_contact():
+    """V8 的真实已排队征询可供评审引用，但联系人与联系结果只能用实际凭据。"""
+    turn = _turn(1)
+    request = {"game_id": "original", "status": "queued", "arrival_at": "2026-11-26T19:45:00+08:00",
+               "planned_start_at": "2026-11-26T19:30:00+08:00"}
+    turn["tool_results"] = [{"name": "request_late_arrival", "called": True, "allowed": True,
+        "result": {"contact_started": False, "late_arrival_request": {**request, "owner_id": "do-not-share"}}}]
+    records = [_chat("u1", text="七点半那桌我会迟一点，能先留吗？"),
+               _chat("a1", reply_to="u1", text="等不等我这边先记着，还没问到答复。")]
+    args = {"customer_id": "a", "turns": [turn], "records": records}
+    expected = {"late_arrival_request": request, "contact_started": False}
+    assert prepare_dialogue_review(**args).request[-1]["tools"][0]["result"] == expected
+    assert "result" not in prepare_dialogue_review(**args, projection_version=12).request[-1]["tools"][0]
+    client = _JudgeClient(role_evidence=("E02",), agent_evidence=("E03",))
+    result = review_dialogue(SemanticJudge(client), **args, rolling_check_ids=True,
+                             additional_instructions=venue_judging.ROLLING_REVIEW_INSTRUCTIONS)
+    assert result["status"] == "valid"
+    prompt, payload = client.messages
+    assert "duration_at_join 只评现成桌占席和同桌时长" in prompt["content"]
+    assert "有 followup_observation_ended 时，从顾客项判定依据中排除缺少下一条动作" in prompt["content"]
+    assert "contact_started=false 表示尚未向牌友发问" in prompt["content"]
+    assert json.loads(payload["content"])["evidence"][-1]["tools"][0]["result"] == expected
 
 
 @pytest.mark.parametrize(("reply", "agent_verdict"), [
