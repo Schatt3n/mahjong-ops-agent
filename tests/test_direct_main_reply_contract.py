@@ -860,6 +860,81 @@ def test_search_feedback_does_not_reintroduce_a_fixed_closing_or_treat_accurate_
     assert "七点三缺一，0.5无烟杭麻，打吗" not in contract["bad_reply_examples"]
 
 
+@pytest.mark.parametrize("case", ["named_empty", "tentative_table", "explicit_party"])
+def test_v7_0103_table_shorthand_is_not_a_requester_party_or_arrival(tmp_path, case):
+    """原桌的线索可试探确认，明确的「我们仨」仍用于个人查询。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    named = case != "explicit_party"
+    source = ("老板好，371七点半那桌是无烟吗，能搭一桌吗" if named
+              else "老板，我们仨七点半能到，想找张无烟的，能搭吗？")
+    requirement = ({"known_player_count": 3, "needed_seats": 1, "start_time": "19:30", "start_time_kind": "scheduled"}
+                   if named else {"requesting_party": {"seat_count": 3}, "smoke_preference": "no_smoking"})
+    scope = "specific_table" if named else "personal"
+    reply = {
+        "named_empty": "七点半三缺一那桌我这边没看到，烟况还不能确认。你是想搭个无烟桌吗？",
+        "tentative_table": "你说的是七点半三缺一那桌吗？我这边看到的七点半有一桌无烟，还差三位，得确认是不是同一桌。",
+        "explicit_party": "你们三位七点半到，现在没有能一起搭的无烟桌。要我帮你们组一桌吗？",
+    }[case]
+    main = StaticAgentClient([
+        _call("search_current_games", {"lookup_scope": scope, "requirement": requirement}),
+        _reply(reply, status="waiting_user"),
+    ])
+    reviewer = StaticAgentClient([json.dumps({
+        "approved": True, "needs_human": False, "violations": [], "reasoning_summary": "当前来话与查局结果可核对",
+        "item_reviews": [{"item_id": "reply_to_user", "approved": True, "violations": [],
+                          "suggested_safe_text": reply, "reasoning_summary": "本人来话与桌况分开",
+                          "follow_up_commitments": []}],
+    }, ensure_ascii=False)])
+    store = SQLiteAgentStore(tmp_path / "quoted-table.sqlite3")
+    trace = InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=main, store=store, trace_recorder=trace,
+                           reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="named-table", identities={"guest": "顾客", "host": "桌主"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    with using_clock(lambda: at):
+        channel.deliver_group_history(MessageEnvelope("group-anchor", "host", "371 七点半 0.5",
+            at.replace(hour=18, minute=20, second=11), "group", channel.room_id))
+        if case == "tentative_table":
+            store.create_game(conversation_id=channel.private_conversation_id("host"), organizer_id="host",
+                organizer_name="桌主", known_players=[], trace_id="another-seven-thirty",
+                requirement={"planned_start_at": "2026-11-25T19:30:00+08:00", "start_time_kind": "scheduled",
+                             "smoke_preference": "no_smoking", "stake": 0.5})
+        result = channel.send(MessageEnvelope("private-read", "guest", source, at, "private", AGENT_ID))
+
+    seen = trace.get_trace(result["trace_id"])
+    search, = [event.content for event in seen
+               if event.step == "tool_result" and event.content["name"] == "search_current_games"]
+    assert search["allowed"] and search["called"] and search["result"]["lookup_scope"] == scope
+    actual = search["result"]["requirement"]
+    if named:
+        assert actual["known_player_count"] == 3 and actual["needed_seats"] == 1
+        assert "requesting_party" not in actual and "smoke_preference" not in actual
+    else:
+        assert actual["requesting_party"]["seat_count"] == 3 and "needed_seats" not in actual
+        assert "requesting_party.seat_count" in search["result"]["customer_reply_contract"]["evidence_scope"][
+            "applied_filter_fields"]
+    if case == "tentative_table":
+        conflict = search["result"]["table_reference_evidence"]
+        assert conflict["requested_remaining_seats"] == 1
+        assert conflict["conflicting_candidates"][0]["remaining_seats"] == 3
+    else:
+        assert search["result"]["matches"] == []
+        assert search["result"]["customer_reply_contract"]["evidence_scope"]["supports_narrower_empty_claim"]
+    prompt, payload = reviewer.calls[0]["messages"]
+    unwrapped = json.loads(payload["content"])
+    strategy = unwrapped["game_query_strategy_contract"]["named_table_lookup"]
+    assert "试探「你说的是七点半三缺一那桌吗」" in strategy
+    assert "不在问题里预设「你们仨七点半到、缺一位」" in strategy
+    assert "明确说「我们仨七点半能到」" in strategy
+    assert "问号不能补足依据" in prompt["content"]
+    assert any("不在问题里预设" in frame["content"] for frame in main.calls[0]["messages"])
+    receipt, = result["archive_outputs"]
+    assert receipt["text"] == reply and receipt["source_message_id"] == "private-read"
+    assert not store.invite_drafts and not store.room_reservations
+    assert len(store.games) == (1 if case == "tentative_table" else 0)
+    store._connection.close()
+
+
 def test_specific_table_inquiry_does_not_filter_it_out_with_requested_changes():
     """指定桌的定位条件与顾客希望改变的条件应分别进入规划和独立审查。"""
     prompts = ROOT / "src/mahjong_agent_runtime/prompts"

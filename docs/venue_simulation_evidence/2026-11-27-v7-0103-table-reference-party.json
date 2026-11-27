@@ -1,0 +1,165 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_code_commit": "a87e461",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev7_20261127/2026-11-25-real-f43d9234b8",
+  "customer_case": "0103",
+  "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7",
+  "ledger": [
+    {
+      "sequence": 1,
+      "kind": "group",
+      "direction": "history",
+      "sender_id": "venue-sender-0081",
+      "recipient_id": "venue-group",
+      "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+      "trace_id": "trace_2b65650d11311d1ac872f69f",
+      "sent_at": "2026-11-25T10:20:11+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "text": "371 七点半 0.5"
+    },
+    {
+      "sequence": 2,
+      "kind": "group",
+      "direction": "history",
+      "sender_id": "venue-sender-0078",
+      "recipient_id": "venue-group",
+      "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+      "trace_id": "trace_2cdc5bf29f41866bb2ca25b9",
+      "sent_at": "2026-11-25T10:58:00+00:00",
+      "quoted_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+      "source_message_id": null,
+      "text": "有烟还是无烟"
+    },
+    {
+      "sequence": 3,
+      "kind": "private",
+      "direction": "inbound",
+      "sender_id": "venue-sender-0103",
+      "recipient_id": "simulation-agent",
+      "message_id": "customer:role-event:2c7524023311d952147ad206ec3cabc8986ed30869887acb6b0f04daebb25ee0",
+      "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "text": "老板好，371七点半那桌是无烟吗，能搭一桌吗"
+    },
+    {
+      "sequence": 4,
+      "kind": "private",
+      "direction": "outbound",
+      "sender_id": "simulation-agent",
+      "recipient_id": "venue-sender-0103",
+      "message_id": "outbound:trace_4d5107d9f86c1c0b1ec2dca7:1",
+      "trace_id": "trace_4d5107d9f86c1c0b1ec2dca7",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:2c7524023311d952147ad206ec3cabc8986ed30869887acb6b0f04daebb25ee0",
+      "text": "七点半 371 的桌现在看板上没有诶。你是说你们仨七点半到、缺一位想凑个无烟的？要是这样我帮你问问有没有人。"
+    },
+    {
+      "sequence": 27,
+      "kind": "group",
+      "direction": "inbound",
+      "sender_id": "venue-sender-0103",
+      "recipient_id": "venue-group",
+      "message_id": "customer:role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a",
+      "trace_id": "trace_255776e285474947126243a6",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "quoted_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+      "source_message_id": null,
+      "text": "我刚问过老板七点半371那桌是不是无烟的，老板说看板上这会儿没有，估计还在问有没有人凑。你们也等回话吧，有信儿了看能不能搭一桌。"
+    },
+    {
+      "sequence": 29,
+      "kind": "private",
+      "direction": "inbound",
+      "sender_id": "venue-sender-0103",
+      "recipient_id": "simulation-agent",
+      "message_id": "customer:role-event:38d4eea1b4b253bbbcad06b6cbbd80c60f5abae80517348fe875261a698e8215",
+      "trace_id": "trace_014e5312ce394975f6152e81",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": null,
+      "text": "老板好，不是仨缺一，是我自己想搭一桌，无烟、底注2或3，能搭一桌吗，七点半这桌我最多打到晚上十一点"
+    },
+    {
+      "sequence": 30,
+      "kind": "private",
+      "direction": "outbound",
+      "sender_id": "simulation-agent",
+      "recipient_id": "venue-sender-0103",
+      "message_id": "outbound:trace_014e5312ce394975f6152e81:1",
+      "trace_id": "trace_014e5312ce394975f6152e81",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "quoted_message_id": null,
+      "source_message_id": "customer:role-event:38d4eea1b4b253bbbcad06b6cbbd80c60f5abae80517348fe875261a698e8215",
+      "text": "七点半按无烟、底注2或3、最多打到十一点查了，现在没有能搭的现成桌。你想打哪种麻将？"
+    }
+  ],
+  "executed_named_read": {
+    "called": true,
+    "allowed": true,
+    "call_id": "lookup_table",
+    "lookup_scope": "specific_table",
+    "requirement": {
+      "known_player_count": 3,
+      "needed_seats": 1,
+      "seat_format": "371",
+      "start_time": "19:30",
+      "start_time_kind": "scheduled"
+    },
+    "matches": [],
+    "evidence_scope": {
+      "available_pool_scope": "same_requester_and_conversation",
+      "applied_filter_fields": [
+        "start_time_kind"
+      ],
+      "unfiltered_available_pool_empty": true,
+      "supports_narrower_empty_claim": true
+    }
+  },
+  "current_write_preflight": {
+    "status": "no_permission",
+    "permissions": []
+  },
+  "historic_reply_review": {
+    "approved": true,
+    "raw_approved": true,
+    "reasoning_summary": "回复如实说明查询范围内未找到七点半371的现成桌，并仅就客户031的“371”含义作条件式澄清，同时把“帮你问问”放在客户确认之后，属于尚未承接的服务提议，无泄露、无未发生动作、无证据外推，状态与待答问题一致。",
+    "item_reason": "查询结果为空且supports_narrower_empty_claim=true，说“看板上没有”在查询范围内成立；对371的两种理解作条件式澄清合理；“帮你问问”整句以客户确认为前提，属未承接的服务提议，不要求已有后续安排；无隐私或内部信息泄露。"
+  },
+  "terminal_status": "waiting_user",
+  "whole_dialogue_judge": {
+    "case_id": "dialogue:venue-sender-0103",
+    "status": "valid",
+    "verdict": "fail",
+    "findings": [
+      {
+        "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+        "verdict": "pass",
+        "reason": "顾客各轮来话都有实际理由：E04 问 371 七点半桌是否无烟、能否搭桌；E08 是在群话题 E02 下公开接话，转述店家回复；E10 在店家 E05 误判「你们仨缺一」后澄清「不是仨缺一，是我自己想搭一桌」并补无烟、底注2或3、最多到23点，属纠正误读；E14 因大雨不宜出行主动取消，并保留玩法偏好；E18 次日约18:49到、到22点，问现成桌；E22 接受 E19 组局提议并委托组桌。连续时点没有无理由一点一点追问，续轮均有新信息或收尾动作。"
+      },
+      {
+        "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+        "verdict": "fail",
+        "reason": "E05 把顾客 E04 的「能搭一桌吗」误读成「你们仨七点半到、缺一位」并承诺帮问，属无依据猜事实；E11 在 E12 已按 19:30、无烟、底注2-3、最多3.5小时查为空后回答没有现成桌，基本承接，但追问玩法时未先确认原桌解释；E15 对 E14 取消答复自然；E19 按 E20 查空后提议组局；E23 对 E22 委托组局只回「我给你组一桌」并追问开打时间，E24 只有 record_user_memory、无实际组局或落库执行，无法证明已组局，属无依据承诺。"
+      }
+    ]
+  },
+  "interpretation": [
+    "第 1 条 371 表示所发桌况三缺一，群消息来自另一名成员。第 2 条问有烟无烟，不能补上烟况答案。第 3 条私聊里的「那桌」以及七点半、371 都给原桌提供了线索，没有说本人到店时间或同行人数。",
+    "第一次查询选择 specific_table，提交的是原桌人数和时间线索，未给顾客加自己的三席或无烟筛选。未过滤可用登记局池为空，足以据实答目前没有可搭的现成桌；原桌烟况仍缺证据。",
+    "第 4 条用疑问句和条件服务提议，未声称已联系。真正的问题是询问时把原桌人数和开场转成顾客一方仨人、七点半到的前提。第 29 条明确纠正只有本人，并加了个人档位和时间范围。该纠正是合理续轮，保留原评分和独立评审原理由。",
+    "仍可以按线索试探「是群里七点半三缺一那桌吗」，也可直说没辨清。同一客户明确说「我们仨七点半能到」时，承接三席和到店时间。只核查原桌时不强制追问人数。"
+  ],
+  "grounded_reply": "七点半三缺一那桌我这边没看到，烟况还不能确认。你是想搭个无烟桌吗？",
+  "related_followup": "2026-11-27-v7-0103-empty-pool-executed-filter.json",
+  "change": "主模型共享查局合同和发前审查提示分别沿原话核对桌况、己方人数与到店时间，明确问句也要核对前提。保留有线索的试探、必要的中性澄清与本人明说的同行。",
+  "offline_verification": {
+    "test": "tests/test_direct_main_reply_contract.py::test_v7_0103_table_shorthand_is_not_a_requester_party_or_arrival",
+    "controls": "真实 SQLite 查局、群历史和私聊收据覆盖原桌查空、余位冲突的有线索试探，以及本人明确带三位的个人查询。用静态审查回执验证合同送入及对客收件，真模型语义仍待复验。",
+    "live_replay": "pending",
+    "targeted_tests_passed": 680
+  }
+}
