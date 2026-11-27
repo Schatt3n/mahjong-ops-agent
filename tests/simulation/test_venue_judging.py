@@ -762,6 +762,28 @@ def test_rolling_judge_has_queued_late_arrival_evidence_without_private_contact(
     assert json.loads(payload["content"])["evidence"][-1]["tools"][0]["result"] == expected
 
 
+@pytest.mark.parametrize(("runtime_status", "error", "reply", "accepted"), [
+    ("needs_help", "runtime_needs_help", "稍等一下", False),
+    ("needs_human", None, "这桌散场没写，我得请店员确认。现在还没给你留位。", True),
+    ("waiting_user", None, "原桌有空位，你最早几点能到？", True),
+])
+def test_rolling_review_pass_cannot_overlook_undelivered_substantive_reply(runtime_status, error, reply, accepted):
+    """V8 技术故障的等待提示与有效的人工确认、针对性提问分别验收。"""
+    turn = _turn(1) | {"runtime_status": runtime_status}
+    if error:
+        turn.update(error_type=error, failure_stage="agent")
+    args = {"customer_id": "a", "turns": [turn], "records": [_chat("u1", text="原桌还有位吗？"),
+            _chat("a1", reply_to="u1", text=reply)]}
+    client = _JudgeClient(role_evidence=("E02",), agent_evidence=("E03",))
+    result = review_dialogue(SemanticJudge(client), **args, rolling_check_ids=True)
+    assert result["status"] == ("valid" if accepted else "invalid")
+    assert result["evidence"][-1].get("execution_failed_without_substantive_reply") is (None if accepted else True)
+    if not accepted:
+        assert result["error"] == "shop pass overlooks an execution failure without a substantive reply"
+        legacy = prepare_dialogue_review(**args, projection_version=12)
+        assert "execution_failed_without_substantive_reply" not in legacy.archive[-1]
+
+
 @pytest.mark.parametrize(("reply", "agent_verdict"), [
     ("六点以后哪个点开场方便？你说个钟点，我就按这个时间挂出去找人。", "pass"),
     ("你再从头说下吧。", "fail"),

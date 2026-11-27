@@ -15,7 +15,7 @@ from mahjong_agent_runtime.domains.model_context import has_agreed_game_duration
 from mahjong_agent_runtime.domains.stake_values import parse_number
 from mahjong_agent_runtime.domains.value_utils import first_present_value
 
-from .venue_acceptance import _delivered_replies
+from .venue_acceptance import _delivered_replies, assess_pending_handling
 from .venue_actors import COMPANION_ACTION_STAGES, JudgeResult, SemanticJudge
 from .venue_channel import AGENT_ID, OWNER_ID
 
@@ -77,6 +77,8 @@ _ROLLING_EVIDENCE_CALIBRATION = (
     "对店家独立核对实际重复追问、漏答或无依据承诺，观察边界不抵销已经发生的内容。"
     "request_late_arrival 的 late_arrival_request.status=queued 表示已登记等待联系；contact_started=false 表示尚未向牌友发问。"
     "如实告诉顾客还待确认并保留原空位是合理进展；不能将排队算为发出通知、收到牌友同意或者已经留位。"
+    "execution_failed_without_substantive_reply=true 表示该轮有技术故障且只发等待或未送达。即使其他轮有答复，不能把这条来话算作已妥善承接。"
+    "只据已观察到的顾客动作评顾客项。对说明清楚的具体澄清或人工确认继续按通常语义检查。"
     "断言无烟、已有一席等时，查看同轮唯一原桌的 game/terms/seat_summary。查得无烟的证据不能对其他桌或个人条件外推。"
 )
 # 发言形态来自真人脱敏时间线中的 availability_then_smoke_preference、intermediary_role_correction
@@ -431,6 +433,9 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                             and tool.get("result", {}).get("recorded_status") == "confirmed" for tool in tools)
             execution = {"kind": "agent_execution", "responds_to": message_id, "tools": tools,
                          **_pick(turn, ("runtime_status", "error_type", "failure_stage"))}
+            if (projection_version >= 13 and turn.get("failure_stage") == "agent" and turn.get("error_type")
+                    and not assess_pending_handling(replies.get(message_id, ()), {})["substantive_delivery"]):
+                execution["execution_failed_without_substantive_reply"] = True
             if latest_board in history_ids and board_expirations:
                 before = datetime.fromisoformat(inbound[0]["sent_at"])
                 published = datetime.fromisoformat(ledger[latest_board]["sent_at"])
@@ -595,6 +600,9 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
         "顾客项通过时须覆盖所有实际发言和等待等评价对象。材料不足就判待定。"
         "完成各判项后按 fail、inconclusive、pass 的优先级核对总判定。"
     )
+    if prepared.projection_version >= 13 and result["error"] == "duration review needs linked join and delivered proof":
+        instructions += ("\n时长项使用 confirmed_joins 中成对的来话、实际回复和执行编号。"
+                         "reason 中的「」逐字包含整条来话和整条实际回复，连同其余短句和原标点；不能摘除通知等附带语句。")
     revised = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
                           checks=tuple(wire_checks), instructions=instructions, timeout_seconds=remaining, step_index=2)
     final = _validate_dialogue_judgment(revised, prepared, wire_checks, rolling_check_ids=rolling_check_ids)
@@ -630,6 +638,11 @@ def _validate_dialogue_judgment(judgment: JudgeResult, prepared: PreparedDialogu
             break
         if check in {ROLE_CHECK, FIRST_CONTACT_CHECK} and verdict == "pass" and not projected.anchors[check] <= ids:
             result.update(status="invalid", verdict="inconclusive", findings=(), error="customer pass must cite every archived action")
+            break
+        if (check == AGENT_CHECK and verdict == "pass"
+                and any(row.get("execution_failed_without_substantive_reply") for row in projected.rows)):
+            result.update(status="invalid", verdict="inconclusive", findings=(),
+                          error="shop pass overlooks an execution failure without a substantive reply")
             break
         if check == DURATION_CHECK and verdict != "inconclusive" and not _has_duration_evidence(projected, finding, ids):
             result.update(status="invalid", verdict="inconclusive", findings=(), error="duration review needs linked join and delivered proof")

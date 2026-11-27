@@ -1,0 +1,293 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "status_of_source_run": "failed",
+  "source_sha256": "1fa1a953bc463a900f819f7f56e53c3bde515faf14fb2cbbe86317f2b4f28513",
+  "diagnostic_code": "241cd7f",
+  "from_projection": 12,
+  "candidate_projection": 13,
+  "comparison_scope": "原三位实际角色和送达账本，仅重新调用独立评审。原运行原判、原业务写入和验收结果未改变。",
+  "cases": [
+    {
+      "role": "0402",
+      "original": {
+        "status": "valid",
+        "verdict": "fail",
+        "findings": [
+          {
+            "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+            "verdict": "fail",
+            "evidence_ids": [
+              "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+              "outbound:trace_88bfa78ebd42bc9f7080ca8a:1"
+            ],
+            "reason": "顾客在 E27 已把看板原信息说清（今晚七点半杭麻1-3底无烟、八点一刻到、最晚十点），本身可自洽；但 E28 店家已明确告知桌子 open 后不保证有位置、桌上是否愿等无法保证，属于无适配桌且未确认留位。顾客在 E28 之后没有做出任何接受、拒绝或收尾动作，对话停留在未决状态，未像真人一样处理自己的目标（无报名、无请店家组局、也无婉拒），故本项不能通过。"
+          },
+          {
+            "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+            "verdict": "fail",
+            "evidence_ids": [
+              "customer:role-event:fb54fbbf6be8028e8f2e3fe1861081994f5dfad5def99052b1810c63d702b010",
+              "outbound:trace_5de5c80a832a65236dd42435:1",
+              "trace_5de5c80a832a65236dd42435",
+              "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54",
+              "outbound:trace_b4fbdd9562e7b8952fdc6965:1",
+              "trace_b4fbdd9562e7b8952fdc6965",
+              "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+              "trace_88bfa78ebd42bc9f7080ca8a"
+            ],
+            "reason": "E19 回复顾客询问空位时称「那桌杭麻1-3底、无烟，现在还差三个人……不保证到点就一定有你的位」，正确引用了 E20 的 forming 桌况（claimed_seats=1、remaining_seats=3、无烟、max_duration_hours=2.5），未擅自承诺占座，这部分合理。但 E24 面对顾客 E23 的追问「杭麻1-3底那桌还在凑人」时，说「辨不出是哪桌」并要求补充信息，然而 E20 刚在上一轮查到了同一桌（E23 前文已出现 1-3底杭麻、八点一刻到、最晚十点），店家在 E25 也再次查询却用了过窄的 base_stake=1 导致空结果，未识别到本桌仍在 forming，属于对已知条件的重复追问与漏答。E28 在 E29 已查到该桌 forming（remaining_seats=3）的情况下，虽说明晚到不保证有位置、桌上愿等没保证，但未交代桌子的真实剩余时长（max_duration_hours=2.5，即约到 22:00 结束），而顾客 E27 明确说最晚打到十点（约 21:45–22:00），时长条件未与该桌实际时长对齐核实，属于对时长的含糊处理。因此店家项存在漏查与时长未核实的问题。"
+          }
+        ],
+        "response_source": {
+          "schema_version": 1,
+          "trace_id": "judge:venue-sender-0402",
+          "step_index": 1,
+          "raw_response_sha256": "3d6a5c6e4339ecbd938df33339b0eb30541609fab71bce8c436302f04dddf198",
+          "call_id": "llm_call_286141ea5afa4dce9f6f8ec6a05a9791",
+          "terminal_attempt_id": "llm_attempt_db7a9092afd74e01afb91f44d12871e4",
+          "route": "primary",
+          "response_route": [],
+          "http_response_complete": true
+        }
+      },
+      "candidate": {
+        "status": "valid",
+        "verdict": "pass",
+        "findings": [
+          {
+            "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+            "verdict": "pass",
+            "evidence_ids": [
+              "customer:role-event:06e2c19813d9eea4893b89751189f88ea67ec60b0f9c340ee52ca80d83f7b927",
+              "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+              "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+              "customer:role-event:fb54fbbf6be8028e8f2e3fe1861081994f5dfad5def99052b1810c63d702b010",
+              "customer:role-event:04de6ad1e648c8cdb14499ea6f95f4f88e9410b4511c757a2ab6a2634e1a9a54",
+              "customer:role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a"
+            ],
+            "reason": "顾客逐日按自己的目标自然推进：首日用「老板，今晚七点半过了有合适的吗？一底到三底的杭州麻将，我七点半多点能到」提出问局，收到无局后明确委托组局并报出「大概八点到，最多打三个钟」，随后因行程变化补充「最早八点十分到店，今晚最多能打到十一点」，均有新信息和新理由；次日直接问看板那桌「还有位吗」，在自己实际情况变为八点一刻到、最晚十点时重新确认是否赶得上，收到店家说辨不出哪桌后，补充看板线索（七点半、1-3底、无烟）请其核实，属于有沟通理由的续轮。消息简洁、不机械复读清单，收尾自然，未出现无理由重复或照抄。"
+          },
+          {
+            "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+            "verdict": "pass",
+            "evidence_ids": [
+              "outbound:trace_4f76ff99d2c62b850853dfab:1",
+              "outbound:trace_4b84e1633c4b01139ba1ec18:1",
+              "outbound:trace_68b5c8e3f35af0516156a264:1",
+              "outbound:trace_5de5c80a832a65236dd42435:1",
+              "outbound:trace_b4fbdd9562e7b8952fdc6965:1",
+              "outbound:trace_88bfa78ebd42bc9f7080ca8a:1",
+              "trace_88bfa78ebd42bc9f7080ca8a"
+            ],
+            "reason": "店家根据实际查局承接需求：首轮如实告知无合适桌并提出组局（E05/E06）；委托后未重复追问已给条件，只合理追问开场时间（E09）；第二轮对未知指代做了有依据的澄清（E24），顾客补线索后按七点半、1-3底、无烟查询并准确报告「还在凑人，现在桌上就一位，还差三位」，且明确说明晚到「还有没有位置、桌上愿不愿意等，我这边没法保证」，没有无依据承诺等待或留位（E28/E29）。各轮均未把猜测当成事实肯定，回答内容与证据一致。"
+          }
+        ],
+        "error": null,
+        "response_source": {
+          "schema_version": 1,
+          "trace_id": "judge-v13:venue-sender-0402",
+          "step_index": 1,
+          "raw_response_sha256": "ea47fd4fd51ab78cc6ebfd7b79297f9f2bb7cd482a7f981d37c8c0cc1e8f9a55",
+          "call_id": "llm_call_94b08b59fb41460a9e4c31b6b29b795d",
+          "terminal_attempt_id": "llm_attempt_a024097f96d0417ba4625754a3f6ba3e",
+          "route": "primary",
+          "response_route": [],
+          "http_response_complete": true
+        }
+      },
+      "verified_analysis": "新评审认可实际已观察到的顾客补充，原先以没有后续动作判失败的问题未复现。店家项的新 pass 遗漏首日晚到回合实际只发等待。这是新评审漏判，随后新增明确的故障和交付证据，且不接受忽略真实技术失败的通过。"
+    },
+    {
+      "role": "0353",
+      "original": {
+        "status": "valid",
+        "verdict": "fail",
+        "findings": [
+          {
+            "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+            "verdict": "pass",
+            "evidence_ids": [
+              "customer:role-event:79f404a2050ee977ade1c63f774c6f1ffb9177f3415de6f85a3b2fc977fe6726",
+              "customer:role-event:17afade43319739e7fa4c1f0e0148035df00f530ed3b67a8796e230b2821e281",
+              "customer:role-event:9624f828b14e499872c2f3601ade83a1e78ec26b050b27e02a1814ee9b60b50b",
+              "customer:role-event:b4ba1b378fed0c146852f0adc87ca8c8254db9bad78b0ccff5ea261170ea54a2",
+              "customer:role-event:d55a3428b17afc16a1ceffc6dfae5d93c834be1ee58de0e7248aa7a8c9286e11",
+              "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9"
+            ],
+            "reason": "顾客各轮问法自然：首轮私聊只问川麻一块底有没有位（E04），收到无局后礼貌婉拒并留下偏好（E11），次日依看板问川麻0.5无烟（E21），得知缺人、人齐才开后明确报名并顺带请到齐喊一声（E25）；E08 是公开群里接烟况话题且区分留位诉求，无照抄或机械探问。整体有实际理由且收尾自然。"
+          },
+          {
+            "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+            "verdict": "fail",
+            "evidence_ids": [
+              "outbound:trace_33549d12539483b5cebf7055:1",
+              "outbound:trace_2aa8629d7b99d58a51dab0b7:1",
+              "outbound:trace_9e9a18cf0e232c522daf3dd4:1",
+              "outbound:trace_7a0b8008214c34ddd74af0e8:1",
+              "outbound:trace_bcc40b26fe1c15c6dc17852f:1"
+            ],
+            "reason": "E17 回复「19点半那桌杭麻现在一个人，还缺三位，1～3块无烟的」，把顾客问的杭麻桌烟况当成已确认无烟报出，无执行证据支持；E22 对川麻0.5无烟桌也只说缺人与开场，未核对时长是否满足顾客。E26 回复「人齐我这边没法主动喊你」与顾客「人齐了喊我一声」（E25）冲突，属无依据承诺/回避。"
+          },
+          {
+            "check": "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据",
+            "verdict": "fail",
+            "evidence_ids": [
+              "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+              "outbound:trace_bcc40b26fe1c15c6dc17852f:1",
+              "trace_bcc40b26fe1c15c6dc17852f"
+            ],
+            "reason": "E25「好 那我报一个 七点半到 川麻0.5无烟这桌 人齐了喊我一声」为无条件报名，E27 显示 recorded_status=confirmed 已确认席位，但 E26「好，给你占上了……人齐我这边没法主动喊你」未回应顾客「人齐了喊我一声」的请求，确认回复与请求不符，交付内容欠缺。"
+          }
+        ],
+        "response_source": {
+          "schema_version": 1,
+          "trace_id": "judge:venue-sender-0353",
+          "step_index": 2,
+          "raw_response_sha256": "e856f135b6f20fd06fe7afc5a2896e6f8609c4864f2532b31a51032586b66e3b",
+          "call_id": "llm_call_9f9ede29ce0c47d6933d1a3b886f6c6f",
+          "terminal_attempt_id": "llm_attempt_9f354c908d4743b0a46d62bf7aafdc87",
+          "route": "primary",
+          "response_route": [],
+          "http_response_complete": true
+        }
+      },
+      "candidate": {
+        "status": "invalid",
+        "verdict": "inconclusive",
+        "findings": [],
+        "error": "duration review needs linked join and delivered proof",
+        "response_source": {
+          "schema_version": 1,
+          "trace_id": "judge-v13:venue-sender-0353",
+          "step_index": 2,
+          "raw_response_sha256": "ce8783037d17a5727ee61801f3fceb5b5ab1440b5aa489db232aa42acbf00c12",
+          "call_id": "llm_call_42e767a3493e4fa18aaa8d43debfa1fe",
+          "terminal_attempt_id": "llm_attempt_0f53aaa79af34a3099536f21541232bf",
+          "route": "primary",
+          "response_route": [],
+          "http_response_complete": true
+        },
+        "raw": "{\"verdict\": \"pass\", \"findings\": [{\"check\": \"role_behavior\", \"verdict\": \"pass\", \"evidence_ids\": [\"E04\", \"E08\", \"E11\", \"E16\", \"E21\", \"E25\"], \"reason\": \"顾客发言自然、各有实际目的：E04 首次私聊问川麻一块底；E08 在群里回应公开烟况话题并说明会晚到、请求留位；E11 得知今晚无法到场后主动说明「今晚过不去」并请以后有局再喊；E16 次日询问看板那桌杭麻是否还有川麻一块底位；E21 明确指向看板川麻0.5无烟桌、报到时间；E25 无条件报名并请人齐喊一声。每轮均无照抄店家条件或无理由重复探问，续轮都有新信息或新目标，收尾自然。\"}, {\"check\": \"shop_behavior\", \"verdict\": \"pass\", \"evidence_ids\": [\"E05\", \"E06\", \"E12\", \"E13\", \"E17\", \"E18\", \"E22\", \"E23\", \"E26\", \"E27\"], \"reason\": \"E05 据空局查询如实告知暂无一块底川麻并提议帮组局；E12 确认不组并记录偏好；E17 依据 E18 查到唯一杭麻桌如实报一人、缺三位、1～3块无烟，未误报；E22 依据 E23 核对川麻0.5无烟现成桌，说明一人、还差俩、人齐才开，条件准确；E26 明确告知无法主动喊人、建议临近再问，未做无依据承诺，并已实际占席（E27 confirmed）。各轮均承接已知需求、无重复追问或误报。\"}, {\"check\": \"duration_at_join\", \"verdict\": \"pass\", \"evidence_ids\": [\"E25\", \"E26\", \"E27\"], \"reason\": \"顾客 E25「好 那我报一个 七点半到 川麻0.5无烟这桌 人齐了喊我一声」为无条件报名，未以时长作为留位条件。E26 回复「好，给你占上了，现在两个，还差两个」，E27 执行 join_game 返回 recorded_status=confirmed、claimed_seats=2。时长未被提及也不影响报名，占席执行与确认回复一致，通过。\"}]}",
+        "prior_attempts": [
+          {
+            "error": "duration review needs linked join and delivered proof",
+            "response_source": {
+              "schema_version": 1,
+              "trace_id": "judge-v13:venue-sender-0353",
+              "step_index": 1,
+              "raw_response_sha256": "7fd511ddff5e7203d70418a4e477fc4873290337c834b92631cfa71963d1df4a",
+              "call_id": "llm_call_fe958592329e4a8ea35bd0b5ca346c32",
+              "terminal_attempt_id": "llm_attempt_1e66078fce5c46ab8a1c55d7a155a106",
+              "route": "primary",
+              "response_route": [],
+              "http_response_complete": true
+            }
+          }
+        ]
+      },
+      "verified_analysis": "新评审将无条件报名的时长项写为通过，但只引用确认语的前半句，违反逐字完整回复要求。第二次仍未通过结构核验。它也遗漏了主动通知能力的错误否定。保留 invalid，下一轮要求按实际账本判断并在补判提示中明确完整原话。"
+    },
+    {
+      "role": "0235",
+      "original": {
+        "status": "valid",
+        "verdict": "fail",
+        "findings": [
+          {
+            "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+            "verdict": "fail",
+            "evidence_ids": [
+              "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f",
+              "outbound:trace_7063fe0a33998ba163c2a3da:1",
+              "role:role-event:d56899b218e293ea444f4a16dff3b9074334040c7cf0e71ca53692ada94c4edb",
+              "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+              "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+              "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+              "outbound:trace_8189f6f59755852704bdacc9:1",
+              "role:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255"
+            ],
+            "reason": "顾客E04只问7点半0.5那桌有没有位，店家查空后如实回复无位（E05、E06），顾客E08选择等待，合理；但次日E11问「一块的底」的杭麻桌是否有位，店家已答到位（E12）后，顾客在E16没有新约束、没有先前缺口、没有店家备选的情况下，又用几乎相同条件重复问同一桌并在未获留位答复前就提出留位，仅补充了「稍晚一点到」这一新信息但询问本身重复了已得答复的问题，不是自然追问；末轮E17已说明未问到答复，E19继续等待正常。整体顾客在已知桌位信息后重复探问同一桌，沟通效率不符合真人处理方式。"
+          },
+          {
+            "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+            "verdict": "fail",
+            "evidence_ids": [
+              "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f",
+              "outbound:trace_7063fe0a33998ba163c2a3da:1",
+              "trace_7063fe0a33998ba163c2a3da",
+              "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+              "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+              "trace_afb2d1f66aed0ceea806b6db",
+              "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+              "outbound:trace_8189f6f59755852704bdacc9:1",
+              "trace_8189f6f59755852704bdacc9"
+            ],
+            "reason": "店家E05对E04的查询有E06查询空结果支撑，回复准确；E12对E11回复「还在呢，现在一个人，还差三位」有E13的forming桌支撑，准确；但E16顾客提出「稍晚一点到 能先留一个吗」时，E17只说「能不能等你这件事我记下了，目前还没问到答复」，没有实际确认席位或给出任何处理进展，同时E18的request_late_arrival执行虽ok但未返回结果，店家在顾客明确请求留位且存在可占席位（claimed_seats=1, remaining_seats=3）的情况下，只口头记录而未说明是否可以留、也未说明需要等待谁确认，也未补报该桌实际时长（max_duration_hours=2.5），未对顾客的留位请求作闭环处理，属于未完成实际执行与交付。"
+          }
+        ],
+        "response_source": {
+          "schema_version": 1,
+          "trace_id": "judge:venue-sender-0235",
+          "step_index": 1,
+          "raw_response_sha256": "93751d1640772c7b55784305e50e71fca775ae10291b5b71e909035ba76696e2",
+          "call_id": "llm_call_ab19b71c90be434294b2d5898334eff3",
+          "terminal_attempt_id": "llm_attempt_78a6017a8c6643dc9b8c42fafb938207",
+          "route": "primary",
+          "response_route": [],
+          "http_response_complete": true
+        }
+      },
+      "candidate": {
+        "status": "valid",
+        "verdict": "pass",
+        "findings": [
+          {
+            "check": "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由",
+            "verdict": "pass",
+            "evidence_ids": [
+              "customer:role-event:e03c0453a41cf51af070bd89487d22afc97eeeda7e5484262ee9f17bb8929f8f",
+              "role:role-event:b3263cba683ccfa6c195c115b87273beb32cc89f74ed77830809d816785adc97",
+              "role:role-event:d56899b218e293ea444f4a16dff3b9074334040c7cf0e71ca53692ada94c4edb",
+              "customer:role-event:e6bc7953e06f3f6cff49430f43f08771206dc285f11c944fb989587bb3dd8666",
+              "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+              "role:role-event:c65caeedf839364f83b5f7e33637c48e9d8fff06184f2ddbfc490298ff06e255"
+            ],
+            "reason": "顾客都围绕自身留位/到店需求自然发话：E04「老板好 7点半 0.5那桌还有位吗」简短问局；收到无空位的 E05 后 E08 选择等待，合理。第二天 E11「老板好 今晚七点半那桌杭麻 一块的底 还有位吗」是看到群看板 E09 后按当日需求询位。E16 在店家尚未答留位后补上「我到七点半稍晚一点 能先留一个吗」，新增了晚到约束，是有沟通理由的新问题，不属于无理由重复照抄。E19 在店家如实说明留位尚待确认后选择等待，收尾自然。未主动报姓名，也未逐项复读店家给的玩法、时间、档位、烟况等清单，符合真人聊天。"
+          },
+          {
+            "check": "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺",
+            "verdict": "pass",
+            "evidence_ids": [
+              "outbound:trace_7063fe0a33998ba163c2a3da:1",
+              "outbound:trace_afb2d1f66aed0ceea806b6db:1",
+              "outbound:trace_8189f6f59755852704bdacc9:1"
+            ],
+            "reason": "第一日 E06 实际查 0.5、19:30 档空且 supports_narrower_empty_claim=true，E05 据此如实告知「7点半0.5那桌现在没查到有位诶」，无误报。第二日 E13 查到一桌 forming、claimed_seats=1、remaining_seats=3、stake_range 1~3、无烟、19:30，E12 回复「现在一个人，还差三位」与查询一致，未编造凑齐。E16 提出晚到留位，E18 的 request_late_arrival 为 queued、contact_started=false，E17 如实说「能不能等你这件事我记下了，目前还没问到答复」，未把排队当同意、也未擅自确认占座，处理恰当，未重复追问已知条件。"
+          }
+        ],
+        "error": null,
+        "response_source": {
+          "schema_version": 1,
+          "trace_id": "judge-v13:venue-sender-0235",
+          "step_index": 1,
+          "raw_response_sha256": "50efdf6f35ad28fe79f04469370425bf42a42d7dc449800c8984c1320f3556bf",
+          "call_id": "llm_call_82f174f316ea4603901a5d7353af2f15",
+          "terminal_attempt_id": "llm_attempt_7b4475f2e7504c44bd1529efeba5c141",
+          "route": "primary",
+          "response_route": [],
+          "http_response_complete": true
+        }
+      },
+      "verified_analysis": "新评审看到实际征询已排队、尚未联系，认可店家说仍待确认。它识别到顾客新增晚到限制和留位诉求，未按重复问局失败。该对照校准已归档原话，未证明同桌已经确认、已实际通知或已留位。",
+      "queued_evidence": {
+        "late_arrival_request": {
+          "game_id": "game_8aef6bf1423b",
+          "status": "queued",
+          "arrival_at": "2026-11-26T19:45:00+08:00",
+          "planned_start_at": "2026-11-26T19:30:00+08:00"
+        },
+        "contact_started": false
+      }
+    }
+  ]
+}
