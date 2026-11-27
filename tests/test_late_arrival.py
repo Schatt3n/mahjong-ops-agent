@@ -101,6 +101,13 @@ def _tasks(store, task_type):
     ("老板好 今晚七点半那桌杭麻一块的底 还有位吗 我到七点半稍晚一点 能先留一个吗", None, None),
     ("我19:45才下班 可能晚点到 这桌能等吗？", None, None),
     ("我朋友19:45能到，我还不确定。", None, None),
+    ("我朋友要19:45才到，我还没定", None, None),
+    ("同伴最早19:45到，我还没定", None, None),
+    ("我不会19:45到", None, None),
+    ("我带朋友19:45到", None, False),
+    ("我跟朋友19:45到", None, False),
+    ("我朋友19:40到，我19:45到", None, False),
+    ("我19:45左右能到", None, True),
     ("我19:45到不了，帮我问下。", None, None),
     ("我大概19:45能到，能不能等一下？", None, True),
     ("大概19:45", "same_table", True),
@@ -134,11 +141,11 @@ def test_late_arrival_requires_actual_customer_time_and_preserves_an_estimate(st
         else:
             question, = questions
             assert request.called and request.result["contact_started"] is False
-            assert request.result["late_arrival_request"]["arrival_is_estimate"] is expected
+            assert request.result["late_arrival_request"].get("arrival_is_estimate", False) is expected
             context = tool_result_for_context(request)["result"]["late_arrival_request"]
-            assert context["arrival_is_estimate"] is expected
+            assert context.get("arrival_is_estimate", False) is expected
             assert question.payload["arrival_at"] == arrival.isoformat()
-            assert question.payload["arrival_is_estimate"] is expected
+            assert question.payload.get("arrival_is_estimate", False) is expected
 
 
 def test_late_arrival_hides_unagreed_duration_and_rejects_incomplete_lookup(store):

@@ -215,9 +215,11 @@ def explicit_customer_play_deadline(text: str, *, sent_at: datetime) -> dict[str
 _ARRIVAL_ESTIMATE_WORD = r"(?:大概|大约|差不多|预计|估计|大致|可能|约)"
 _ARRIVAL_ESTIMATE_PREFIX = re.compile(rf"{_ARRIVAL_ESTIMATE_WORD}\s*(?:在\s*)?$")
 _ARRIVAL_ESTIMATE_SUFFIX = re.compile(r"\s*(?:左右|前后)")
-_NON_CUSTOMER_ARRIVAL = re.compile(
-    rf"(?:他|她|别人|朋友|同伴|同事|对方|不是|不一定|不能|没法)\s*(?:{_ARRIVAL_ESTIMATE_WORD}\s*)?(?:在\s*)?$"
-)
+_ARRIVAL_CLOCK_LEAD = rf"(?:(?:最早|最快|要|得|能|会|可以|{_ARRIVAL_ESTIMATE_WORD}|在)\s*)*$"
+_OTHER_ARRIVAL_BEFORE = re.compile(rf"(?:他|她|别人|朋友|同伴|同事|对方)(?:们)?\s*{_ARRIVAL_CLOCK_LEAD}")
+_SHARED_ARRIVAL_BEFORE = re.compile(rf"(?:^|\s)我\s*(?:带|跟|和|陪)\s*(?:个|一位)?\s*"
+                                   rf"(?:朋友|同伴|同事)(?:一起)?\s*{_ARRIVAL_CLOCK_LEAD}")
+_NEGATED_ARRIVAL_BEFORE = re.compile(rf"(?:不是|不一定|不能|不会|没法|没说|不确定)\s*{_ARRIVAL_CLOCK_LEAD}")
 _ARRIVAL_ACTION_AFTER = re.compile(
     r"\s*(?:(?:左右|前后)\s*)?(?:我(?:们)?\s*)?(?:才\s*)?(?:能|可以|会)?\s*"
     r"(?:到店|到场|过来|到)(?!不|没|时|底|第)"
@@ -242,7 +244,9 @@ def customer_arrival_clock_evidence(
         start, end = clock["source_span"]
         prefix = _CLAUSE_SEPARATOR.split(normalized[:start])[-1]
         suffix = _CLAUSE_SEPARATOR.split(normalized[end:], maxsplit=1)[0]
-        if _NON_CUSTOMER_ARRIVAL.search(prefix):
+        if _NEGATED_ARRIVAL_BEFORE.search(prefix):
+            continue
+        if _OTHER_ARRIVAL_BEFORE.search(prefix) and not _SHARED_ARRIVAL_BEFORE.search(prefix):
             continue
         direct = _ARRIVAL_ACTION_AFTER.match(suffix) or _ARRIVAL_ACTION_BEFORE.search(prefix)
         revision = replacing_existing and _ARRIVAL_REVISION_BEFORE.search(prefix) and _ARRIVAL_REVISION_AFTER.match(suffix)
