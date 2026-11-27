@@ -1,0 +1,161 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "customer_role": "0151",
+  "trace_id": "trace_05e27c9c254164ca22b49b22",
+  "related_messages": [
+    {
+      "sequence": 75,
+      "trace_id": "trace_37c191b34a42768cfcc13106",
+      "message_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+      "source_message_id": null,
+      "text": "老板好 那你帮我组一桌吧 19点半开 杭麻 底注一块到三块 无烟最好 我最晚能打到22点",
+      "sent_at": "2026-11-26T03:07:00+00:00"
+    },
+    {
+      "sequence": 76,
+      "trace_id": "trace_37c191b34a42768cfcc13106",
+      "message_id": "outbound:trace_37c191b34a42768cfcc13106:1",
+      "source_message_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+      "text": "好嘞，19点半这桌杭麻给你记上了，底注一块到三块、无烟，还差三个人，我这就开始帮你凑。",
+      "sent_at": "2026-11-26T03:07:00+00:00"
+    },
+    {
+      "sequence": 94,
+      "trace_id": "trace_dbb97b385bd604e4da1375d3",
+      "message_id": "customer:role-event:64eb96cbd4150fa724c54f9ec9f55850391e834af7f348337db35e7a7b6dad53",
+      "source_message_id": null,
+      "text": "老板 今晚七点半那桌杭麻无烟的还能搭一桌吗 我七点能到 打到十点半",
+      "sent_at": "2026-11-26T03:09:30+00:00"
+    },
+    {
+      "sequence": 95,
+      "trace_id": "trace_dbb97b385bd604e4da1375d3",
+      "message_id": "outbound:trace_dbb97b385bd604e4da1375d3:1",
+      "source_message_id": "customer:role-event:64eb96cbd4150fa724c54f9ec9f55850391e834af7f348337db35e7a7b6dad53",
+      "text": "有的，七点半那桌杭麻无烟的还缺三位，你七点到正好赶得上，打吗？",
+      "sent_at": "2026-11-26T03:09:30+00:00"
+    },
+    {
+      "sequence": 113,
+      "trace_id": "trace_05e27c9c254164ca22b49b22",
+      "message_id": "customer:role-event:790c38bac1fb3ea2afa855cdcee6adc1e93a07a0aaf72d9a2a40b936eb63f2ae",
+      "source_message_id": null,
+      "text": "老板 七点半那桌杭麻无烟的 我七点能到 打到十点半 帮我留一个",
+      "sent_at": "2026-11-26T10:35:00+00:00"
+    },
+    {
+      "sequence": 114,
+      "trace_id": "trace_05e27c9c254164ca22b49b22",
+      "message_id": "outbound:trace_05e27c9c254164ca22b49b22:1",
+      "source_message_id": "customer:role-event:790c38bac1fb3ea2afa855cdcee6adc1e93a07a0aaf72d9a2a40b936eb63f2ae",
+      "text": "七点半那桌杭麻无烟的找到了，1～3元，现在就你一个，还缺三位。这桌现在还没约定打多久，可能到不了十点半。你要不要先按这桌来？",
+      "sent_at": "2026-11-26T10:35:00+00:00"
+    },
+    {
+      "sequence": 116,
+      "trace_id": "trace_d1361b86086e13ae25465674",
+      "message_id": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90",
+      "source_message_id": null,
+      "text": "行 就按这桌来 帮我留一个",
+      "sent_at": "2026-11-26T10:37:00+00:00"
+    },
+    {
+      "sequence": 118,
+      "trace_id": "trace_d1361b86086e13ae25465674",
+      "message_id": "outbound:trace_d1361b86086e13ae25465674:1",
+      "source_message_id": "customer:role-event:b2dc7be33f01c2b353b386b68e20f08956898679487884eda52f1480420b2b90",
+      "text": "这桌现在还没约打多久，可能到不了十点半，你要是能接受这个，我就先给你留着？",
+      "sent_at": "2026-11-26T10:37:00+00:00"
+    }
+  ],
+  "verified_inventory": {
+    "game_id": "game_8aef6bf1423b",
+    "planned_start_at": "2026-11-26T19:30:00+08:00",
+    "planned_end_at": "2026-11-26T22:00:00+08:00",
+    "max_duration_hours": 2.5,
+    "agreed_duration_hours": null,
+    "seat_summary": {
+      "claimed_seats": 1,
+      "remaining_seats": 3,
+      "seats_total": 4
+    },
+    "sole_occupied_seat_role": "0437",
+    "current_customer_seat_recorded": false,
+    "source_of_upper_limit": "0437 约 19:30 开始，明确最晚 22:00 离店。其排期上限为 2.5 小时。"
+  },
+  "independent_time_verifier": {
+    "decision": {
+      "accepted_stake_range": null,
+      "agreed_duration_hours": null,
+      "clock_role": "other",
+      "clock_roles": [
+        {
+          "clock_ref": 1,
+          "role": "other"
+        },
+        {
+          "clock_ref": 2,
+          "role": "arrival_by"
+        },
+        {
+          "clock_ref": 3,
+          "role": "play_until"
+        }
+      ],
+      "current_ref": 1,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "specific_table",
+      "max_duration_hours": null,
+      "opening_customer_ref": null,
+      "opening_dayparts": null,
+      "opening_window": null,
+      "personal_clocks_not_opening": [
+        "2026-11-26T19:00:00+08:00",
+        "2026-11-26T22:30:00+08:00"
+      ],
+      "supporting_customer_refs": [
+        1
+      ]
+    },
+    "response_source": {
+      "call_id": "llm_call_ff812774065c4dc3919c9331c4eb67c1",
+      "http_response_complete": true,
+      "raw_response_sha256": "2ecff41258f24907179170eaf571005f9655ff60938230fac9d7b5ce6770ea8c",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_fac808bf4fec4e2186ee9c2ee7b196fd",
+      "trace_id": "trace_05e27c9c254164ca22b49b22:table-availability:1"
+    }
+  },
+  "actual_customer_visible_reviews": [
+    {
+      "approved": false,
+      "violations": [
+        "unsupported_availability_claim"
+      ],
+      "reason": "待发文本准确核对了桌况、席位与时长差异，但承诺该桌约两个半小时、约十点结束，而时长证据显示同桌约定时长为 null，属于无证据的时长保证。",
+      "call_id": "llm_call_79295adb7b5a4a228797b6cff57f1e97",
+      "terminal_attempt_id": "llm_attempt_2bc270b23d724ba99bdecce2483d2475",
+      "completion_text_sha256": "f8c808b3527911c5dc1ced21d7aed18713a1cbf08f0114433663483fd1a901d1"
+    },
+    {
+      "approved": true,
+      "violations": [],
+      "reason": "待发文本与成功查询的桌况、档位、缺口一致，如实说明同桌时长未约定并询问是否按这桌来，无泄露或无依据承诺。",
+      "call_id": "llm_call_b6cd08fa63de41f290eba408dd585681",
+      "terminal_attempt_id": "llm_attempt_6edb1767f02941788256073dcd9782e6",
+      "completion_text_sha256": "e578ae64ffc5135535eed1810bdd1593f2b58e1048065715c29c7e961a2fda4a"
+    }
+  ],
+  "subsequent_join": {
+    "trace_id": "trace_d1361b86086e13ae25465674",
+    "called": false,
+    "allowed": false,
+    "error": "留位授权与当前桌况不一致或时长条件未确认。未占席。 按顾客原话说明待确认的条件，或向本人确认是否现在留位。"
+  },
+  "finding": "发前审查发现初稿把 2.5 小时排期上限冒充同桌约定，却忽略改稿保留的『现在就你一个』。实际上观测到的一席是 0437，本人 0151 未登记。后一轮本人接受先按这桌来仍有独立权限拒绝，该拒绝没有改写原局的席位。",
+  "regression": "将原实际送达文本送入同样的 SQLite 查桌与发前合同。核实原桌开场、玩法、烟况、档位及本人席位后才阻断错误归属。正确匿名桌况、真正同桌本人占席、不同桌属性、带条件或引述不被此确定性规则拒绝。"
+}

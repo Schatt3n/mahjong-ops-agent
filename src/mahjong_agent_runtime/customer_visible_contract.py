@@ -465,8 +465,12 @@ def customer_visible_seat_claim_violations(text: str, facts: list[dict[str, obje
 
 
 _CURRENT_OWN_SEAT_DECLARATION = re.compile(
-    r"(?:现在|目前)\s*(?:还是|只有|就(?:是)?)?\s*你\s*(?:[一1]个(?:人)?|[一1]位)\s*[,、]\s*"
+    r"(?:(?:现在|目前)\s*(?:还是|只有|就(?:是)?)?|只有|就(?:是)?)\s*你\s*(?:[一1]个(?:人)?|[一1]位)\s*[,、]\s*"
     r"(?:还|仍)?\s*(?:差|缺)\s*[一二两三123]\s*(?:个(?:人)?|位|人)(?=\s*[,。;!\n]|\s*$)"
+)
+_OWN_SEAT_LOOKUP_HEADING = re.compile(
+    rf"(?P<game_type>{_SEAT_GAME_LABEL})\s*(?P<smoke>无烟|有烟)?\s*的?\s*(?:查|找)到了\s*,\s*"
+    rf"(?:(?P<stake>{_SEAT_COUNTED_STAKE})\s*,\s*)?"
 )
 
 
@@ -483,6 +487,14 @@ def customer_visible_own_seat_violations(text: str, fact: dict[str, object] | No
             return []
     if content.startswith(("这桌", "那桌")):
         content = content[2:].lstrip()
+        if clock is not None and (heading := _OWN_SEAT_LOOKUP_HEADING.match(content)):
+            game_type, smoke, stake = heading.group("game_type", "smoke", "stake")
+            # 带明确桌况的陈述只沿用同一时间、玩法及已核实附文，不把另一张类似桌接进来。
+            if (_SEAT_GAME_TYPES.get(game_type) != _SEAT_GAME_TYPES.get(str(fact.get("game_type")))
+                    or (smoke and {"无烟": "no_smoking", "有烟": "smoking"}[smoke] != fact.get("smoke_preference"))
+                    or (stake and unicodedata.normalize("NFKC", str(fact.get("stake_label"))).strip() != stake.strip())):
+                return []
+            content = content[heading.end():]
     claim = _CURRENT_OWN_SEAT_DECLARATION.match(content)
     if not claim or re.match(r"\s*[,]\s*(?:对吗|是不是|还是|是吗|对不对)", content[claim.end():]):
         return []

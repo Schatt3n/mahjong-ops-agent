@@ -9,7 +9,7 @@ from ..models import DEFAULT_TZ, AgentAction, ConversationRole, ConversationTask
 from ..stores import AgentStore
 from .model_context import has_agreed_game_duration
 from .stake_values import parse_number
-from .value_utils import first_present_value
+from .value_utils import first_present_value, normalize_smoke_preference
 
 
 DELIVERED_GAME_OFFER = "delivered_game_offer"
@@ -153,9 +153,20 @@ def own_seat_fact_for_private_reply(
     if any(participant.customer_id == message.sender_id and participant.status in {"accepted", "arrived"}
            for participant in game.participants):
         return None  # 历史状态已记录参与，交给原有审查处理。
+    game_type = first_present_value(game.requirement, "game_type", "requested_game")
+    smoke = normalize_smoke_preference(game.requirement.get("smoke_preference"))
+    stake_label = game.requirement.get("stake_label")
+    lookup_terms = {}
+    if isinstance(game_type, str) and game_type:
+        lookup_terms["game_type"] = game_type
+        if smoke in {"no_smoking", "smoking"}:
+            lookup_terms["smoke_preference"] = smoke
+        if isinstance(stake_label, str):
+            lookup_terms["stake_label"] = stake_label
     return {
         "game_id": game.game_id,
         "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
+        **lookup_terms,
         "participation_already_recorded": any(message.sender_id in {claim["contact_id"], *claim["known_member_ids"]}
                                               for claim in game.seat_claims()),
     }

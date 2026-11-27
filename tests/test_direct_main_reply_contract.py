@@ -612,6 +612,60 @@ def test_own_seat_fact_uses_effective_write_and_preserves_other_reply_scopes(tmp
     store._connection.close()
 
 
+@pytest.mark.parametrize("already_participating", [False, True])
+def test_v8_known_table_heading_needs_actual_customer_seat_before_reply(tmp_path, already_participating):
+    """真实 V8 0151 草稿只有在本人确实占了本桌时，才可沿用「现在就你一个」。"""
+    stamp = datetime.fromisoformat("2026-11-26T18:35:00+08:00")
+    opening = "2026-11-26T19:30:00+08:00"
+    inbound = "老板 七点半那桌杭麻无烟的 我七点能到 打到十点半 帮我留一个"
+    wrong = "七点半那桌杭麻无烟的找到了，1～3元，现在就你一个，还缺三位。这桌现在还没约定打多久，可能到不了十点半。你要不要先按这桌来？"
+    corrected = wrong.replace("现在就你一个", "现在一个人")
+    store = SQLiteAgentStore(tmp_path / "v8-guest-seat.sqlite3")
+    organizer = "guest" if already_participating else "host"
+    with using_clock(lambda: stamp):
+        game, _ = store.create_game(conversation_id="host", organizer_id=organizer, organizer_name="顾客",
+            trace_id="seed", known_players=[], requirement={"game_type": "hangzhou_mahjong",
+                "start_time_kind": "scheduled", "planned_start_at": opening, "stake_range": {"min": 1, "max": 3},
+                "smoke_preference": "no_smoking", "max_duration_hours": 2.5})
+    main = StaticAgentClient([
+        _call("search_current_games", {"lookup_scope": "specific_table", "requirement": {
+            "game_type": "hangzhou_mahjong", "smoke_preference": "no_smoking", "start_time": "19:30",
+            "start_time_kind": "scheduled",
+        }}),
+        _reply(wrong, status="waiting_user"), _reply(corrected, status="waiting_user"),
+    ])
+    reviewer = StaticAgentClient([json.dumps({
+        "approved": True, "needs_human": False, "violations": [], "reasoning_summary": "离线控制放行",
+        "item_reviews": [{"item_id": "reply_to_user", "approved": True, "violations": [],
+                          "reasoning_summary": "离线控制放行", "suggested_safe_text": draft,
+                          "follow_up_commitments": []}],
+    }, ensure_ascii=False) for draft in (wrong, corrected)])
+    traces = InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=main, store=store, trace_recorder=traces,
+                           reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="v8-guest-seat", identities={"host": "牌友", "guest": "顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    with using_clock(lambda: stamp):
+        result = channel.send(MessageEnvelope("v8-0151", "guest", inbound, stamp, "private", AGENT_ID))
+    response = wrong if already_participating else corrected
+    assert result["final_reply"] == response
+    receipt, = result["archive_outputs"]
+    assert receipt["source_message_id"] == "v8-0151" and receipt["text"] == response
+    evidence = json.loads(reviewer.calls[0]["messages"][-1]["content"])["review_items"][0]["same_table_membership_evidence"]
+    assert evidence["game_id"] == game.game_id and evidence["participation_already_recorded"] is already_participating
+    assert [row["contact_id"] for row in store.require_game(game.game_id).seat_claims()] == [organizer]
+    rule = "customer_visible_contract:seat_claim.customer_membership_unverified"
+    feedback = [event.content["result"] for event in traces.get_trace(result["trace_id"])
+                if event.step == "tool_result" and rule in event.content.get("result", {}).get("violations", [])]
+    assert len(feedback) == (0 if already_participating else 1)
+    if feedback:
+        assert feedback[0]["same_table_membership_evidence"] == evidence
+        for unbound in (wrong.replace("杭麻", "川麻"), wrong.replace("七点半", "八点半"),
+                        wrong.replace("无烟", "有烟"), wrong.replace("1～3元", "5～6元"),
+                        wrong.replace("现在就你一个", "要是现在就你一个"), "「" + wrong + "」"):
+            assert not customer_visible_own_seat_violations(unbound, evidence)
+
+
 @pytest.mark.parametrize("mode", ["history_only", "missing_target", "existing_seat", "successful_write"])
 def test_reply_review_does_not_treat_unbound_or_superseded_denials_as_missing_seat(mode):
     """只用本轮正式拒绝和目标桌，旧拒绝不能压过真实报名或现有席位。"""

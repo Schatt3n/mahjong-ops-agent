@@ -264,6 +264,8 @@ class CustomerVisibleActionService:
         tool_evidence = list(context_payload.get("turn_tool_evidence") or context_payload.get("previous_tool_results") or [])
         offer = game_offer_for_review(self.store, message, action, tool_evidence)
         seat_facts = seat_facts_for_private_reply(self.store, message, tool_evidence)
+        own_seat = own_seat_fact_for_private_reply(self.store, message,
+            context_payload.get("active_game_visible_summaries") or [], tool_evidence, seat_facts)
         table_duration = table_duration_facts_for_private_reply(self.store, seat_facts)
         review_item = {
             "item_id": "reply_to_user",
@@ -275,6 +277,7 @@ class CustomerVisibleActionService:
             "action_evidence": external_action_evidence_from_tool_results(tool_evidence),
             **({"game_offer_candidate": offer} if offer else {}),
             **({"seat_claim_evidence": seat_facts} if seat_facts else {}),
+            **({"same_table_membership_evidence": own_seat} if own_seat else {}),
             **({"table_duration_fit_evidence": table_duration} if table_duration else {}),
         }
         stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
