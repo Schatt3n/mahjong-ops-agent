@@ -229,5 +229,13 @@
     ]
   },
   "durable_tasks_referencing_customer_message": 0,
-  "reply_assessment": "初判曾把「记下」理解成已承接，终稿保留「我记下了」并获通过。审查意见不一致。已送达原话没有提问，记作 waiting_user 也缺少明确待答项。应区分条件未确认、未实际发送代问和需要顾客答复。"
+  "reply_assessment": "初判曾把「记下」理解成已承接，终稿保留「我记下了」并获通过。审查意见不一致。已送达原话没有提问，记作 waiting_user 也缺少明确待答项。应区分条件未确认、未实际发送代问和需要顾客答复。",
+  "sandbox_fallback_validation": {
+    "implementation": "沙盒的规划及私聊审查分别核对向原桌代问和条件留位，允许在缺少对口代问路径时明说当轮还未代问、还未留位。没有待顾客回答的实质问题时结束本轮。",
+    "test_reply": "七点半那桌散场没定。你最多打到十一点，能不能搭还得确认。我还没帮你问这桌，也没给你留位。",
+    "test": "tests/simulation/test_venue_write_guard.py::test_v8_0146_unavailable_duration_inquiry_is_answered_without_wait_or_seat",
+    "offline_controls": "使用原来话、已送达的原提议和 SQLite 中同特征的两张桌。分别覆盖原桌联系人可私聊与不可私聊，检查真实的客户收据、状态 completed、未外发以及这两桌和原席位的完整状态。模型的规划和审查输出使用固定回包。",
+    "remaining_capability": "直接代问仍需新增独立授权、同桌绑定、收件资格及安静时段判断、幂等送达和负责人明确答复的回告。",
+    "real_model_replay": "pending"
+  }
 }

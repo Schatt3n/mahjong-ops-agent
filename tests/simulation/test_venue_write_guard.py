@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 import json
+from pathlib import Path
 from threading import Event
 from unittest.mock import Mock
 
@@ -613,6 +614,76 @@ def test_v7_0402_opening_clarification_uses_delivered_delegation_and_actual_scop
         assert not store.games and not store.invite_drafts and not store.room_reservations
         assert "create_game" not in {spec["name"] for spec in read_main_agent_system_contract(
             main.calls[2]["messages"][0])["available_tools"]}
+    store._connection.close()
+
+
+@pytest.mark.parametrize("host_contactable", [True, False])
+def test_v8_0146_unavailable_duration_inquiry_is_answered_without_wait_or_seat(tmp_path, host_contactable):
+    """真实原桌和明确委托保留，沙盒缺能力时只告知本轮没发、没留位。"""
+    evidence_dir = Path(__file__).resolve().parents[2] / "docs/venue_simulation_evidence"
+    path = evidence_dir / "2026-11-27-v8-0146-table-duration-inquiry.json"
+    case = json.loads(path.read_text(encoding="utf-8"))
+    first, offer, request = case["conversation"]
+    first_at = datetime.fromisoformat(first["sent_at"])
+    request_at = datetime.fromisoformat(case["delivered_reply"]["ledger_sent_at"])
+    opening = case["inventory"]["later_lookup_candidates"][0]["planned_start_at"]
+    requirement = case["inventory"]["executed_filters"]
+    reply = "七点半那桌散场没定。你最多打到十一点，能不能搭还得确认。我还没帮你问这桌，也没给你留位。"
+    lookup = _call("search_current_games", {"lookup_scope": "specific_table", "requirement": requirement})
+    main = StaticAgentClient([lookup, _reply(offer["text"], status="waiting_user"), lookup, _reply(reply)])
+    review = StaticAgentClient([json.dumps({
+        "approved": True, "needs_human": False, "violations": [], "reasoning_summary": "原桌与实际执行状态可核对",
+        "item_reviews": [{"item_id": "reply_to_user", "approved": True, "violations": [],
+                          "reasoning_summary": "没有把未完成的询问说成已安排", "suggested_safe_text": draft,
+                          "follow_up_commitments": []}],
+    }, ensure_ascii=False) for draft in (offer["text"], reply)])
+    store = SQLiteAgentStore(tmp_path / "duration.sqlite3")
+    write_authorizer = StubAuthorizationClient(case["preflight"]["raw"])
+    guard = VenueWriteGuard(write_authorizer, tmp_path / "write-audit.jsonl")
+    runtime = AgentRuntime(llm_client=main, store=store, tool_gateway=guard.guarded_gateway(store),
+                           reply_self_review_enabled=True, reply_self_review_client=review)
+    configure_venue_preflight_prompts(runtime, tmp_path, guard)
+    channel = SandboxChannel(runtime, room_id="duration-inquiry",
+        identities={CUSTOMER: "顾客", "host": "原桌联系人", "other": "另一桌联系人"},
+        owner_friend_ids={CUSTOMER, "host"} if host_contactable else {CUSTOMER},
+        archive_path=tmp_path / "messages.sqlite3", write_guard=guard, show_verified_write_scope=True)
+    assert ("host" in channel.owner_friends) is host_contactable
+    with using_clock(lambda: first_at):
+        original, _ = store.create_game(conversation_id=channel.private_conversation_id("host"),
+            organizer_id="host", organizer_name="原桌联系人", known_players=[], trace_id="original",
+            requirement={**requirement, "start_time_kind": "scheduled", "planned_start_at": opening})
+        other, _ = store.create_game(conversation_id=channel.private_conversation_id("other"),
+            organizer_id="other", organizer_name="另一桌联系人", known_players=[], trace_id="other",
+            requirement={**requirement, "start_time_kind": "asap_when_full", "duration_hours": 3})
+        first_result = channel.send(MessageEnvelope(first["message_id"], CUSTOMER, first["text"], first_at, "private", AGENT_ID))
+    assert first_result["final_reply"] == offer["text"]
+    inspections = {key: game.to_dict() for key, game in store.games.items()}
+    tasks_before = set(store.scheduled_tasks)
+    with using_clock(lambda: request_at):
+        response = channel.send(MessageEnvelope(request["message_id"], CUSTOMER, request["text"], request_at, "private", AGENT_ID))
+
+    actual_query = next(tool for tool in response["tool_results"] if tool["name"] == "search_current_games")
+    assert actual_query["called"] and actual_query["allowed"]
+    options = {row["game"]["game_id"]: row["game"] for row in actual_query["result"]["matches"]}
+    assert set(options) == {original.game_id, other.game_id}
+    assert options[original.game_id]["planned_start_at"] == opening and options[other.game_id]["planned_start_at"] is None
+    assert "duration_hours" not in original.requirement and original.remaining_seats() == 3
+    assert write_authorizer.calls[-1]["history"][-1]["text"] == offer["text"]
+    main_prompt = main.calls[-1]["messages"][0]["content"]
+    review_prompt = review.calls[-1]["messages"][0]["content"]
+    assert "代问尚未发出、席位尚未保留" in main_prompt
+    assert "本轮缺少对口的代问路径或相应执行确实受阻" in review_prompt
+    assert "条件齐全且有可执行的对口工具时" in review_prompt
+    boundary = json.loads(review_prompt.split("sandbox_private_write_preflight = ", 1)[1])
+    assert boundary == {"status": "no_permission", "verified_scopes": []}
+    assert response["status"] == "completed"
+    assert all(tool["name"] != "join_game" for tool in response["tool_results"])
+    delivered, = response["archive_outputs"]
+    assert (delivered["text"], delivered["recipient_id"], delivered["source_message_id"]) == (reply, CUSTOMER, request["message_id"])
+    assert {key: game.to_dict() for key, game in store.games.items()} == inspections
+    assert set(store.scheduled_tasks) == tasks_before
+    assert not store.invite_drafts and not store.outbound_message_drafts and not store.room_reservations
+    assert channel.events_for("host") == [] and channel.events_for("other") == []
     store._connection.close()
 
 
