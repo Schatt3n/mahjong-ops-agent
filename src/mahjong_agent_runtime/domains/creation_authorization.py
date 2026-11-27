@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -10,6 +11,7 @@ from time import monotonic
 from typing import Any
 
 from ..group_chat.parsing import parse_explicit_need
+from ..knowledge import default_terminology_repository
 from ..llm import AgentLLMClient, completion_diagnostics, model_response_source
 from ..models import ConversationRole, ConversationTurn, ToolCall, ToolResult, UserMessage
 from ..stores import AgentStore
@@ -41,6 +43,21 @@ _FLEXIBLE_OPENING_PREVIEW = (
     "planned_start_at 仍为 null 时，还需要同桌协商实际开场。根据本人原话核对是否授权先登记这张待组局，以及其他限制是否都被满足。"
 )
 
+_GAMEPLAY_CHOICE_PROMPT = (
+    "若没有本人明确玩法、可靠唯一画像或被本人接受的同玩法提议，写入还需要本人明确同意由店家选玩法。"
+    "仅缺玩法证据时，保留原话已核实的组局委托判定，由后端反馈这一缺项。其他执行条件仍按原合同核对。"
+    "用 shop_offer_ref 核对玩法时，提议本身须明确要组这个玩法，并由本轮本人接受。只在聊天中提到某种玩法或泛问要不要帮组，不能凭提议推断玩法。"
+    "仅在顾客原话确实把玩法交店家定或明确接受任何玩法时，额外返回 "
+    '{"gameplay_choice":{"customer_ref":对应本人记录编号,"quote":"完整原话分句"}} 中的 gameplay_choice 字段。'
+    "例如『玩法你定』或『打什么都行』。仅说组一桌、能凑就行、时间都可以，均不证明玩法由店家选。"
+    "引用应包含完整分句中对玩法的指向和同意，保留实际否定、疑问或条件，不得只摘局部。其他来源可保持原 JSON 字段。"
+)
+
+CREATION_GAMEPLAY_UNCONFIRMED = "gameplay_unconfirmed"
+_GAMEPLAY_CHOICE_TOPIC = re.compile(r"玩法|(?:打|玩)(?:什么|哪[种类])|(?:什么|哪[种类])麻将")
+_GAMEPLAY_CHOICE_VALUE = re.compile(r"你(?:来|帮我|看着)?(?:定|选|决定)|都(?:行|可以|接受)|不限|随便")
+_GAMEPLAY_CHOICE_RESTRICTION = re.compile(r"(?:不要|不行|不可以|不是|不同意|不能|不想|别|先不|要是|如果|假如)")
+
 _TERMS = (
     "game_type", "requested_game", "game_variant", "stake", "base_stake", "stake_range", "duration_kind",
     "duration_hours", "min_duration_hours", "max_duration_hours", "start_time",
@@ -52,21 +69,25 @@ class _ReversedOfferReference(ValueError):
     """引用都真实可见但顺序错误，允许模型以原权责范围重新核对一次。"""
 
 
-def delegated_private_creation_needs_gameplay(
-    call: ToolCall, message: UserMessage, scope: str | None, *, explored_game_types: tuple[str, ...] = (),
-) -> bool:
-    """已核准本人私聊委托仍须有具体玩法，群话题、系统和直接存储入口各走原合同。"""
+def _ordinary_private_creation(call: ToolCall, message: UserMessage) -> bool:
+    """限定本人普通私聊建桌，排除群话题和系统接续等独立入口。"""
     metadata = message.metadata or {}
-    if (scope != "create" or call.arguments.get("organizer_id") != message.sender_id
-            or not ordinary_private_message(message) or metadata.get("source") == "group_private_continuation"
-            or metadata.get("group_topic_source") or metadata.get("input_source") == "system_trigger"):
+    return (call.arguments.get("organizer_id") == message.sender_id and ordinary_private_message(message)
+            and metadata.get("source") != "group_private_continuation" and not metadata.get("group_topic_source")
+            and metadata.get("input_source") != "system_trigger")
+
+
+def delegated_private_creation_needs_gameplay(call: ToolCall, message: UserMessage, scope: str | None) -> bool:
+    """已核准本人私聊委托仍须有具体玩法及核实来源。"""
+    if scope == CREATION_GAMEPLAY_UNCONFIRMED:
+        return True
+    if scope != "create" or not _ordinary_private_creation(call, message):
         return False
     requirement = call.arguments.get("requirement")
     if not isinstance(requirement, dict):
         return False
     game_type = first_present_value(requirement, "game_type", "requested_game")
-    return (not isinstance(game_type, str) or game_type.strip().casefold() in {"", "any", "unknown"}
-            or game_type in explored_game_types)
+    return not isinstance(game_type, str) or game_type.strip().casefold() in {"", "any", "unknown"}
 
 
 def customer_authorization_evidence(
@@ -117,7 +138,7 @@ def _parse_decision(raw: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
         return value
 
     parsed = json.loads(raw, object_pairs_hook=unique_fields)
-    if not isinstance(parsed, dict) or parsed.keys() != {"scope", "customer_ref", "shop_offer_ref"}:
+    if not isinstance(parsed, dict) or parsed.keys() - {"gameplay_choice"} != {"scope", "customer_ref", "shop_offer_ref"}:
         raise ValueError("invalid creation authorization schema")
     scope, customer_ref, offer_ref = (parsed[key] for key in ("scope", "customer_ref", "shop_offer_ref"))
     if scope not in ("create", "inquire", "unconfirmed"):
@@ -134,6 +155,56 @@ def _parse_decision(raw: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
     if scope == "create" and customer_ref is None:
         raise ValueError("creation requires explicit customer evidence")
     return parsed
+
+
+def _gameplay_choice_source(decision: dict, evidence: list[dict]) -> int | None:
+    """独立判定愿意交店家选时，核对本人关于玩法的完整同意分句。"""
+    choice = decision.get("gameplay_choice")
+    if not isinstance(choice, dict) or choice.keys() != {"customer_ref", "quote"}:
+        return None
+    customer_ref, quote = choice["customer_ref"], choice["quote"]
+    if type(customer_ref) is not int or not isinstance(quote, str) or not quote.strip():
+        return None
+    source = next((row["text"] for row in evidence if row["ref"] == customer_ref and row["speaker"] == "customer"), None)
+    if source is None or quote not in source:
+        return None
+    clause = quote.strip().rstrip("，,。；;！!？?")
+    if (clause not in {text.strip() for text in re.split(r"[，,。；;！!？?\n]", source)}
+            or not _GAMEPLAY_CHOICE_TOPIC.search(clause) or not _GAMEPLAY_CHOICE_VALUE.search(clause)
+            or _GAMEPLAY_CHOICE_RESTRICTION.search(clause)):
+        return None
+    return customer_ref
+
+
+def _creation_gameplay_source(
+    game_type: str, evidence: list[dict], decision: dict, *, profile_game: str | None,
+) -> dict[str, Any] | None:
+    """本次授权可引用本人、同收件人的有效提议或可靠画像，库存与模型提案不补事实。"""
+    terminology = default_terminology_repository()
+
+    def stated_types(text: str) -> set[str]:
+        """沿用门店认定的稳定玩法词，保留顾客也可能直接使用的规范标识。"""
+        result = {item.term.canonical["requested_game"] for item in terminology.relevant_terms(
+            [text], categories={"game_type", "game_variant"},
+        ) if item.term.canonical.get("requested_game")}
+        if game_type in text.casefold().split():
+            result.add(game_type)
+        return result
+
+    current = evidence[-1] if evidence and evidence[-1].get("current") is True else None
+    current_types = stated_types(current["text"]) if current else set()
+    if current_types:
+        return {"source": "customer", "ref": current["ref"]} if game_type in current_types else None
+    offer_ref = decision.get("shop_offer_ref")
+    offer = next((row for row in evidence if row["ref"] == offer_ref and row["speaker"] == "shop"), None)
+    if offer and stated_types(offer["text"]) == {game_type}:
+        return {"source": "accepted_delivered_offer", "ref": offer_ref}
+    if (ref := _gameplay_choice_source(decision, evidence)) is not None:
+        return {"source": "customer_delegated_gameplay_choice", "ref": ref}
+    for row in reversed(evidence):
+        if row["speaker"] == "customer" and (earlier_types := stated_types(row["text"])):
+            return {"source": "customer", "ref": row["ref"]} if game_type in earlier_types else None
+    return {"source": "unique_customer_profile"} if profile_game == game_type else None
 
 
 def creation_clock_conflict(store: AgentStore, call: ToolCall, message: UserMessage) -> dict[str, Any] | None:
@@ -179,6 +250,7 @@ def check_creation_authorization(
     store: AgentStore, client: AgentLLMClient, call: ToolCall, message: UserMessage, *,
     trace_id: str, step_index: int, timeout_seconds: float, trace_recorder: Any,
     observed_tool_results: list[ToolResult] | None = None,
+    require_gameplay_evidence: bool = False,
 ) -> str:
     """独立审核建局范围，重复提交同一范围复用同一判定，解析或传输失败不给权限。"""
     if conflict := creation_clock_conflict(store, call, message):
@@ -231,6 +303,20 @@ def check_creation_authorization(
     usual = store.completed_game_preference(message.sender_id) if customer is not None else None
     if usual is not None and attendance_preference_agrees(customer, usual):
         payload["attendance_preference"] = usual
+    game_type = first_present_value(requirement, "game_type", "requested_game")
+    verify_gameplay = (require_gameplay_evidence and _ordinary_private_creation(call, message)
+        and isinstance(game_type, str) and any(term.canonical.get("requested_game") == game_type
+                                               for term in default_terminology_repository().terms))
+    profile_game = None
+    if verify_gameplay:
+        preferences = set(customer.preferred_games) if customer else set()
+        if len(preferences) == 1:
+            profile_value = next(iter(preferences))
+            profile_game = parse_explicit_need(profile_value).get("requested_game", profile_value)
+        else:
+            profile_game = (payload.get("attendance_preference") or {}).get("game_type")
+        payload["gameplay_evidence_required"] = True
+        payload["profile_game_type"] = profile_game
     input_text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = sha256(input_text.encode()).hexdigest()
     scope_key = json.dumps([message.conversation_id, message.sender_id, message.message_id, digest], ensure_ascii=False)
@@ -238,7 +324,7 @@ def check_creation_authorization(
     cached = store.idempotent_result(key)
     if cached is not None:
         trace_recorder.record(trace_id, "creation_authorization_reused", cached.result)
-        return str(cached.result["decision"]["scope"])
+        return str(cached.result.get("effective_scope") or cached.result["decision"]["scope"])
 
     deadline = monotonic() + timeout_seconds
     for attempt in (1, 2):
@@ -248,6 +334,8 @@ def check_creation_authorization(
         prompt = _PROMPT if attempt == 1 else _PROMPT + "\n" + _REFERENCE_REPAIR_PROMPT
         if OPENING_NOT_BEFORE in requirement:
             prompt += "\n" + _FLEXIBLE_OPENING_PREVIEW
+        if verify_gameplay:
+            prompt += "\n" + _GAMEPLAY_CHOICE_PROMPT
         messages = [{"role": "system", "content": prompt}, {"role": "user", "content": input_text}]
         source_trace = f"{trace_id}:creation:{step_index}:{attempt}"
         trace_recorder.record(trace_id, "creation_authorization_prompt",
@@ -271,8 +359,12 @@ def check_creation_authorization(
             if attempt == 1 and isinstance(exc, _ReversedOfferReference):
                 continue
             break
+        if verify_gameplay and result["decision"]["scope"] == "create":
+            result["gameplay_source"] = _creation_gameplay_source(game_type, evidence, result["decision"], profile_game=profile_game)
+            if result["gameplay_source"] is None:
+                result["effective_scope"] = CREATION_GAMEPLAY_UNCONFIRMED
         trace_recorder.record(trace_id, "creation_authorization_result", result)
         # 正负有效判定都记录，防止同一授权问题反复发请求直到模型偶然放行。
         store.remember_result(key, ToolResult(name="creation_authorization", called=True, allowed=True, result=result))
-        return str(result["decision"]["scope"])
+        return str(result.get("effective_scope") or result["decision"]["scope"])
     return "unconfirmed"

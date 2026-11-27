@@ -484,7 +484,7 @@ class ToolExecutionService:
             creation_scope = check_creation_authorization(
                 self.store, self.creation_authorization_client, call, message, trace_id=trace_id,
                 step_index=step_index * 100 + call_index, timeout_seconds=self.creation_authorization_timeout_seconds,
-                trace_recorder=self.trace_recorder, observed_tool_results=observed_results,
+                trace_recorder=self.trace_recorder, observed_tool_results=observed_results, require_gameplay_evidence=True,
             )
         participation_scope = departure_deadline = None
         if (tool_confirms_seat(call)
@@ -506,9 +506,7 @@ class ToolExecutionService:
             if stale_result is not None:
                 stale_result.call_id = call_id
                 return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
-            explored_game_types = tuple(item.result["exploratory_game_type"] for item in observed_results
-                                        if item.name == "search_current_games" and item.result.get("exploratory_game_type"))
-            if delegated_private_creation_needs_gameplay(call, message, creation_scope, explored_game_types=explored_game_types):
+            if delegated_private_creation_needs_gameplay(call, message, creation_scope):
                 error = "已核实顾客委托组局，但缺少这桌的具体玩法。"
                 result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
                     "validation_error": {"code": "create_game_gameplay_required", "message": error},

@@ -243,6 +243,86 @@ def test_v6_ordinary_private_delegation_waits_for_gameplay_before_creating(tmp_p
     assert game.remaining_seats() == 3
 
 
+@pytest.mark.parametrize(("case", "expected_source"), [
+    ("generic_offer", None),
+    ("own_current_gameplay", "customer"),
+    ("own_prior_gameplay", "customer"),
+    ("unique_profile", "unique_customer_profile"),
+    ("accepted_delivered_offer", "accepted_delivered_offer"),
+    ("undelivered_offer", None),
+    ("foreign_gameplay", None),
+    ("conflicting_current_gameplay", None),
+    ("delegates_choice", "customer_delegated_gameplay_choice"),
+    ("accepts_any_gameplay", "customer_delegated_gameplay_choice"),
+    ("forged_choice", None),
+    ("clipped_negation", None),
+    ("delegates_only_time", None),
+])
+def test_v9_direct_delegation_requires_gameplay_provenance(tmp_path, case, expected_source):
+    """冻结直接建桌的真实来话和授权，合法玩法来源与模型提案分别验收。"""
+    evidence = Path(__file__).resolve().parents[1] / "docs/venue_simulation_evidence"
+    archive = json.loads((evidence / "2026-11-27-v9-0146-direct-creation-gameplay.json").read_text(encoding="utf-8"))
+    first, delivered, current = archive["ledger"][:3]
+    at = datetime.fromisoformat(archive["business_time"])
+    earlier = at - timedelta(minutes=2)
+    store, trace = SQLiteAgentStore(tmp_path / "direct-gameplay.sqlite3"), InMemoryTraceRecorder()
+    topic, _ = store.activate_task_context(conversation_id="dm", customer_id="guest", trace_id="fixture", activity_at=earlier,
+        started_at=earlier, reason="回放", force_new=True, archive_previous=False)
+    earlier_text = first["text"] + ("，红中麻将。" if case == "own_prior_gameplay" else "")
+    modifiers = {
+        "own_current_gameplay": "打红中", "conflicting_current_gameplay": "打杭麻", "delegates_choice": "玩法你定",
+        "accepts_any_gameplay": "打什么都行", "clipped_negation": "别说玩法你定", "delegates_only_time": "开场时间你定",
+    }
+    body = current["text"] + (f"，{modifiers[case]}。" if case in modifiers else "")
+    message = UserMessage("dm", "guest", "顾客", body, current["message_id"], at)
+    decision = dict(archive["creation_authorizer"]["decision"])
+    choices = {"delegates_choice": "玩法你定", "accepts_any_gameplay": "打什么都行", "forged_choice": "玩法你定",
+               "clipped_negation": "玩法你定", "delegates_only_time": "开场时间你定"}
+    if case in choices:
+        decision["gameplay_choice"] = {"customer_ref": 3, "quote": choices[case]}
+    client = Client([decision])
+    service = ToolExecutionService(store, ToolGateway(store, trace_recorder=trace), trace, creation_authorization_client=client)
+    proposal = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", **archive["proposal"]})
+    offer = ("要不要我帮你组一桌0.5块底红中麻将？" if case == "accepted_delivered_offer" else delivered["text"])
+    with using_clock(lambda: earlier):
+        store.append_user_turn(UserMessage("dm", "guest", "顾客", earlier_text, first["message_id"], earlier), "first")
+        store.append_assistant_turn("dm", offer, "delivered",
+            metadata={"delivery_status": "delivered", "task_context_id": topic.task_context_id})
+        if case == "undelivered_offer":
+            store.append_assistant_turn("dm", "要不帮你组一桌红中？", "pending",
+                metadata={"delivery_status": "pending_operator_send", "task_context_id": topic.task_context_id})
+        if case == "foreign_gameplay":
+            store.append_user_turn(UserMessage("dm", "another-customer", "他人", "我要打红中", "foreign", earlier), "foreign")
+    with using_clock(lambda: at):
+        if case in {"unique_profile", "conflicting_current_gameplay"}:
+            store.upsert_customer(CustomerProfile("guest", "顾客", preferred_games=["red_center_mahjong"]))
+        store.append_user_turn(message, "current")
+        action = AgentAction("按本人委托组桌", "needs_tool", "核对本轮玩法", tool_calls=[proposal])
+        result, = service.execute_tool_calls(action,
+            message=message, trace_id="direct", step_index=1, previous_step_tool_results=[], run_id="direct-run",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        if case == "generic_offer":
+            repeated, = service.execute_tool_calls(action,
+                message=message, trace_id="direct", step_index=2, previous_step_tool_results=[result], run_id="direct-run",
+                run_version=store.conversation_version(message.conversation_id)).tool_results
+            assert not repeated.called and repeated.result == result.result
+    allowed = expected_source is not None
+    assert result.called is result.allowed is allowed, result.error
+    authorization, = [event.content for event in trace.events if event.step == "creation_authorization_result"]
+    assert authorization["decision"] == decision
+    assert len(client.calls) == 1 and "gameplay_choice" in client.calls[0][0]["content"]
+    if allowed:
+        game, = store.games.values()
+        assert game.requirement["game_type"] == "red_center_mahjong" and game.remaining_seats() == 3
+        assert authorization["gameplay_source"]["source"] == expected_source
+    else:
+        assert not store.games and not store.scheduled_tasks
+        assert not any(event.step == "tool_gateway_received" for event in trace.events)
+        assert result.result["validation_error"]["code"] == "create_game_gameplay_required"
+    assert not store.invite_drafts and not store.outbound_message_drafts
+    store._connection.close()
+
+
 @pytest.mark.parametrize(("gameplay", "source", "scope", "blocked"), [
     ({}, {}, "create", True),
     ({"game_type": "  "}, {}, "create", True),

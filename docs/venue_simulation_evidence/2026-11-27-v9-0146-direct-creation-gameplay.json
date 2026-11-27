@@ -1,0 +1,185 @@
+{
+  "source_run": "2026-11-25-real-7cd18c8d46",
+  "trace_id": "trace_31936c956ccd2c87a6842531",
+  "customer_role": "0146",
+  "business_time": "2026-11-25T19:02:00+08:00",
+  "ledger": [
+    {
+      "sequence": 20,
+      "message_id": "customer:role-event:7ee27bbbfdbdcb38550f344dd5b4f848c5fdceca6c08f1acc7dd25edbf7ff51a",
+      "direction": "inbound",
+      "text": "现在有合适的桌吗 0.5块底的 我能打到十一点",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_bc90e807a2514d85d19c9592"
+    },
+    {
+      "sequence": 22,
+      "message_id": "outbound:trace_bc90e807a2514d85d19c9592:1",
+      "direction": "outbound",
+      "text": "现在没有能搭的0.5块底桌诶，要不我帮你组一桌？",
+      "sent_at": "2026-11-25T11:00:00+00:00",
+      "source_message_id": "customer:role-event:7ee27bbbfdbdcb38550f344dd5b4f848c5fdceca6c08f1acc7dd25edbf7ff51a",
+      "trace_id": "trace_bc90e807a2514d85d19c9592"
+    },
+    {
+      "sequence": 50,
+      "message_id": "customer:role-event:de962f67354fb13f5cb5a2a4342f8cd7d6794dab9ff908fdce8b1811051e1236",
+      "direction": "inbound",
+      "text": "组一桌吧 0.5块底 我能打到十一点",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_31936c956ccd2c87a6842531"
+    },
+    {
+      "sequence": 51,
+      "message_id": "outbound:trace_31936c956ccd2c87a6842531:1",
+      "direction": "outbound",
+      "text": "好，0.5 块底红中这桌给你记上了，现在你一个，还差三位。等凑齐人再商量几点开，能打到十一点我记着了。",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": "customer:role-event:de962f67354fb13f5cb5a2a4342f8cd7d6794dab9ff908fdce8b1811051e1236",
+      "trace_id": "trace_31936c956ccd2c87a6842531"
+    },
+    {
+      "sequence": 58,
+      "message_id": "outbound:board:board_snapshot_5e1454a493b401ba4eb70338290684cf",
+      "direction": "outbound",
+      "text": "5、人齐开 红中 0.5 烟况待定 173",
+      "sent_at": "2026-11-25T11:02:00+00:00",
+      "source_message_id": null,
+      "trace_id": "trace_scheduled_e50d88d01c50"
+    }
+  ],
+  "verified_availability": {
+    "decision": {
+      "accepted_stake_range": {
+        "max": 0.5,
+        "min": 0.5
+      },
+      "agreed_duration_hours": null,
+      "clock_role": "play_until",
+      "current_ref": 3,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "personal",
+      "max_duration_hours": null,
+      "opening_customer_ref": null,
+      "opening_dayparts": null,
+      "opening_window": null,
+      "play_until_at": "2026-11-25T23:00:00+08:00",
+      "supporting_customer_refs": [
+        1,
+        3
+      ]
+    },
+    "raw": {
+      "clock_role": "play_until",
+      "lookup_scope": "personal",
+      "opening_window": null,
+      "opening_dayparts": null,
+      "accepted_stake_range": {
+        "min": 0.5,
+        "max": 0.5
+      },
+      "known_cap_score": null,
+      "max_duration_hours": null,
+      "agreed_duration_hours": null,
+      "has_fixed_opening_authority": false,
+      "opening_customer_ref": null,
+      "current_ref": 3,
+      "supporting_customer_refs": [
+        1,
+        3
+      ],
+      "prior_play_until": {
+        "customer_ref": 1,
+        "clock_ref": 1
+      }
+    },
+    "response_source": {
+      "call_id": "llm_call_391246b7eefa469a9d88be207657fa49",
+      "http_response_complete": true,
+      "raw_response_sha256": "6eeab1d332425565e540f13477dd7cd57249db808bbf869a696b9c5d12f3b9fa",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_59e9dda1655e45dca7aeec98add23707",
+      "trace_id": "trace_31936c956ccd2c87a6842531:table-availability:1"
+    }
+  },
+  "creation_authorizer": {
+    "conversation": [
+      {
+        "ref": 1,
+        "speaker": "customer",
+        "text": "现在有合适的桌吗 0.5块底的 我能打到十一点"
+      },
+      {
+        "ref": 2,
+        "speaker": "shop",
+        "text": "现在没有能搭的0.5块底桌诶，要不我帮你组一桌？"
+      },
+      {
+        "current": true,
+        "ref": 3,
+        "speaker": "customer",
+        "text": "组一桌吧 0.5块底 我能打到十一点"
+      }
+    ],
+    "decision": {
+      "customer_ref": 3,
+      "scope": "create",
+      "shop_offer_ref": 2
+    },
+    "response_source": {
+      "call_id": "llm_call_061e39e2ff474733ba7468d4ab6254e9",
+      "http_response_complete": true,
+      "raw_response_sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 101,
+      "terminal_attempt_id": "llm_attempt_73b7d76e166043129d2a404b3667f9f5",
+      "trace_id": "trace_31936c956ccd2c87a6842531:creation:101:1"
+    },
+    "had_same_turn_search": false
+  },
+  "proposal": {
+    "requirement": {
+      "game_type": "red_center_mahjong",
+      "stake": 0.5,
+      "stake_label": "0.5",
+      "start_time_kind": "asap_when_full"
+    }
+  },
+  "actual_write": {
+    "game_id": "game_ac8b7674ab34",
+    "called": true,
+    "allowed": true,
+    "status": "forming",
+    "remaining_seats": 3,
+    "terms": {
+      "game_type": "red_center_mahjong",
+      "stake": "0.5",
+      "start_time_kind": "asap_when_full"
+    }
+  },
+  "actual_reply_status": "completed",
+  "board_delivery": {
+    "snapshot_id": "board_snapshot_5e1454a493b401ba4eb70338290684cf",
+    "sequence": 58,
+    "item": {
+      "game_id": "game_ac8b7674ab34",
+      "item_no": 5,
+      "rendered_text": "5、人齐开 红中 0.5 烟况待定 173"
+    }
+  },
+  "diagnosis": "当事人明确委托组一桌，并补充底注和能打到的时间。三条有效授权来源没有确定玩法，店家实际送达的提议只说帮组。独立授权回包确认了组织委托但没有玩法选择证据。第一步未查其他现成桌就写入红中新局，之后本局实际登上群看板。",
+  "guard": "本人普通私聊的已知玩法建桌，在独立确认范围后另核对本人同任务原话、可靠唯一画像，或明确接受的有具体玩法且确实送达的提议。本人明确授权店家选玩法时，独立审查另附同一客户完整原话分句，后端核对其出处和玩法范围。只同意组桌或让店家定时间不会补玩法。",
+  "offline_test": "tests/test_creation_authorization.py::test_v9_direct_delegation_requires_gameplay_provenance",
+  "offline_controls": "复用真实授权和这两轮文本，检查原提案与其重复提交未进入网关。本人已说明玩法、本人先前同任务说明、唯一画像、已送达并确认的具体提议，以及本人在分句中明确交店家选或接受任意玩法，均能在 SQLite 正常登记。未送达提议、别人的来话、与本轮明确玩法冲突、伪造或截去否定的引用、只委托定时间均拒绝。",
+  "offline_cases_passed": 13,
+  "related_tests_passed": 575,
+  "real_replay": "pending"
+}
