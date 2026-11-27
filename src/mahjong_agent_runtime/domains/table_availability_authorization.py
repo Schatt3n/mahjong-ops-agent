@@ -78,6 +78,13 @@ _TONIGHT_INVENTORY_SOURCE = re.compile(
 _CONTRASTING_DAYPART_TEXT = re.compile(r"早上|上午|下午|凌晨|(?<![a-z])[ap]\.?\s*m\.?(?![a-z])", re.IGNORECASE)
 _LATER_DATE_TEXT = re.compile(r"次日|翌日|明日|隔天|第二天|过了?午夜|午夜(?:以?后|过后)")
 _CLAUSE_SEPARATOR = re.compile(r"[,，。；;！!？?\n]")
+_EVENING_ARRIVAL_BEFORE_DEPARTURE = re.compile(
+    r"(?:^|[\s,，。；;！!？?])(?:我(?:们)?\s*)?(?:今天\s*)?(?:傍晚|今晚|晚间|晚上)"
+    r"\s*(?:我(?:们)?\s*)?(?:会|能|才|再|可以)?\s*(?:过来|到店|到场|来店)"
+    r"[\s,，;；]*(?:但(?:是)?|不过)?\s*(?:我(?:们)?\s*)?"
+    r"(?:最多|最晚|只能)\s*(?:只能|能|可以)?\s*(?:打|玩|待|坐)?\s*(?:到|至)\s*$"
+)
+_UNCERTAIN_ARRIVAL_PREFIX = re.compile(r"(?:不|不是|不会|别|可能|如果|假如|要是|万一|除非)$")
 _NAMED_OPENING_CUE = re.compile(
     rf"(?P<part>{'|'.join(_NAMED_OPENING_PARTS)})(?![ \t]*好)[ \t]*"
     r"(?=(?:都|也)行[吧呀呢吗]?(?=[ \t]|$)|(?:都|也)?(?:行|可以)[吧呀呢吗]?[ \t]*$"
@@ -120,7 +127,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 13
+_DECISION_NORMALIZATION_VERSION = 14
 _DURATION_NUMBER_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)"
 _DURATION_UNIT_TEXT = r"\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_HOURS_TEXT = _DURATION_NUMBER_TEXT + _DURATION_UNIT_TEXT
@@ -489,6 +496,27 @@ def _resolve_arrival_scoped_departure(
     return _resolve_evening_departure(departure, at, (floor, day_end))
 
 
+def _resolve_departure_after_evening_arrival(
+    departure: dict[str, Any], at: datetime, *, text: str, local_at: datetime,
+) -> datetime:
+    """明确的晚间到店分句只给随后的离店钟点消歧，不产生到店钟点或开场范围。"""
+    if (departure.get("qualifier") is not None
+            or at.date() != local_at.date() or _lexical_dates(text, local_at.date()) - {local_at.date()}
+            or _CONTRASTING_DAYPART_TEXT.search(text) or _LATER_DATE_TEXT.search(text)):
+        return at
+    normalized = unicodedata.normalize("NFKC", text)
+    observations = observe_clock_candidates(_source_clock_text(text), anchor=local_at, include_source_spans=True)
+    if len(observations) != 1:
+        return at
+    prefix = normalized[:observations[0]["source_span"][0]]
+    arrival = _EVENING_ARRIVAL_BEFORE_DEPARTURE.search(prefix)
+    if arrival is None or _UNCERTAIN_ARRIVAL_PREFIX.search(prefix[:arrival.start()].rstrip()):
+        return at
+    evening = datetime.combine(at.date(), time(_OPENING_DAYPART_HOURS["evening"][0]), at.tzinfo)
+    day_end = datetime.combine(at.date(), time.max, at.tzinfo)
+    return _resolve_evening_departure(departure, at, (evening, day_end))
+
+
 def _verify_multi_clock_opening_source(
     decision: dict[str, Any], window: tuple[datetime, datetime] | None, *,
     current: int, bound: list[tuple[dict[str, Any], str]], customer_rows: dict[int, str],
@@ -808,6 +836,14 @@ def _parse_decision(
                         and decision["lookup_scope"] == "personal"):
                     departure_time = _resolve_arrival_scoped_departure(
                         selected, arrival_floor, item, departure_time, text=current_text, local_at=local_at,
+                    )
+                elif (window is None and len(bound) == 1 and decision["lookup_scope"] == "personal"
+                        and current in referenced and all(source_dates[ref] == local_at.date() for ref in referenced)
+                        and not any(_source_clocks(customer_rows[ref], sources[ref][0]) or
+                                    _lexical_dates(customer_rows[ref], source_dates[ref]) - {local_at.date()}
+                                    for ref in referenced if ref != current)):
+                    departure_time = _resolve_departure_after_evening_arrival(
+                        item, departure_time, text=current_text, local_at=local_at,
                     )
                 decision["must_end_by"] = departure_time.isoformat()
             decision["play_until_at"] = departure_time.isoformat()

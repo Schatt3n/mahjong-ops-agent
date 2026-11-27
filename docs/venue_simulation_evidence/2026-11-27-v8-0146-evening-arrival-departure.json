@@ -1,0 +1,254 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "trace_id": "trace_497e6b4a99347efdd2dcc5a5",
+  "customer_role": "0146",
+  "source_message_id": "customer:role-event:3d5994b844d22c909dd5f94ce74f592380495c3995ecde6899840b6a5a8d81d2",
+  "verifier_input": {
+    "conversation": [
+      {
+        "customer_local_date": "2026-11-26",
+        "ref": 1,
+        "speaker": "customer",
+        "text": "老板 今天下午到晚上有合适的桌吗 红中麻将 2块3块的底 我最多打五个钟"
+      },
+      {
+        "ref": 2,
+        "speaker": "shop",
+        "text": "下午到晚上这会儿，红中2、3块底的现成桌暂时没有能搭的诶。要不我帮你组一桌？"
+      },
+      {
+        "current": true,
+        "customer_local_date": "2026-11-26",
+        "ref": 3,
+        "speaker": "customer",
+        "text": "那帮我组一桌吧 红中2块3块的底 我傍晚过来 最多打到九点半"
+      }
+    ],
+    "current_clock_observation": {
+      "clock_count": 1,
+      "clock_text": "九点半",
+      "local_candidate_at": "2026-11-26T09:30:00+08:00",
+      "qualifier": null,
+      "resolution": "nearest_non_past_same_day"
+    },
+    "customer_message_local_at": "2026-11-26T09:07:00+08:00"
+  },
+  "verifier_output": {
+    "raw": "{\n  \"clock_role\": \"departure_deadline\",\n  \"clock_roles\": null,\n  \"lookup_scope\": \"personal\",\n  \"opening_window\": null,\n  \"opening_dayparts\": null,\n  \"accepted_stake_range\": {\"min\": 2, \"max\": 3},\n  \"known_cap_score\": null,\n  \"max_duration_hours\": 5,\n  \"agreed_duration_hours\": null,\n  \"has_fixed_opening_authority\": false,\n  \"opening_customer_ref\": null,\n  \"current_ref\": 3,\n  \"supporting_customer_refs\": [1, 3],\n  \"prior_play_until\": null\n}",
+    "normalized": {
+      "accepted_stake_range": {
+        "max": 3.0,
+        "min": 2.0
+      },
+      "agreed_duration_hours": null,
+      "clock_role": "departure_deadline",
+      "clock_roles": null,
+      "current_ref": 3,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "personal",
+      "max_duration_hours": 5,
+      "must_end_by": "2026-11-26T09:30:00+08:00",
+      "opening_customer_ref": null,
+      "opening_dayparts": null,
+      "opening_window": null,
+      "play_until_at": "2026-11-26T09:30:00+08:00",
+      "supporting_customer_refs": [
+        1,
+        3
+      ]
+    },
+    "response_source": {
+      "call_id": "llm_call_f9fe0dfe2eab408da06bf316a4bd80c2",
+      "http_response_complete": true,
+      "raw_response_sha256": "c3c42b28d07b63646c80c4beb49a5c851cca63bedf323da63a6a00efb1751dd2",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_7ce0aff59f594510a0dfe6bc37e0240d",
+      "trace_id": "trace_497e6b4a99347efdd2dcc5a5:table-availability:1"
+    }
+  },
+  "tool_refusals": [
+    {
+      "step": 1,
+      "tool": "create_game",
+      "call_id": "call_create_1",
+      "lookup_scope": null,
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 3.5,
+        "stake_label": "2～3元",
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        },
+        "start_time_kind": "asap_when_full"
+      },
+      "error": "请在 max_duration_hours 保留顾客明确的最多可打时长。上限不等于同桌约定的固定时长。"
+    },
+    {
+      "step": 2,
+      "tool": "search_current_games",
+      "call_id": "call_search_1",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 3.5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "contact_id": "venue-sender-0146",
+          "contact_name": "顾佳诚",
+          "seat_count": 1
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        },
+        "start_time_range": {
+          "end_at": "2026-11-26T21:30:00+08:00",
+          "start_at": "2026-11-26T18:00:00+08:00"
+        }
+      },
+      "error": "请在 max_duration_hours 保留顾客明确的最多可打时长。上限不等于同桌约定的固定时长。"
+    },
+    {
+      "step": 3,
+      "tool": "search_current_games",
+      "call_id": "call_search_1",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "seat_count": 1,
+          "source": "self"
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        }
+      },
+      "error": "现成局请带上已核实的 must_end_by=2026-11-26T09:30:00+08:00，按每桌实际约定时段匹配。离店钟点不可改写为统一的小时上限。"
+    },
+    {
+      "step": 4,
+      "tool": "search_current_games",
+      "call_id": "call_search_2",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "contact_id": "venue-sender-0146",
+          "contact_name": "顾佳诚",
+          "seat_count": 1,
+          "source": "customer_message"
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        }
+      },
+      "error": "现成局请带上已核实的 must_end_by=2026-11-26T09:30:00+08:00，按每桌实际约定时段匹配。离店钟点不可改写为统一的小时上限。"
+    },
+    {
+      "step": 5,
+      "tool": "search_current_games",
+      "call_id": "call_search_3",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "contact_id": "venue-sender-0146",
+          "contact_name": "顾佳诚",
+          "seat_count": 1
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        }
+      },
+      "error": "现成局请带上已核实的 must_end_by=2026-11-26T09:30:00+08:00，按每桌实际约定时段匹配。离店钟点不可改写为统一的小时上限。"
+    },
+    {
+      "step": 6,
+      "tool": "search_current_games",
+      "call_id": "call_search_4",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "contact_id": "venue-sender-0146",
+          "contact_name": "顾佳诚",
+          "seat_count": 1
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        }
+      },
+      "error": "现成局请带上已核实的 must_end_by=2026-11-26T09:30:00+08:00，按每桌实际约定时段匹配。离店钟点不可改写为统一的小时上限。"
+    },
+    {
+      "step": 7,
+      "tool": "search_current_games",
+      "call_id": "call_search_5",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "contact_id": "venue-sender-0146",
+          "contact_name": "顾佳诚",
+          "seat_count": 1,
+          "source": "customer"
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        }
+      },
+      "error": "现成局请带上已核实的 must_end_by=2026-11-26T09:30:00+08:00，按每桌实际约定时段匹配。离店钟点不可改写为统一的小时上限。"
+    },
+    {
+      "step": 8,
+      "tool": "search_current_games",
+      "call_id": "call_search_fix1",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "red_center_mahjong",
+        "max_duration_hours": 5,
+        "must_end_by": "2026-11-26T21:30:00+08:00",
+        "requesting_party": {
+          "contact_id": "venue-sender-0146",
+          "contact_name": "顾佳诚",
+          "seat_count": 1
+        },
+        "stake_range": {
+          "max": 3,
+          "min": 2
+        }
+      },
+      "error": "现成局请带上已核实的 must_end_by=2026-11-26T09:30:00+08:00，按每桌实际约定时段匹配。离店钟点不可改写为统一的小时上限。"
+    }
+  ],
+  "tool_executed_count": 0,
+  "delivered_private_reply": {
+    "message_id": "outbound:trace_497e6b4a99347efdd2dcc5a5:1",
+    "text": "稍等一下",
+    "sent_at": "2026-11-26T01:07:00+00:00",
+    "reason": "max_steps_exceeded",
+    "runtime_status": "needs_help"
+  },
+  "diagnosis": "原核验模型正确区分离店钟点，保留同日已知的最长五小时。词法原候选按九点零七后最近的 09:30。旧的傍晚消歧路径要求已核实的开场时段或带钟点的到店下界，这句只有傍晚到店的来话，因此没有纠正。两次工具拒绝先保护五小时上限，之后六次拒绝均因对照到 09:30。没有查到或建成实际桌。",
+  "offline_regression": "用同日较早原话和原独立输出测试真实 SQLite 查询。单一离店截止 21:30 保留时长上限 5，并且不生成实际到店、开场、固定开场授权；保留了明确早上、跨日日期、半天不明和近似情况原有处理。"
+}

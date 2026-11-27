@@ -1887,6 +1887,115 @@ def test_rolling_latest_arrival_does_not_exclude_the_live_earlier_table(tmp_path
     store._connection.close()
 
 
+def test_evening_arrival_without_clock_recovers_v8_hard_departure_and_actual_lookup(tmp_path):
+    """复现同日两次本人来话及原始独立判断，保留五小时和硬离店两个不同条件。"""
+    at = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    prior_at = at - timedelta(minutes=2)
+    deadline = "2026-11-26T21:30:00+08:00"
+    message = _incoming("那帮我组一桌吧 红中2块3块的底 我傍晚过来 最多打到九点半", sent=at)
+    prior = _incoming("老板 今天下午到晚上有合适的桌吗 红中麻将 2块3块的底 我最多打五个钟", sent=prior_at,
+                      message_id="earlier")
+    verifier = _decision(3, clock_role="departure_deadline", clock_roles=None, opening_window=None,
+                         opening_dayparts=None, accepted_stake_range={"min": 2, "max": 3},
+                         max_duration_hours=5, agreed_duration_hours=None, opening_customer_ref=None,
+                         supporting_customer_refs=[1, 3], prior_play_until=None)
+    review = ReviewClient([verifier])
+    store = SQLiteAgentStore(tmp_path / "v8-evening-departure.sqlite3")
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(), table_availability_client=review)
+    with using_clock(lambda: prior_at):
+        _activate(store, started=prior_at)
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "下午到晚上这会儿，红中2、3块底的现成桌暂时没有能搭的诶。要不我帮你组一桌？",
+                                    "shop", metadata={"delivery_status": "delivered"})
+    with using_clock(lambda: at):
+        _persist(store, message)
+        games = []
+        for label, duration in (("fits", 2.5), ("too_late", 3)):
+            game, _ = store.create_game(conversation_id=label, organizer_id=label, organizer_name="桌主", trace_id=label,
+                known_players=[], requirement={"game_type": "red_center_mahjong", "stake": 2,
+                    "planned_start_at": "2026-11-26T19:00:00+08:00", "duration_hours": duration})
+            games.append(game.game_id)
+        terms = {"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3},
+                 "max_duration_hours": 5, "requesting_party": {"seat_count": 1}}
+        wrong = _execute_scope_search(service, message, terms | {"must_end_by": deadline.replace("21:30", "09:30")}, step=1)
+        evidence = wrong.result["table_availability_evidence"]
+        assert not wrong.called and "must_end_by=" + deadline in wrong.error
+        assert evidence["must_end_by"] == evidence["play_until_at"] == deadline
+        assert evidence["opening_window"] is None and not evidence["has_fixed_opening_authority"]
+        assert "arrival_lookup_floor_at" not in evidence
+        overrode_hours = _execute_scope_search(service, message, terms | {"must_end_by": deadline, "max_duration_hours": 3.5},
+                                              step=2)
+        assert not overrode_hours.called and "max_duration_hours" in overrode_hours.error
+        actual = _execute_scope_search(service, message, terms | {"must_end_by": deadline}, step=3)
+        create = AgentAction("尝试人齐开", "needs_tool", "待组桌", tool_calls=[
+            ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客",
+                                     "requirement": {**terms, "start_time_kind": "asap_when_full"}}),
+        ])
+        rejected, = service.execute_tool_calls(create, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=4, run_id="v8-hard-departure",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        assert not rejected.called and "2026-11-26T21:30:00+08:00" in rejected.error
+        assert set(store.games) == set(games)
+    assert actual.called and actual.allowed and not actual.error
+    assert actual.result["requirement"]["must_end_by"] == deadline and actual.result["requirement"]["max_duration_hours"] == 5
+    assert [item["game"]["game_id"] for item in actual.result["matches"]] == games[:1]
+    assert len(review.calls) == 1
+    assert json.loads(review.calls[0][0][-1]["content"])["current_clock_observation"]["local_candidate_at"].endswith("09:30:00+08:00")
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("那就帮我组吧 今天傍晚到店，不过我最晚能玩到九点半", "26T21:30"),
+    ("今晚我们再到店，最晚只能玩到九点半", "26T21:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到九点半 上午", "26T09:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到早上九点半", "26T09:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到09:30", "26T09:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到明天九点半", "27T09:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到明天凌晨一点", "27T01:00"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到次日九点半", "26T09:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到一点", "26T13:00"),
+    ("老板晚上好 那帮我组一桌吧 最多打到九点半", "26T09:30"),
+    ("那帮我组一桌吧 我不是傍晚过来 最多打到九点半", "26T09:30"),
+    ("如果 我傍晚过来 最多打到九点半", "26T09:30"),
+    ("那帮我组一桌吧 我傍晚过来 最多打到九点半左右", None),
+])
+def test_evening_arrival_disambiguation_preserves_explicit_and_ambiguous_clocks(text, expected):
+    """日期、半天、近似词或否定仍由原证据约束，同条确认来店才补足普通离店钟点。"""
+    stamp = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    store = InMemoryAgentStore()
+    message = _incoming(text, sent=stamp)
+    verifier = _decision(clock_role="departure_deadline", clock_roles=None, opening_window=None, accepted_stake_range=None)
+    with using_clock(lambda: stamp):
+        _activate(store, started=stamp)
+        _persist(store, message)
+        checked = _check(store, ReviewClient([verifier]), message)
+    assert checked is not None and checked["opening_window"] is None and not checked["has_fixed_opening_authority"]
+    actual = checked.get("must_end_by")
+    assert actual is None if expected is None else expected in actual
+
+
+@pytest.mark.parametrize(("prior_text", "prior_days"), [
+    ("我今天上午九点半就得走", 0),
+    ("明天有合适的红中吗 我最多打五个钟", 0),
+    ("今天有合适的红中吗 我最多打五个钟", 1),
+])
+def test_evening_arrival_does_not_override_conflicting_cited_time_context(prior_text, prior_days):
+    """引用了另一钟点或日期时沿用原核验结果，等待顾客澄清。"""
+    stamp = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    earlier_at = stamp - timedelta(days=prior_days, minutes=2)
+    store = InMemoryAgentStore()
+    earlier = _incoming(prior_text, sent=earlier_at, message_id="earlier")
+    message = _incoming("那就帮我组吧 我傍晚过来 最多打到九点半", sent=stamp)
+    verifier = _decision(2, clock_role="departure_deadline", clock_roles=None, opening_window=None,
+                         accepted_stake_range=None, supporting_customer_refs=[1, 2])
+    with using_clock(lambda: earlier_at):
+        _activate(store, started=earlier_at)
+        _persist(store, earlier)
+    with using_clock(lambda: stamp):
+        _persist(store, message)
+        checked = _check(store, ReviewClient([verifier]), message)
+    assert checked["must_end_by"] == "2026-11-26T09:30:00+08:00"
+
+
 @pytest.mark.parametrize(("daypart", "deadline", "prior", "expected"), [
     ("今天傍晚", "九点半", None, "21:30"),
     ("今天傍晚", "晚上九点半", None, "21:30"),
