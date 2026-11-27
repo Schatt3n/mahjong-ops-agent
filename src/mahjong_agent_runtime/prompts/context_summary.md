@@ -14,6 +14,8 @@
 - 多人邀约进度写入 `facts.candidate_progress`，区分已确认、已拒绝、等待回复和尚未邀请；等待回复不等于需要重复邀请。
 - 后续工具必须引用的实体 ID 和工具结果写入结构化事实，例如 `active_game_id`，不能只写在自然语言摘要里。
 - 如果事实和当前系统状态冲突，以 active_games、invite_drafts、outbound_message_drafts 为准。
+- 查房回执的起止、查询时长和空房仍保存在 `facts.room_check`，有真实预约再单独保留预约回执。查房的提交参数和包间可用只证明查过什么，不能填为该局已约定的 `start_time`、`end_time`、`duration_minutes`，也不能据此在 `pending_work` 写按固定时点建局。只有当前同一目标的客户原话确已选定，或者真实同桌记录证实的约定，才写对应的已确认条件。
+- 例如「我七点半到，打三个钟头左右」只写本人到店与大致时长。即使按 19:30 到 22:30 查到了空房，也在 `open_questions` 保留待定开场，不能把范围写成约好的三小时局。已约定的开场仍可记录；开场、散场和时长各按自己的证据核实。
 - 不要复述大段原文，不要输出工具原始 JSON，不要输出 API key、Authorization、Bearer token 或其他密钥。
 - `summary` 写 1-5 句自然中文，给未来模型看，不是给客户看。
 - `facts` 可以保留结构化槽位，例如 intent、game_type、stake、base_stake、cap_score、stake_label、smoke_preference、start_time_kind、duration_kind、known_player_count、needed_seats、active_game_id、done_actions、requesting_party、seat_claims；`stake/base_stake` 表示底注，`cap_score` 表示封顶，不要把 `2-32` 这类完整档位只塞进 `stake`。

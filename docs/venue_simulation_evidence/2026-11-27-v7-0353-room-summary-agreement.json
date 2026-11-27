@@ -1,0 +1,373 @@
+{
+  "source_run": "2026-11-25-real-f43d9234b8",
+  "source_code_commit": "a87e461",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev7_20261127/2026-11-25-real-f43d9234b8",
+  "trace_id": "trace_bcc40b26fe1c15c6dc17852f",
+  "customer_case": "0353",
+  "ledger": [
+    {
+      "sequence": 74,
+      "kind": "private",
+      "direction": "inbound",
+      "message_id": "customer:role-event:d55a3428b17afc16a1ceffc6dfae5d93c834be1ee58de0e7248aa7a8c9286e11",
+      "source_message_id": null,
+      "trace_id": "trace_7a0b8008214c34ddd74af0e8",
+      "sent_at": "2026-11-26T09:05:00+00:00",
+      "text": "老板晚上好 现在有没有四川麻将的桌 一点档 还有位吗"
+    },
+    {
+      "sequence": 75,
+      "kind": "private",
+      "direction": "outbound",
+      "message_id": "outbound:trace_7a0b8008214c34ddd74af0e8:1",
+      "source_message_id": "customer:role-event:d55a3428b17afc16a1ceffc6dfae5d93c834be1ee58de0e7248aa7a8c9286e11",
+      "trace_id": "trace_7a0b8008214c34ddd74af0e8",
+      "sent_at": "2026-11-26T09:05:00+00:00",
+      "text": "晚上好，现在没有能搭的一点档四川麻将桌诶，要不我帮你组一桌？"
+    },
+    {
+      "sequence": 76,
+      "kind": "private",
+      "direction": "inbound",
+      "message_id": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+      "source_message_id": null,
+      "trace_id": "trace_bcc40b26fe1c15c6dc17852f",
+      "sent_at": "2026-11-26T09:07:00+00:00",
+      "text": "好呀 帮我组一桌四川麻将一点档 我七点半到 打三个钟头左右 有位了喊我"
+    },
+    {
+      "sequence": 77,
+      "kind": "private",
+      "direction": "outbound",
+      "message_id": "outbound:trace_bcc40b26fe1c15c6dc17852f:1",
+      "source_message_id": "customer:role-event:3a739ed842191a1985f50ec8773890206c1de711a28648cc2724739c39781cb9",
+      "trace_id": "trace_bcc40b26fe1c15c6dc17852f",
+      "sent_at": "2026-11-26T09:07:00+00:00",
+      "text": "稍等一下"
+    }
+  ],
+  "current_write_preflight": {
+    "status": "authorized",
+    "permissions": [
+      {
+        "scope": "organize",
+        "evidence": "帮我组一桌四川麻将一点档",
+        "offer_message_id": null,
+        "offer_evidence": null
+      }
+    ],
+    "http_response_complete": true
+  },
+  "actual_room_read": {
+    "called": true,
+    "allowed": true,
+    "start_at": "2026-11-26T19:30:00+08:00",
+    "end_at": "2026-11-26T22:30:00+08:00",
+    "available_count": 3,
+    "query_window_source": null,
+    "query_window_duration_minutes": null
+  },
+  "complete_http_with_incomplete_action_contract": [
+    {
+      "planner_step": 2,
+      "raw_response_sha256": "898f32efa68abf067e7b1069213805f2b161e838b07a5874113ddad5324e10e1",
+      "http_response_complete": true,
+      "top_level_keys": [
+        "goal",
+        "objective_status",
+        "reasoning_summary",
+        "objective_state",
+        "objective_plan",
+        "reply_scope"
+      ],
+      "missing_required_fields": [
+        "reply_to_user",
+        "tool_calls",
+        "needs_human",
+        "stop_reason"
+      ]
+    },
+    {
+      "planner_step": 3,
+      "raw_response_sha256": "6cc2167f1289b9c9bd0b336c73f1b9987e2c2094102ef908ee8c525f857f9029",
+      "http_response_complete": true,
+      "top_level_keys": [
+        "goal",
+        "objective_status",
+        "reasoning_summary",
+        "objective_state",
+        "objective_plan",
+        "reply_scope"
+      ],
+      "missing_required_fields": [
+        "reply_to_user",
+        "tool_calls",
+        "needs_human",
+        "stop_reason"
+      ]
+    }
+  ],
+  "checkpoint": {
+    "source_trace_id": "trace_bcc40b26fe1c15c6dc17852f",
+    "summary": "周明安要求组一桌四川麻将“一点档”，今晚19:30到场，预计打3小时，要求有位后通知他。已查询19:30-22:30房态，东一、东二、西侧3间包间均可用，查询无需重复。当前尚未创建组局或发起邀约，下一步需按该时段创建组局并推进找人。",
+    "open_questions": [],
+    "facts": {
+      "start_time": "2026-11-26T19:30:00+08:00",
+      "end_time": "2026-11-26T22:30:00+08:00",
+      "duration_minutes": 180,
+      "pending_work": [
+        "创建或发起今晚19:30四川麻将固定时间组局",
+        "邀约候选人，并在有位后通知周明安"
+      ],
+      "room_check": {
+        "available_count": 3,
+        "available_room_ids": [
+          "东一包间",
+          "东二包间",
+          "西侧包间"
+        ],
+        "configured": true,
+        "may_state_room_available": true,
+        "occupied_room_ids": [],
+        "query_window_end": "2026-11-26T22:30:00+08:00",
+        "query_window_start": "2026-11-26T19:30:00+08:00",
+        "repeat_same_query": false
+      }
+    }
+  },
+  "actual_stock_read": {
+    "called": true,
+    "allowed": true,
+    "requirement": {
+      "base_stake": 1.0,
+      "game_type": "sichuan_mahjong",
+      "requesting_party": {
+        "contact_id": "venue-sender-0353",
+        "contact_name": "周明安",
+        "known_member_ids": [
+          "venue-sender-0353"
+        ],
+        "seat_count": 1,
+        "source": "customer"
+      },
+      "stake": "1",
+      "stake_label": "1",
+      "start_time_range": {
+        "end_at": "2026-11-26T22:30:00+08:00",
+        "start_at": "2026-11-26T19:30:00+08:00"
+      }
+    },
+    "matches": [],
+    "alternatives": [],
+    "evidence_scope": {
+      "applied_filter_fields": [
+        "game_type",
+        "stake",
+        "start_time_range"
+      ],
+      "available_pool_scope": "same_requester_and_conversation",
+      "supports_narrower_empty_claim": true,
+      "unfiltered_available_pool_empty": true
+    }
+  },
+  "timing_verifier": {
+    "input_sha256": "e0bb95d2f8dd1742bbeb2a73a3603e35fc354d3ee33b79f0309887854d176c8f",
+    "steps": [
+      {
+        "planner_step": 4,
+        "call_id": "llm_call_6ebeb6ef844c4f41b78b437be087324c",
+        "total_elapsed_ms": 20588.358,
+        "http_attempts": [
+          {
+            "attempt_id": "llm_attempt_c79c612510224ca8883b56bd4fdf99cc",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_b8a2e707c7644cec85279537781a6b89",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          }
+        ],
+        "decision": null
+      },
+      {
+        "planner_step": 5,
+        "call_id": "llm_call_9dadaaa4a9b74c738142f5ccd9e96785",
+        "total_elapsed_ms": 15928.02,
+        "http_attempts": [
+          {
+            "attempt_id": "llm_attempt_80fa4468839c4cb0ab3a1b906fb12401",
+            "http_status": 200,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_6caa0d3283c344939f93fb0ce20b86cb",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "RemoteDisconnected"
+          }
+        ],
+        "decision": null
+      },
+      {
+        "planner_step": 6,
+        "call_id": "llm_call_b0d0525d840b41c2949eb3b5ac960a2d",
+        "total_elapsed_ms": 20599.891,
+        "http_attempts": [
+          {
+            "attempt_id": "llm_attempt_fbc4734d278a4c9081e70135e3d34fa2",
+            "http_status": 200,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_fe83f65344214b2895dce10a385d45f8",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          }
+        ],
+        "decision": null
+      },
+      {
+        "planner_step": 7,
+        "call_id": "llm_call_c234e4f8aa1341d0a66da6170fa5b8f1",
+        "total_elapsed_ms": 20559.011,
+        "http_attempts": [
+          {
+            "attempt_id": "llm_attempt_f63b695477414cc7b5c970ae448eb9dd",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_1ecf6506652747709d98ddcb45c84706",
+            "http_status": null,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          }
+        ],
+        "decision": null
+      },
+      {
+        "planner_step": 8,
+        "call_id": "llm_call_bfd807f5052542faa84945cfc978349d",
+        "total_elapsed_ms": 19846.692,
+        "http_attempts": [
+          {
+            "attempt_id": "llm_attempt_d5cb4dd1760d4208a149f4699221fdf5",
+            "http_status": 200,
+            "body_complete": false,
+            "error_type": "TimeoutError"
+          },
+          {
+            "attempt_id": "llm_attempt_82e0d20694ba4dfdbfab75efcba91634",
+            "http_status": 200,
+            "body_complete": true,
+            "error_type": null
+          }
+        ],
+        "decision": {
+          "accepted_stake_range": {
+            "max": 1.0,
+            "min": 1.0
+          },
+          "agreed_duration_hours": null,
+          "approximate_play_duration_only": true,
+          "arrival_lookup_floor_at": "2026-11-26T19:30:00+08:00",
+          "clock_role": "arrival_estimate",
+          "current_ref": 3,
+          "has_fixed_opening_authority": false,
+          "known_cap_score": null,
+          "lookup_scope": "personal",
+          "max_duration_hours": null,
+          "opening_customer_ref": null,
+          "opening_dayparts": null,
+          "opening_window": null,
+          "supporting_customer_refs": [
+            3
+          ]
+        }
+      }
+    ]
+  },
+  "denied_creates": [
+    {
+      "call_id": "create1",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。",
+      "proposed_requirement": {
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "duration_hours": 3,
+        "start_time_kind": "scheduled"
+      }
+    },
+    {
+      "call_id": "create1",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。",
+      "proposed_requirement": {
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "duration_hours": 3,
+        "start_time_kind": "scheduled"
+      }
+    },
+    {
+      "call_id": "create1",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。",
+      "proposed_requirement": {
+        "planned_start_at": "2026-11-26T19:30:00+08:00",
+        "duration_hours": 3,
+        "start_time_kind": "scheduled"
+      }
+    },
+    {
+      "call_id": "create2",
+      "called": false,
+      "allowed": false,
+      "error": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; flexible game can start before the searched opening window starting at 2026-11-26T19:30:00+08:00; it has no enforceable earliest start",
+      "proposed_requirement": {
+        "duration_hours": 3,
+        "start_time_kind": "asap_when_full",
+        "time_preference": "本人19:30到店，人齐开"
+      }
+    }
+  ],
+  "terminal": {
+    "reason": "max_steps_exceeded",
+    "status": "needs_help",
+    "delivered_message_id": "outbound:trace_bcc40b26fe1c15c6dc17852f:1",
+    "confirmation_or_notification_arranged": false
+  },
+  "analysis": [
+    "「七点半到」说的是到店，「三个钟头左右」是大致想玩多久。顾客明确委托组桌，实际沙盒只授权 organize。「有位了喊我」保留为独立意图，查房或空查局没有建立通知安排。",
+    "19:30 至 22:30 查到三个可用包间。查房没有预约，也不能证明双方同意开场、散场或精确三小时。第 2、3 步 HTTP 正文完整，JSON 自身缺少动作必填字段；这和推理耗尽没有正文的 0022 情形不同。两份均未执行工具。",
+    "第 4 步摘要成功落库，把真实查房时窗和估算时长写成局的顶层 start_time、end_time 和 duration_minutes，并在待办写固定时间建局。主模型在摘要前已有同样判断，后续主提示持续携带这份摘要，重复了已经确认固定时间的错误信息。",
+    "第 5 步按实际提交的玩法、档位和开场检索范围查空，后端还证实同会话可用登记局池为空。22:30 是从到店和大致三小时推成的查询边界，不能成为顾客的开场或散场承诺。",
+    "五次独立时间核验的原始输入 SHA256 相同。第 4、5、6、7 步均无完整判定，第 8 步的后备请求读到完整正文，才证实到店估计、大致时长和没有固定开场授权。直接把前一次失败当同轮结论会漏掉随后可用的时间事实。",
+    "三个固定 19:30、精确三小时的建局提议均被拦截。最后一个人齐开提议也无法落实最早开场，且仍携带精确三小时。八步用尽后只送达等待提示，组局、外发、预约及通知均无执行回执。"
+  ],
+  "grounded_clarification": "现在没有能搭的一点档川麻。你七点半到，那我们约几点开合适？有位提醒这边还没安排。",
+  "related_evidence": [
+    "2026-11-27-v5-0437-0235-room-duration-agreement.json",
+    "2026-11-27-v6-0402-action-envelope.json",
+    "2026-11-27-v7-0022-planner-reasoning-exhaustion.json",
+    "2026-11-27-v7-0038-arrival-bounded-formation.json",
+    "2026-11-27-v7-0402-opening-clarification.json"
+  ],
+  "change": "摘要提示只允许依据同一目标的真实约定给牌局写已确认开场、散场或精确时长。房态仍在室况回执记录，主模型对旧摘要的派生安排回查原话和真实执行。",
+  "offline_verification": {
+    "test": "tests/test_context_summary.py::test_v7_0353_summary_keeps_room_read_and_agreed_table_timing_separate",
+    "methods": "SQLite 查询真实三个可用房，送入摘要模型的证据保留原话和房态。离线静态回执覆盖未约开场和确已约好开场时长两条读写路径。这检查输入合同和持久化，不代替真模型语义复验。",
+    "live_replay": "pending",
+    "targeted_tests_passed": 755
+  }
+}

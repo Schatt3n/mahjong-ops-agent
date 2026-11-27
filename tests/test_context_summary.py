@@ -15,6 +15,7 @@ from mahjong_agent_runtime import (
     SQLiteAgentStore,
     StaticAgentClient,
     TokenBudget,
+    ToolCall,
     ToolGateway,
     ToolResult,
     UserMessage,
@@ -101,6 +102,58 @@ def test_context_summary_runs_after_turn_and_writes_checkpoint() -> None:
     assert "context_summary_prompt" in steps
     assert "context_summary_response" in steps
     assert "context_summary_saved" in steps
+
+
+@pytest.mark.parametrize("agreed", [False, True])
+def test_v7_0353_summary_keeps_room_read_and_agreed_table_timing_separate(tmp_path, agreed):
+    """原始时间来话和真实房态收据一起传到摘要，明确约定的对照仍可保存。"""
+    stamp = datetime.fromisoformat("2026-11-26T17:07:00+08:00")
+    start = "2026-11-26T19:30:00+08:00"
+    end = "2026-11-26T22:30:00+08:00"
+    original = "好呀 帮我组一桌四川麻将一点档 我七点半到 打三个钟头左右 有位了喊我"
+    body = "好呀 帮我组一桌四川麻将一点档 就定七点半开 打满三个钟头 有位了喊我" if agreed else original
+    conversation_id = "v7-0353"
+    message = UserMessage(conversation_id, "guest", "顾客", body, sent_at=stamp, message_id="source")
+    store = SQLiteAgentStore(tmp_path / "room-checkpoint.sqlite3")
+    store.configure_rooms(["room-east", "room-west", "room-north"])
+    trace = InMemoryTraceRecorder()
+    with using_clock(lambda: stamp):
+        store.append_user_turn(message, "raw-room-source")
+        room = ToolGateway(store).execute(ToolCall("check_room_availability", {"start_at": start, "duration_minutes": 180}),
+            trace_id="raw-room-source", conversation_id=conversation_id, sender_id=message.sender_id,
+            sender_name=message.sender_name, step_index=1, source_message_id=message.message_id)
+        assert room.called and room.allowed and room.result["available_count"] == 3
+        assert (room.result["start_at"], room.result["end_at"]) == (start, end)
+        store.append_tool_turn(conversation_id, json.dumps([room.to_dict()], ensure_ascii=False), "raw-room-source")
+        facts = {"room_check": {"query_window_start": start, "query_window_end": end, "available_count": 3}}
+        if agreed:
+            facts.update(start_time=start, end_time=end, duration_minutes=180)
+        summary = StaticAgentClient([json.dumps({
+            "summary": "已定七点半开、打三个小时，查到三个空房。" if agreed else "顾客七点半到，想打三小时左右，房态已查。",
+            "facts": facts,
+            "open_questions": [] if agreed else ["牌局几点开？"],
+            "confidence": 0.9,
+        }, ensure_ascii=False)])
+        manager = ContextSummaryManager(store, summary, trace)
+        recorded = manager.summarize_for_context_budget(conversation_id=conversation_id, trace_id="compact",
+            estimated_context_tokens=55_088, max_context_tokens=64_000, trigger_threshold_tokens=54_400)
+        plan = AgentContextBuilder(store, ToolGateway(store)).build(message, trace_id="read-back")
+
+    sent = summary.calls[0]["messages"]
+    summary_rule = sent[0]["content"]
+    assert "保存在 `facts.room_check`" in summary_rule
+    assert "不能填为该局已约定的 `start_time`、`end_time`、`duration_minutes`" in summary_rule
+    assert "客户原话确已选定" in summary_rule and "待定开场" in summary_rule
+    source = json.loads(sent[1]["content"])
+    assert source["recent_conversation"][0]["content"] == body
+    actual_room, = json.loads(source["recent_conversation"][1]["content"])
+    assert actual_room["result"]["available_count"] == 3 and actual_room["result"]["end_at"] == end
+    assert recorded.summarized and store.get_conversation_checkpoint(conversation_id).facts == facts
+    assert "不用 `pending_work` 或摘要中的同值钟点确认开场" in plan.messages[0]["content"]
+    assert plan.payload["conversation_checkpoint"]["facts"]["room_check"] == facts["room_check"]
+    assert ("start_time" in plan.payload["conversation_checkpoint"]["facts"]) is agreed
+    assert not store.games and not store.room_reservations
+    store._connection.close()
 
 
 def test_context_summary_failure_does_not_change_final_reply_or_checkpoint() -> None:

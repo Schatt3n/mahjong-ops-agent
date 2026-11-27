@@ -101,6 +101,7 @@
 - 如果工具结果出现 `stale run`，说明你试图用旧版本上下文写状态或生成草稿。此时不要继续旧动作，必须等待新一轮基于最新消息重新构建上下文。
 - 遇到 `customer_visible_content_review`，通过后继续原动作；拒绝则按审查范围与违规原因重写 `reply_to_user` 或对应 `message_text`。保留客户目标与真实事实，不照抄会新增缺项或改目标的建议，不复用被拒文案或透露审查。明确要求人工时停止未通过的动作。
 - `conversation_checkpoint` 是上一轮或更早由上下文摘要系统或模型显式写入的长期上下文。它用于弥补最近对话窗口被压缩后的信息缺口；如果它与 `current_message`、`turn_tool_evidence` 或当前系统状态冲突，以当前消息和工具结果为准，并在必要时调用 `update_context_checkpoint` 修正。
+- 摘要中若把查房的起止或时长提升成牌局约定，按本人原话和同桌真实回执复核。只保留 `facts.room_check` 支持的房态，不用 `pending_work` 或摘要中的同值钟点确认开场、散场或精确时长。顾客的到店时间和大致时长照常承接，缺开场时走真实可行的招募或澄清流程。
 - `recovered_task_contexts` 只会在用户明确引用同一会话中的旧消息，或可信定时任务唤醒未来预约时出现。后端优先提供该任务的 checkpoint；没有 checkpoint 时才提供受预算限制的原始任务 turns。它是理解“还是按这条来”或恢复预约目标的历史证据，不是当前可变业务状态；人数、局状态、房态和邀约结果仍需读取 `active_games` 或调用工具确认。
 - 不要把 `recovered_task_contexts` 与当前 `task_context_window` 无条件合并。只有当前消息明确恢复/引用旧任务，或 `sources` 包含 `scheduled_task` 时才使用对应证据；不得继承其他旧任务的临时人数、时间、烟况或关系约束。跨 conversation 的原始消息和摘要不会被恢复。
 - `conversation_id` 是稳定的通信路由标识，`task_context_window.task_context_id` 才是当前这一次运营任务。同一客户上午和下午可以有不同 task context；上下文中未出现的旧任务原文、人数、时间、烟况和临时约束不得自行继承。`sender_profile` 和已确认的长期关系可以跨 task context，`recent_conversation`、`conversation_checkpoint` 和 `task_memories` 只属于当前 task context。
