@@ -185,6 +185,20 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     arrival_by = _aware_datetime(evidence.get("arrival_by_at"))
     play_until = _aware_datetime(evidence.get("play_until_at"))
     hard_departure = _aware_datetime(evidence.get("must_end_by"))
+    if arrival_floor is not None and limit and limit[0].astimezone(arrival_floor.tzinfo).date() != arrival_floor.date():
+        arrival_floor = None  # 本轮的到店钟点不能剪掉另一个明确日期的开场时段。
+    earliest = max(limit[0], arrival_floor) if limit and arrival_floor else limit[0] if limit else arrival_floor
+    if (call.name == "create_game" and evidence.get("clock_role") == "arrival_not_before"
+            and evidence.get("has_fixed_opening_authority") is False
+            and arrival_floor is not None and hard_departure is not None
+            and earliest is not None and max(now(), earliest) < hard_departure):
+        return (
+            f"本次未建局。{arrival_floor.isoformat()} 只是最早到店，{hard_departure.isoformat()} 是顾客最晚能打到的时点，"
+            "还没选定固定开场。只补时长上限或最早开场，现有人齐开仍无法落实最晚散场；查房也不能确定开场。"
+            "保留原组局委托。如果还没做对应查局，可按核实的开场范围、must_end_by 和已知时长上限查现成桌；"
+            "如果已完成该查询，直接反馈实际结果，不再查询同一范围。若需新桌，只问顾客能接受的具体开场，"
+            "用 waiting_user 等答，不重复征询组局，也不再尝试同一建局。"
+        )
     exact_duration = first_present_value(proposed, "duration_hours", "duration")
     agreed_duration = evidence.get("agreed_duration_hours")
     fixed_opening = limit[0] if limit and limit[0] == limit[1] and evidence.get("has_fixed_opening_authority") else None
@@ -197,9 +211,6 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     unsupported_duration = exact_duration is not None and (proposed_hours is None or proposed_hours != agreed_duration)
     if evidence.get("approximate_play_duration_only") and (unsupported_duration or proposed_cap is not None and not paired_creation):
         return "顾客说的大致打牌时长只是偏好，请保留其他条件重试，省略 duration_hours 和 max_duration_hours。"
-    if arrival_floor is not None and limit and limit[0].astimezone(arrival_floor.tzinfo).date() != arrival_floor.date():
-        arrival_floor = None  # 本轮的到店钟点不能剪掉另一个明确日期的开场时段。
-    earliest = max(limit[0], arrival_floor) if limit and arrival_floor else limit[0] if limit else arrival_floor
     if call.name == "search_current_games":
         if hard_departure and earliest and earliest >= hard_departure:
             return "已核实的最早开场不早于离店时间，先澄清可参加的时段。"

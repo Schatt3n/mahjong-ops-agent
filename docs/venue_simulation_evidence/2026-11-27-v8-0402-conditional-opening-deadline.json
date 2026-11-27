@@ -1,0 +1,415 @@
+{
+  "source_run": "2026-11-25-real-1d158698ce",
+  "source_code_commit": "e36bae0",
+  "customer_case": "0402",
+  "trace_id": "trace_68b5c8e3f35af0516156a264",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev8_20261127/2026-11-25-real-1d158698ce",
+  "ledger": [
+    {
+      "sequence": 27,
+      "kind": "private",
+      "direction": "inbound",
+      "trace_id": "trace_4f76ff99d2c62b850853dfab",
+      "message_id": "customer:role-event:06e2c19813d9eea4893b89751189f88ea67ec60b0f9c340ee52ca80d83f7b927",
+      "source_message_id": null,
+      "text": "老板，今晚七点半过了有合适的吗？一底到三底的杭州麻将，我七点半多点能到",
+      "sent_at": "2026-11-25T11:00:00+00:00"
+    },
+    {
+      "sequence": 28,
+      "kind": "private",
+      "direction": "outbound",
+      "trace_id": "trace_4f76ff99d2c62b850853dfab",
+      "message_id": "outbound:trace_4f76ff99d2c62b850853dfab:1",
+      "source_message_id": "customer:role-event:06e2c19813d9eea4893b89751189f88ea67ec60b0f9c340ee52ca80d83f7b927",
+      "text": "七点半以后现在没有能搭的杭麻1-3底桌诶，要不我帮你组一桌？",
+      "sent_at": "2026-11-25T11:00:00+00:00"
+    },
+    {
+      "sequence": 49,
+      "kind": "private",
+      "direction": "inbound",
+      "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+      "message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+      "source_message_id": null,
+      "text": "老板，那就帮我组一桌吧。一底到三底的杭麻，我大概八点到，最多打三个钟。",
+      "sent_at": "2026-11-25T11:02:00+00:00"
+    },
+    {
+      "sequence": 50,
+      "kind": "private",
+      "direction": "outbound",
+      "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+      "message_id": "outbound:trace_4b84e1633c4b01139ba1ec18:1",
+      "source_message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+      "text": "一底到三底杭麻、最多三个钟，条件记下了。你说八点到，这桌你希望几点开？定了我就按这个时间去凑人。",
+      "sent_at": "2026-11-25T11:02:00+00:00"
+    },
+    {
+      "sequence": 59,
+      "kind": "private",
+      "direction": "inbound",
+      "trace_id": "trace_68b5c8e3f35af0516156a264",
+      "message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+      "source_message_id": null,
+      "text": "老板，我这边最早八点十分到店，今晚最多能打到十一点。那桌你按这个时间凑人吧。",
+      "sent_at": "2026-11-25T11:35:00+00:00"
+    },
+    {
+      "sequence": 62,
+      "kind": "private",
+      "direction": "outbound",
+      "trace_id": "trace_68b5c8e3f35af0516156a264",
+      "message_id": "outbound:trace_68b5c8e3f35af0516156a264:1",
+      "source_message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+      "text": "稍等一下",
+      "sent_at": "2026-11-25T11:35:00+00:00"
+    }
+  ],
+  "verified_write_scope": {
+    "status": "authorized",
+    "permissions": [
+      {
+        "scope": "organize",
+        "evidence": "那桌你按这个时间凑人吧。",
+        "offer_message_id": null,
+        "offer_evidence": null
+      }
+    ],
+    "response_source": {
+      "call_id": "llm_call_82e20ce72e774b96ac09ba79c24796b7",
+      "http_response_complete": true
+    }
+  },
+  "timing_verification": {
+    "input_sha256": "8850c4c87ad6e9147daa59874820dc48d9cc8a6fe9321d4f956f6124014bb966",
+    "raw_json": "{\n  \"clock_role\": \"other\",\n  \"clock_roles\": [\n    {\"clock_ref\": 1, \"role\": \"arrival_not_before\"},\n    {\"clock_ref\": 2, \"role\": \"departure_deadline\"}\n  ],\n  \"lookup_scope\": \"personal\",\n  \"opening_window\": null,\n  \"opening_dayparts\": {\"date\": \"2026-11-25\", \"parts\": [\"evening\"], \"source_ref\": 1},\n  \"accepted_stake_range\": {\"min\": 1, \"max\": 3},\n  \"known_cap_score\": null,\n  \"max_duration_hours\": 3,\n  \"agreed_duration_hours\": null,\n  \"has_fixed_opening_authority\": false,\n  \"opening_customer_ref\": null,\n  \"current_ref\": 5,\n  \"supporting_customer_refs\": [1, 3, 5],\n  \"prior_play_until\": {\"customer_ref\": 3, \"clock_ref\": 1}\n}",
+    "decision": {
+      "accepted_stake_range": {
+        "max": 3.0,
+        "min": 1.0
+      },
+      "agreed_duration_hours": null,
+      "arrival_lookup_floor_at": "2026-11-25T20:10:00+08:00",
+      "clock_role": "arrival_not_before",
+      "clock_roles": [
+        {
+          "clock_ref": 1,
+          "role": "arrival_not_before"
+        },
+        {
+          "clock_ref": 2,
+          "role": "departure_deadline"
+        }
+      ],
+      "current_ref": 5,
+      "has_fixed_opening_authority": false,
+      "known_cap_score": null,
+      "lookup_scope": "personal",
+      "max_duration_hours": 3,
+      "must_end_by": "2026-11-25T23:00:00+08:00",
+      "opening_customer_ref": null,
+      "opening_dayparts": {
+        "date": "2026-11-25",
+        "parts": [
+          "evening"
+        ],
+        "source_ref": 1
+      },
+      "opening_window": {
+        "end_at": "2026-11-26T06:00:00+08:00",
+        "start_at": "2026-11-25T20:10:00+08:00"
+      },
+      "play_until_at": "2026-11-25T23:00:00+08:00",
+      "supporting_customer_refs": [
+        1,
+        3,
+        5
+      ]
+    },
+    "response_source": {
+      "call_id": "llm_call_58d89c1f830649a1bb0d0917dc1260c3",
+      "http_response_complete": true
+    },
+    "reused_steps": [
+      3,
+      4,
+      5,
+      6,
+      8
+    ]
+  },
+  "first_action_contract_failure": {
+    "errors": [
+      "missing required key: reply_to_user",
+      "missing required key: tool_calls",
+      "missing required key: needs_human",
+      "missing required key: stop_reason",
+      "stop_reason must be object",
+      "stop_reason.can_stop is required",
+      "stop_reason.why is required",
+      "stop_reason.pending_work is required",
+      "stop_reason.depends_on_tool_results is required",
+      "needs_tool requires stop_reason.can_stop=false",
+      "needs_tool requires at least one tool_call"
+    ],
+    "step_index": 1,
+    "response_source": {
+      "raw_response_sha256": "aa2fb8ea342cc9775846457605f4c2cb53069bb1c05a31410116f819c949e85b",
+      "call_id": "llm_call_6cb49ccbb98e4decbc2f93ec695e3646",
+      "http_response_complete": true
+    },
+    "raw_json": "{\"goal\": \"为孙雨晴组一桌杭麻1-3底，开场不早于20:10，本人最多打到23:00\", \"objective_status\": \"needs_tool\", \"reasoning_summary\": \"客户已明确委托组桌，本次补充最早到店20:10、最晚打到23:00；此前开场未定导致建局被拦。现已确认最早可开打边界（到店后），未确认固定开场与最晚散场硬条件，可按人齐开登记待组局，由后端保存最早开场边界。\", \"objective_state\": {\"current_phase\": \"create_game\", \"known_facts\": {\"requested_game\": \"hangzhou_mahjong\", \"stake_label\": \"一底到三底\", \"stake_range\": {\"min\": 1, \"max\": 3}, \"known_player_count\": 1, \"needed_seats\": 3, \"arrival_not_before\": \"2026-11-25T20:10:00+08:00\", \"max_duration_hours\": 3, \"latest_play_until\": \"2026-11-25T23:00:00+08:00\"}, \"missing_facts\": [], \"blockers\": [], \"request_scope\": {\"kind\": \"delegated_matching\", \"source_message_ids\": [\"customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f\", \"customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0\"], \"explicit_limits\": [\"杭麻一底到三底\", \"最早20:10到店\", \"最多打到23:00\"]}, \"fact_assertions\": [{\"field\": \"game_type\", \"value\": \"hangzhou_mahjong\", \"role\": \"current\", \"source_message_id\": \"customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f\"}, {\"field\": \"stake_range\", \"value\": {\"min\": 1, \"max\": 3}, \"role\": \"current\", \"source_message_id\": \"customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f\"}, {\"field\": \"arrival_not_before\", \"value\": \"2026-11-25T20:10:00+08:00\", \"role\": \"current\", \"source_message_id\": \"customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0\"}, {\"field\": \"max_duration_hours\", \"value\": 3, \"role\": \"current\", \"source_message_id\": \"customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0\"}, {\"field\": \"seat_count\", \"value\": 1, \"role\": \"current\", \"source_message_id\": \"customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f\"}]}, \"objective_plan\": [{\"step_id\": \"create_pending_game\", \"title\": \"登记人齐开的杭麻1-3底待组局（最早20:10可开）\", \"status\": \"in_progress\", \"tool\": \"create_game\", \"depends_on\": [], \"decision_rule\": \"成功返回forming后简短确认并等待招募\"}, {\"step_id\": \"reply\", \"title\": \"告知已登记、仍在凑人\", \"status\": \"pending\", \"depends_on\": [\"create_pending_game\"]}], \"plan_revision_reason\": \"客户补充最早20:10到店与最多打到23:00后，已具备按人齐开登记待组局的条件，改走创建待组局并招募。\", \"reply_scope\": {\"requested_information\": \"按新到店时间凑人\", \"allowed_response_facts\": [\"已登记待组局\", \"仍在凑人\"], \"background_facts_to_withhold\": [\"后端最早开场核实细节\", \"候选搜索过程\"]}, \"active_game_id\": null, \"blockers\": []}"
+  },
+  "tool_timeline": [
+    {
+      "planner_step": 2,
+      "name": "create_game",
+      "call_id": "create_1",
+      "allowed": false,
+      "called": false,
+      "error": "tool argument consistency violation: invalid explicit current-task fact reference; stake_range must be an object with min and max",
+      "proposed_arguments": {
+        "organizer_id": "venue-sender-0402",
+        "organizer_name": "孙雨晴",
+        "requesting_party": {
+          "contact_id": "venue-sender-0402",
+          "contact_name": "孙雨晴",
+          "seat_count": 1
+        },
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "must_end_by": "2026-11-25T23:00:00+08:00",
+          "opening_not_before_at": "2026-11-25T20:10:00+08:00",
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time_kind": "asap_when_full"
+        }
+      },
+      "unbound_stake_shape": [
+        {
+          "field": "stake_range",
+          "role": "current",
+          "source_message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+          "value": "1-3"
+        }
+      ]
+    },
+    {
+      "planner_step": 3,
+      "name": "create_game",
+      "call_id": "create_1",
+      "allowed": false,
+      "called": false,
+      "error": "请在 max_duration_hours 保留顾客明确的最多可打时长。上限不等于同桌约定的固定时长。",
+      "proposed_arguments": {
+        "organizer_id": "venue-sender-0402",
+        "organizer_name": "孙雨晴",
+        "requesting_party": {
+          "contact_id": "venue-sender-0402",
+          "contact_name": "孙雨晴",
+          "seat_count": 1
+        },
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time_kind": "asap_when_full"
+        }
+      }
+    },
+    {
+      "planner_step": 4,
+      "name": "create_game",
+      "call_id": "create_1",
+      "allowed": false,
+      "called": false,
+      "error": "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。",
+      "proposed_arguments": {
+        "organizer_id": "venue-sender-0402",
+        "organizer_name": "孙雨晴",
+        "requesting_party": {
+          "contact_id": "venue-sender-0402",
+          "contact_name": "孙雨晴",
+          "seat_count": 1
+        },
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "max_duration_hours": 3,
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time_kind": "asap_when_full"
+        }
+      }
+    },
+    {
+      "planner_step": 5,
+      "name": "search_current_games",
+      "call_id": "search_1",
+      "allowed": false,
+      "called": false,
+      "error": "这次还没有查到库存结果。请保留其他查局条件，按核实的时段用 start_time_range 重试。start_at=2026-11-25T20:10:00+08:00，end_at=2026-11-26T06:00:00+08:00，include_nearby=false。不要另填固定开场或人齐开的开场方式。",
+      "proposed_arguments": {
+        "include_nearby": false,
+        "lookup_scope": "personal",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "max_duration_hours": 3,
+          "must_end_by": "2026-11-25T23:00:00+08:00",
+          "requesting_party": {
+            "contact_id": "venue-sender-0402",
+            "contact_name": "孙雨晴",
+            "seat_count": 1
+          },
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time_range": {
+            "end_at": "2026-11-26T02:10:00+08:00",
+            "start_at": "2026-11-25T20:10:00+08:00"
+          }
+        }
+      }
+    },
+    {
+      "planner_step": 6,
+      "name": "search_current_games",
+      "call_id": "search_1",
+      "allowed": true,
+      "called": true,
+      "error": null,
+      "proposed_arguments": {
+        "include_nearby": false,
+        "lookup_scope": "personal",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "max_duration_hours": 3,
+          "must_end_by": "2026-11-25T23:00:00+08:00",
+          "requesting_party": {
+            "contact_id": "venue-sender-0402",
+            "contact_name": "孙雨晴",
+            "seat_count": 1
+          },
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time_range": {
+            "end_at": "2026-11-26T06:00:00+08:00",
+            "start_at": "2026-11-25T20:10:00+08:00"
+          }
+        }
+      },
+      "executed": {
+        "lookup_scope": "personal",
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "max_duration_hours": 3,
+          "must_end_by": "2026-11-25T23:00:00+08:00",
+          "requesting_party": {
+            "contact_id": "venue-sender-0402",
+            "contact_name": "孙雨晴",
+            "seat_count": 1
+          },
+          "stake_label": "1～3元",
+          "stake_range": {
+            "max": 3.0,
+            "min": 1.0
+          },
+          "start_time_range": {
+            "end_at": "2026-11-26T06:00:00+08:00",
+            "start_at": "2026-11-25T20:10:00+08:00"
+          }
+        },
+        "matches": [],
+        "evidence_scope": {
+          "applied_filter_fields": [
+            "game_type",
+            "max_duration_hours",
+            "must_end_by",
+            "stake_range",
+            "start_time_range"
+          ],
+          "available_pool_scope": "same_requester_and_conversation",
+          "supports_narrower_empty_claim": false,
+          "unfiltered_available_pool_empty": false
+        }
+      }
+    },
+    {
+      "planner_step": 7,
+      "name": "check_room_availability",
+      "call_id": "room_1",
+      "allowed": true,
+      "called": true,
+      "error": null,
+      "proposed_arguments": {
+        "end_at": "2026-11-25T23:00:00+08:00",
+        "start_at": "2026-11-25T20:10:00+08:00"
+      },
+      "executed": {
+        "start_at": "2026-11-25T20:10:00+08:00",
+        "end_at": "2026-11-25T23:00:00+08:00",
+        "available_count": 3,
+        "configured": true
+      }
+    },
+    {
+      "planner_step": 8,
+      "name": "create_game",
+      "call_id": "create_1",
+      "allowed": false,
+      "called": false,
+      "error": "本次未建局。2026-11-25T20:10:00+08:00 只核实为本人最早可到店的时间，还没选定固定开场。先反馈现成桌的实查结果。顾客已经明确委托组局时，只问这个时间是否也是本桌开场，用 waiting_user 等本人答复，不要重新征询组局委托。仅询局时按已核实的查局结果回复。不要再次尝试同一建局。",
+      "proposed_arguments": {
+        "organizer_id": "venue-sender-0402",
+        "organizer_name": "孙雨晴",
+        "requesting_party": {
+          "contact_id": "venue-sender-0402",
+          "contact_name": "孙雨晴",
+          "seat_count": 1
+        },
+        "requirement": {
+          "game_type": "hangzhou_mahjong",
+          "max_duration_hours": 3,
+          "planned_start_at": "2026-11-25T20:10:00+08:00",
+          "stake_range": {
+            "max": 3,
+            "min": 1
+          },
+          "start_time": "20:10",
+          "start_time_kind": "scheduled"
+        }
+      }
+    }
+  ],
+  "terminal": {
+    "status": "needs_help",
+    "reason": "max_steps_exceeded",
+    "delivered_receipt_id": "outbound:trace_68b5c8e3f35af0516156a264:1",
+    "created_game": false,
+    "front_review_called": false
+  },
+  "analysis": [
+    "原先「最多打三个钟」是可玩时长上限。新来话更正最早到店 20:10，再给最晚可打到 23:00。下界、硬离店时点、时长上限是三项不同约束。本人明说按此凑人，所以当前组局委托真实有效，但独立核实没有授权固定在 20:10 或其他点开。",
+    "第 1 步完整 HTTP 只给了不完整动作；第 2 步查核已取得但工具层拒绝格式错误。工具 stake_range 已是对象，坏值来自要绑定前轮原话的 fact_assertions，位于同一提案的另一个字段。",
+    "第 3 步先因小时上限缺失被挡；第 4 步又要求落实最早开场。实际还存在同一顾客硬离店时点，补齐小时上限和人齐开的最早时点仍不能落库。",
+    "第 5 步没有查询成功。第 6 步查的是 20:10 至次日 06:00 内的杭麻、1 到 3 底并独立按桌核对 23:00 最晚散场、最多三小时，查询为空。同作用域未过滤局池未证实为空，不能扩大成无全部桌。",
+    "第 7 步实际查到三间可用房，未预约，也未选定开场。第 8 步把 20:10 到店拟成固定开场，被拦。最后只送达等待提示，本轮未到发前审核。"
+  ],
+  "grounded_reply_after_executed_lookup": "按你说的条件，暂时没找到能搭的杭麻。你最早八点十分到、最晚十一点，想约几点开？",
+  "change": "保留原授权，已核实同时存在个人到店下界和硬离店、没有确切开场责任时，在建局反馈一次交代真正待确认的开场。仍用原查局和写入守卫；已做有效查询先反馈，查房结果不替客人定开场。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v8_0402_arrival_and_deadline_feedback_requests_real_opening_without_repeating_queries",
+    "live_replay": "pending",
+    "targeted_tests_passed": 527,
+    "exercised": "以原先四条已交付对话和原独立时间模型输出启动正式 SQLite 工具服务。保留字符串档位事实拒绝。缺上限、补上限或改为 20:10 建定时桌均不得写，查空与三个空房如实保留。另一次原话确认 20:30 开后真实创建，2.5 小时是上限。"
+  }
+}

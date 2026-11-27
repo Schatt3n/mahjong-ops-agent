@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, time, timedelta
 import json
+from pathlib import Path
 
 import pytest
 
@@ -3173,6 +3174,94 @@ def test_v7_0103_certified_empty_pool_is_not_evidence_of_an_unexecuted_deadline_
     assert fallback_read.result["matches"][0]["game"]["game_id"] == late_table.game_id
     assert deadline_read["result"]["matches"] == []
     assert "certified_empty_pool" not in review(accurate, [deadline_read])["game_availability_evidence"]["latest_search"]
+    store._connection.close()
+
+
+def test_v8_0402_arrival_and_deadline_feedback_requests_real_opening_without_repeating_queries(tmp_path):
+    """冻结来话的到店、散场和时长都保留；只查真实库存，另有明确开场才写入。"""
+    path = Path(__file__).resolve().parents[1] / "docs/venue_simulation_evidence/2026-11-27-v8-0402-conditional-opening-deadline.json"
+    archived = json.loads(path.read_text(encoding="utf-8"))
+    lead = archived["ledger"][-2]
+    at = datetime.fromisoformat(lead["sent_at"]).astimezone(SENT.tzinfo)
+    message = _incoming(lead["text"], sent=at, message_id=lead["message_id"])
+    floor = "2026-11-25T20:10:00+08:00"
+    deadline = "2026-11-25T23:00:00+08:00"
+    fixed = "2026-11-25T20:30:00+08:00"
+    store, trace = SQLiteAgentStore(tmp_path / "conditional-window.sqlite3"), InMemoryTraceRecorder()
+    client = ReviewClient([archived["timing_verification"]["raw_json"],
+        _decision(6, clock_role="other", clock_roles=[{"clock_ref": 1, "role": "opening"},
+            {"clock_ref": 2, "role": "departure_deadline"}], opening_window={"start_at": fixed, "end_at": fixed},
+            accepted_stake_range={"min": 1, "max": 3}, max_duration_hours=3, has_fixed_opening_authority=True,
+            opening_customer_ref=6, supporting_customer_refs=[3, 5, 6])])
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=client,
+                                   sandbox_flexible_opening_closes_at=datetime.fromisoformat(deadline).time())
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3}}
+
+    def submit(name, arguments, step, *, command=message, assertions=()):
+        action = AgentAction(goal="按本人确认的时间找桌", objective_status="needs_tool", reasoning_summary="",
+            objective_state={"fact_assertions": list(assertions)},
+            tool_calls=[ToolCall(name, arguments, call_id=f"step-{step}")])
+        result, = service.execute_tool_calls(action, message=command, trace_id=command.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="conditional-0402",
+            run_version=store.conversation_version(command.conversation_id)).tool_results
+        return result
+
+    def create(requirement, step, **kwargs):
+        return submit("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                       "requirement": {**terms, **requirement}}, step, **kwargs)
+
+    with using_clock(lambda: at):
+        store.configure_rooms(["东包间", "西包间", "中包间"])
+        earlier, _ = store.create_game(conversation_id="other-table", organizer_id="host", organizer_name="牌友",
+            requirement={**terms, "planned_start_at": "2026-11-25T19:45:00+08:00",
+                         "start_time_kind": "scheduled", "duration_hours": 3},
+            known_players=[], trace_id="earlier-unrelated")
+        _activate(store, started=datetime.fromisoformat(archived["ledger"][0]["sent_at"]))
+        for row in archived["ledger"][:4]:
+            source_at = datetime.fromisoformat(row["sent_at"])
+            with using_clock(lambda: source_at):
+                if row["direction"] == "inbound":
+                    _persist(store, _incoming(row["text"], sent=source_at, message_id=row["message_id"]))
+                else:
+                    store.append_assistant_turn("dm", row["text"], row["trace_id"],
+                                                metadata={"delivery_status": "delivered"})
+        _persist(store, message)
+        flexible = {"start_time_kind": "asap_when_full"}
+        bad_stake = archived["tool_timeline"][0]["unbound_stake_shape"]
+        rejected_stake = create({**flexible, "must_end_by": deadline}, 1, assertions=bad_stake)
+        absent_cap = create(flexible, 2)
+        capped = create({**flexible, "max_duration_hours": 3}, 3)
+        unconfirmed_fixed = create({"start_time_kind": "scheduled", "planned_start_at": floor,
+                                    "max_duration_hours": 3}, 4)
+        verified = absent_cap.result["table_availability_evidence"]
+        assert verified["arrival_lookup_floor_at"] == floor and verified["must_end_by"] == deadline
+        assert verified["max_duration_hours"] == 3 and verified["has_fixed_opening_authority"] is False
+        query = submit("search_current_games", {"lookup_scope": "personal", "include_nearby": False,
+            "requirement": {**terms, "max_duration_hours": 3, "must_end_by": deadline,
+                            "start_time_range": verified["opening_window"]}}, 5)
+        room = submit("check_room_availability", {"start_at": floor, "end_at": deadline}, 6)
+        later_unconfirmed = create({"start_time_kind": "scheduled", "planned_start_at": floor,
+                                    "max_duration_hours": 3}, 7)
+        assert "stake_range must be an object with min and max" in rejected_stake.error
+        for refused in (absent_cap, capped, unconfirmed_fixed, later_unconfirmed):
+            assert not refused.called and not refused.allowed and refused.error == absent_cap.error
+            assert all(fragment in refused.error for fragment in (floor, deadline, "查房也不能确定开场",
+                        "不再查询同一范围", "只问顾客能接受的具体开场", "waiting_user"))
+        assert query.called and query.allowed and query.result["matches"] == []
+        assert not query.result["customer_reply_contract"]["evidence_scope"]["supports_narrower_empty_claim"]
+        assert room.called and room.result["available_count"] == 3 and set(store.games) == {earlier.game_id}
+        assert not store.room_reservations and not store.invite_drafts
+        assert len(client.calls) == 1
+
+        now_confirmed = _incoming("那就定八点半开吧，十一点得走。麻烦帮我组一桌。", sent=at + timedelta(minutes=1),
+                                  message_id="chose-a-specific-opening")
+        _persist(store, now_confirmed)
+        allowed = create({"start_time_kind": "scheduled", "planned_start_at": fixed,
+                          "max_duration_hours": 2.5}, 1, command=now_confirmed)
+        assert allowed.called and allowed.allowed, allowed.error
+        actual = store.require_game(allowed.result["game"]["game_id"])
+        assert actual.planned_start_at.isoformat() == fixed
+        assert actual.requirement["max_duration_hours"] == 2.5 and "duration_hours" not in actual.requirement
     store._connection.close()
 
 
