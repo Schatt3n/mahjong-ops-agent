@@ -15,7 +15,7 @@ from .venue_dialogues import _live_actor_action
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import _written_games
 from .venue_rolling_companions import TABLE_COMPANION_WAKE
-from .venue_rolling_world import PhysicalActorEvent, VenueRollingWorld, _committed_ids, _four_hour_candidate, _venue_time
+from .venue_rolling_world import ARRIVE_BEFORE_START, PhysicalActorEvent, VenueRollingWorld, _committed_ids, _four_hour_candidate, _venue_time
 from .venue_scenario import ACTUAL_START_DELAY, PLAY_DURATION
 from .venue_table_group import VenueTableGroup
 from .venue_table_opening import TABLE_OPENING_CONFIRM_PREFIX, VenueTableOpening
@@ -24,7 +24,6 @@ from .venue_table_party import VenueTableParty
 
 PLAY_ROLE_KINDS = frozenset({"arrival", "departure"})
 PLAY_TICK_KIND = "physical_tick"
-_ARRIVE_BEFORE_START = timedelta(minutes=1)
 _WAKE_AFTER_RECEIPT = timedelta(minutes=1)
 _TICK_PRECISION = timedelta(microseconds=1)
 _ACTOR_ACTIONS = {"arrival": "arrive", "departure": "leave"}
@@ -79,7 +78,7 @@ class VenueRollingPlayLink:
         event = self.journal.save_decision(event, {"phase": phase})
         wakes = []
         if phase == "arrivals":
-            at = datetime.fromisoformat(event.details["start_at"]) - _ARRIVE_BEFORE_START
+            at = datetime.fromisoformat(event.details["start_at"]) - ARRIVE_BEFORE_START
             wakes = [wakeup.event_id for wakeup in self._wake_players(event, kind="arrival", at=at)]
         self.journal.finish(event, {"phase": phase, "scheduled_wakes": wakes})
 
@@ -102,12 +101,8 @@ class VenueRollingPlayLink:
             if not _committed_ids(game) <= participants.keys():
                 continue
             start = max(_venue_time(game.planned_start_at) + ACTUAL_START_DELAY,
-                        at + _ARRIVE_BEFORE_START + _WAKE_AFTER_RECEIPT)
-            end = start + PLAY_DURATION
-            if (start.date() != _venue_time(game.planned_start_at).date()
-                    or game.expires_at is not None and start >= game.expires_at
-                    or start.date() != end.date()
-                    or not self.world.opens <= start.time() < end.time() <= self.world.closes):
+                        at + ARRIVE_BEFORE_START + _WAKE_AFTER_RECEIPT)
+            if not self.world.accepts_start(game, start):
                 continue
             self._control(game_id, "arrivals", at, start_at=start.isoformat(),
                           participants={person: participants[person] for person in sorted(_committed_ids(game))})
@@ -301,7 +296,7 @@ class VenueRollingPlayLink:
         if plan is not None:
             participant = plan.details["participants"].get(event.actor_id, {})
             start = datetime.fromisoformat(plan.details["start_at"])
-            expected = start - _ARRIVE_BEFORE_START if event.kind == "arrival" else start + PLAY_DURATION
+            expected = start - ARRIVE_BEFORE_START if event.kind == "arrival" else start + PLAY_DURATION
             receipt = participant.get("table_receipt_id") or participant.get("private_receipt_id")
             if (event.origin_id != plan.details["game_id"] or event.caused_by != receipt
                     or event.due_at != expected):

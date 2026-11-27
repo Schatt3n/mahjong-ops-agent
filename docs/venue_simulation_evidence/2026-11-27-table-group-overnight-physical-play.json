@@ -1,0 +1,28 @@
+{
+  "baseline": "fdd4791",
+  "mode": "controlled_offline",
+  "test": "tests/simulation/test_venue_rolling_overnight_play.py",
+  "fixture": {
+    "run_start": "2026-11-27T18:00:00+08:00",
+    "ordinary_role_days": ["2026-11-27", "2026-11-28"],
+    "game_kind": "asap_when_full",
+    "named_seats": 4,
+    "actually_received_votes": 4,
+    "confirmed_opening": "2026-11-28T23:57:00+08:00",
+    "arrival_events": "2026-11-28T23:59:00+08:00",
+    "actual_start": "2026-11-29T00:00:00+08:00",
+    "actual_finish": "2026-11-29T04:00:00+08:00"
+  },
+  "before_fix": "同一小群四票已经确认。配置为次日 06:00、次日 04:00 和全天营业时，实际到场计划都为零。",
+  "after_fix": [
+    {"closes": "06:00", "arrival_plans": 1, "verified_arrivals": 4, "verified_departures": 4, "room_released": true,
+      "same_room_available_from": "2026-11-29T04:00:00+08:00"},
+    {"closes": "04:00", "arrival_plans": 1, "verified_arrivals": 4, "verified_departures": 4, "room_released": true,
+      "same_room_available_from": "2026-11-29T12:00:00+08:00"},
+    {"closes": "12:00", "meaning": "全天营业", "arrival_plans": 1, "verified_arrivals": 4,
+      "verified_departures": 4, "room_released": true, "same_room_available_from": "2026-11-29T04:00:00+08:00"}
+  ],
+  "default_control": {"closes": "23:50", "confirmed_opening": "19:48", "planned_finish": "23:48",
+    "actual_finish_if_started": "23:51", "arrival_plans": 0, "room_reservations": 0},
+  "scope": "四位实际送达的角色回执由离线决定提供。第三天只有已约定桌的到场、占房和散场延续。普通活动仍只覆盖原两天。"
+}

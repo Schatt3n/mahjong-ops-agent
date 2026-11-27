@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -14,8 +14,12 @@ from mahjong_agent_runtime.domains.model_context import has_agreed_game_duration
 from mahjong_agent_runtime.domains.value_utils import smoke_matches
 from mahjong_agent_runtime.models import DEFAULT_TZ, Game, GameStatus, using_clock
 
+from .venue_hours import VenueHours
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_scenario import PLAY_DURATION, PROBE_DURATION, VENUE
+
+
+ARRIVE_BEFORE_START = timedelta(minutes=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,14 +49,17 @@ class VenueRollingWorld:
             raise ValueError("physical play requires the current run's sandbox business store")
         self.store = store
         self.journal = VenueRoleJournal(self.run_dir / "physical_events.sqlite3")
-        self.opens = time.fromisoformat(VENUE["opens"])
-        self.closes = time.fromisoformat(VENUE["closes"])
+        self.hours = VenueHours.from_config(VENUE)
 
     def schedule(self, game_id: str, *, start_at: datetime, arrivals: Iterable[PhysicalActorEvent]) -> dict:
-        """签到来源必须与已落库四席一致，固定时长及实际起止须在本日营业时间内。"""
+        """签到来源必须与已落库四席一致，实际四小时须在商量好的连续营业窗口内。"""
         start = _venue_time(start_at)
         end = start + PLAY_DURATION
-        arrivals = _actor_evidence(arrivals, game_id=game_id, action="arrive", at=start)
+        opens, closes = self.hours.service_window(start)
+        midnight = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        # 跨夜窗口保留本营业段在午夜前的签到。全天营业只额外接受预设的一分钟提前签到。
+        arrival_floor = min(midnight, start - ARRIVE_BEFORE_START if closes is None else opens)
+        arrivals = _actor_evidence(arrivals, game_id=game_id, action="arrive", at=start, not_before=arrival_floor)
         details = {"actual_start_at": start.isoformat(), "actual_end_at": end.isoformat(), "arrivals": arrivals}
         with self.journal.run_owner():
             existing = next((event for event in self.journal.events()
@@ -65,12 +72,19 @@ class VenueRollingWorld:
                     datetime.fromisoformat(row["at"]) < game.created_at for row in arrivals.values()
                 ):
                     return {"status": "not_observed", "reason": "missing_or_unmatched_arrivals"}
-                if (start < game.planned_start_at or (game.expires_at and start >= game.expires_at)
-                        or start.date() != end.date() or not self.opens <= start.time() < end.time() <= self.closes):
+                if not self.accepts_start(game, start):
                     return {"status": "not_observed", "reason": "outside_game_or_venue_hours"}
             event = self.journal.enqueue(actor_id=game_id, kind="start", origin_id=game_id,
                                          due_at=start, details=details)
         return {"status": "scheduled", "event_id": event.event_id}
+
+    def accepts_start(self, game: Game, start: datetime) -> bool:
+        """核对实际开场仍承接原约定与到期条件，延迟后的结束时刻也要能落在该窗口。"""
+        if game.planned_start_at is None:
+            return False
+        planned = _venue_time(game.planned_start_at)
+        return (planned <= start and (game.expires_at is None or start < game.expires_at)
+                and self.hours.covers(planned, start + PLAY_DURATION))
 
     def tick(self, through: datetime, *, departures: Iterable[PhysicalActorEvent] = ()) -> dict:
         """按虚拟时刻处理到期事件；本轮已真实决定的离场必须随散场时刻传入。"""
@@ -132,6 +146,8 @@ class VenueRollingWorld:
         current = self.store.require_game(event.actor_id)
         if current.actual_started_at is None and not _four_hour_candidate(current):
             return {"status": "blocked", "reason": "committed_game_changed"}
+        if current.actual_started_at is None and not self.accepts_start(current, at):
+            return {"status": "blocked", "reason": "outside_game_or_venue_hours"}
         trace_id = self._trace(event)
         try:
             game, _ = self.store.start_game_play(event.actor_id, room_id=room_id, at=at, trace_id=trace_id,
@@ -172,8 +188,11 @@ class VenueRollingWorld:
                  and persisted.actual_ended_at - persisted.actual_started_at == PLAY_DURATION)
         room_released = (released.room_id == room_id and released.status == "released" and any(
             row["entity_id"] == reservation_id and row["to_status"] == "released" for row in transitions))
-        available_at = at if at.time() < self.closes else datetime.combine(at.date() + timedelta(days=1), self.opens, at.tzinfo)
-        available_until = min(available_at + PROBE_DURATION, datetime.combine(available_at.date(), self.closes, at.tzinfo))
+        next_opens, next_closes = self.hours.service_window(at)
+        available_at = max(at, next_opens)
+        available_until = available_at + PROBE_DURATION
+        if next_closes is not None:
+            available_until = min(available_until, next_closes)
         availability = reopened.search_room_availability(start_at=available_at, end_at=available_until)
         return {"status": "finished" if exact and room_released else "blocked", "actual_four_hour_finish": exact,
                 "actual_ended_at": persisted.actual_ended_at.isoformat() if persisted.actual_ended_at else None,
@@ -248,15 +267,17 @@ def _four_hour_candidate(game: Game) -> bool:
             and has_agreed_game_duration(game.requirement) and duration_hours_from_requirement(game.requirement) == 4)
 
 
-def _actor_evidence(events: Iterable[PhysicalActorEvent], *, game_id: str, action: str, at: datetime) -> dict:
-    """筛选同局同日决定，禁止把同一个来源事件重复计成数位角色。"""
+def _actor_evidence(events: Iterable[PhysicalActorEvent], *, game_id: str, action: str, at: datetime,
+                    not_before: datetime | None = None) -> dict:
+    """只接受同局有效时段的决定，离场要发生在实际散场时点。"""
     rows = {}
     ids = set()
+    first = not_before or at
     for event in events:
         if event.game_id != game_id or event.action != action:
             continue
         stamp = _venue_time(event.at)
-        if stamp.date() != at.date() or stamp > at or (action == "leave" and stamp != at):
+        if not first <= stamp <= at:
             continue
         if not event.event_id or not event.actor_id or event.source not in {"model", "controlled"}:
             raise ValueError("physical actor evidence requires a real decision reference")

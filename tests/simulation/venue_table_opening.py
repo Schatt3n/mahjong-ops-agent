@@ -1,7 +1,7 @@
 """人齐开桌群的开场协商，以实际收件支撑同一版时间的四席确认。"""
 
 from dataclasses import replace
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 import json
 
 from mahjong_agent_runtime.domains.game_commitments import active_game_participant_ids, ready_commitment_conflicts
@@ -12,6 +12,7 @@ from mahjong_agent_runtime.domains.model_context import has_agreed_game_duration
 from mahjong_agent_runtime.models import DEFAULT_TZ, GameStatus, StateTransition, using_clock
 
 from .venue_channel import AGENT_ID, MessageEnvelope
+from .venue_hours import VenueHours
 from .venue_table_group import TableGroupReceipt, VenueTableGroup
 from .venue_scenario import VENUE
 
@@ -26,19 +27,6 @@ def table_opening_confirmation_text(start: datetime, *, at: datetime) -> str:
     start, at = _local(start), _local(at)
     when = start.strftime("%H:%M" if start.date() == at.date() else "%m月%d日 %H:%M")
     return f"那就 {when} 开，大家按这个时间到哈。"
-
-
-def _within_venue_hours(start: datetime, end: datetime | None) -> bool:
-    """按配置区分正常关门、跨日关门和全天营业。"""
-    opens = time.fromisoformat(VENUE["opens"])
-    closes = time.fromisoformat(VENUE["closes"])
-    if opens == closes:
-        return end is None or end > start
-    overnight = closes < opens
-    business_date = start.date() - timedelta(days=1) if overnight and start.time() < closes else start.date()
-    opened_at = datetime.combine(business_date, opens, tzinfo=DEFAULT_TZ)
-    closed_at = datetime.combine(business_date + timedelta(days=int(overnight)), closes, tzinfo=DEFAULT_TZ)
-    return opened_at <= start < closed_at and (end is None or start < end <= closed_at)
 
 
 class VenueTableOpening:
@@ -87,7 +75,7 @@ class VenueTableOpening:
         start = _local(start)
         if same_day_as is not None:
             previous = _local(same_day_as)
-            if previous.date() != start.date() and not _within_venue_hours(previous, start):
+            if previous.date() != start.date() and not VenueHours.from_config(VENUE).covers(previous, start):
                 return False
         return self._within_bounded_opening(self.store.require_game(self.game_id), start)
 
@@ -97,7 +85,7 @@ class VenueTableOpening:
         end = (start + timedelta(hours=duration_hours_from_requirement(game.requirement))
                if has_agreed_game_duration(game.requirement) else None)
         return ((floor is None or floor <= start) and (game.expires_at is None or start < game.expires_at)
-                and _within_venue_hours(start, end))
+                and VenueHours.from_config(VENUE).covers(start, end))
 
     def record_proposal(self, receipt: TableGroupReceipt, *, start_at: datetime) -> None:
         """只有四席主人实际收到的那份店家提议才成为有效版本。"""
