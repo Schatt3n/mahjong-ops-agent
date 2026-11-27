@@ -61,6 +61,8 @@
 
 同行专项支持从正常滚动入口复跑。`scripts/run_venue_table_opening.py --rolling-companion compatible` 检查单席补全和四人开场，`--rolling-companion invitee-unavailable` 检查因排班拒绝或沉默。两档用 `--prepare-only` 核对同一套私聊来源、旁观隔离和日程，均通过；常规仿真专项 723 项通过，同组档和真实 OpenCode 回放按各自证据另记。
 
+同行兼容档首跑确有 OpenCode 报名联系人发出邀请，同行本人接受并接管匿名席。店家随后向四位实发到店问题，提议 18:12，收三份同意。另一位说最早 18:14，问晚两分钟能不能搭，店家识别为其他答复，未提新时间。旧方案未写入。完整原话、票据和角色动作已保存，继续回放有明确迟到约束的改约分支。 [实际邀请、四人群聊与原判](venue_simulation_evidence/2026-11-27-real-companion-compatible-v1.json)
+
 换座后先暂停旧名册的新投递。补位经正式业务确认并恢复四个具名席位时，模拟器在原桌群保存进退群回执，发起一轮新协商。原先三人的同意都留在旧提议里。新人只能收到入群后的消息，退出者只保留此前收到的内容。受控回归在名册事务落盘后中断并重开，复跑核对旧版待发未外送、新四人同意后才写同一局 19:30。 [换座与恢复回归](../tests/simulation/test_venue_rolling_opening.py)
 
 新增可回放的人齐开协商条目，同时覆盖四人改约与双方时间冲突。桌群、角色、独立核验及开场边界合并检查 384 项通过。 [事件测试资产](../eval/golden/venue_event_driven_scenarios.json)
